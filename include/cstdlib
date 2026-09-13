@@ -1,0 +1,3 @@
+#include "../cstdlib.h"
+/* Also include C stdlib.h for global namespace compatibility */
+#include <stdlib.h>
