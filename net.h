@@ -21,7 +21,7 @@
 #include "memory.h"
 #include "chrono.h"
 #include "cerrno.h"
-#include "../../../src/shared/ipv6_text.h"
+#include <rin/net/ipv6_text.h>
 #include "../../../src/shared/dns_abi.h"
 #include "../../../src/shared/netif_addrconfig_policy.h"
 
