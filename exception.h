@@ -10,7 +10,7 @@
 #ifndef RINCXX_EXCEPTION_H
 #define RINCXX_EXCEPTION_H
 
-#include <stddef.h>
+#include "../libc/stddef.h"
 #define RINCXX_EXCEPTION_IN_PROGRESS 1
 #include "string.h"
 #undef RINCXX_EXCEPTION_IN_PROGRESS

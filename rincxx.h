@@ -114,6 +114,7 @@ inline void operator delete(void* ptr, size_t) noexcept {
 inline void operator delete[](void* ptr, size_t) noexcept {
     rin_free(ptr);
 }
+#endif
 
 /* placement new */
 inline void* operator new(size_t, void* ptr) noexcept {
@@ -138,7 +139,6 @@ inline void operator delete[](void* ptr, void* placement) noexcept {
     (void)ptr;
     (void)placement;
 }
-#endif
 
 /* ═══════════════════════════════════════════════════════════════
  * 基本型定義

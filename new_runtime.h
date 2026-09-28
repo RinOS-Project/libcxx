@@ -3,7 +3,7 @@
 #ifndef RIN_LIBCXX_NEW_RUNTIME_H
 #define RIN_LIBCXX_NEW_RUNTIME_H
 
-#include <stddef.h>
+#include "../libc/stddef.h"
 
 #ifdef __cplusplus
 extern "C" {

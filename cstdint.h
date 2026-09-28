@@ -9,7 +9,11 @@
 /* The freestanding Rin ABI intentionally fixes 64-bit integer aliases to
  * long long.  Importing Clang's hosted <stdint.h> afterwards can select long
  * on x86_64 and redeclare every 64-bit/fast/intmax type incompatibly. */
-#if defined(RIN_FREESTANDING)
+#if defined(_STDINT_H)
+/* A public Rin C header may already have fixed the ABI aliases.  Do not
+ * import the hosted MSVC/Clang aliases afterwards; they use different fast
+ * integer types on Windows and redeclare the same names. */
+#elif defined(RIN_FREESTANDING)
 #include "../libc/stdint.h"
 #else
 #include <stdint.h>
