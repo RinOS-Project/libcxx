@@ -532,7 +532,7 @@ inline void __atomic_wait_notify(const void* address, bool all) noexcept {
      * observed the old value receives EAGAIN when the notify won the race.
      * Wake one for notify_one and all for notify_all; hash collisions still
      * only cause a value recheck. */
-    (void)syscall(SYS_futex, const_cast<uint32_t*>(sequence), FUTEX_WAKE,
+    (void)syscall(SYS_futex, const_cast<uint32_t*>(sequence), FUTEX_WAKE_PRIVATE,
                   all ? 0x7fffffff : 1, nullptr, nullptr, 0);
 #else
     (void)all;
@@ -542,7 +542,7 @@ inline void __atomic_wait_notify(const void* address, bool all) noexcept {
 inline void __atomic_wait_futex(volatile uint32_t* sequence,
                                 uint32_t generation) noexcept {
 #if defined(RIN_ATOMIC_HAS_LINUX_FUTEX)
-    (void)syscall(SYS_futex, const_cast<uint32_t*>(sequence), FUTEX_WAIT,
+    (void)syscall(SYS_futex, const_cast<uint32_t*>(sequence), FUTEX_WAIT_PRIVATE,
                   static_cast<int>(generation), nullptr, nullptr, 0);
 #else
     (void)sequence;

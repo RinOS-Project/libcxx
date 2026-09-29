@@ -67,7 +67,7 @@ public:
     void count_down(ptrdiff_t n = 1) noexcept {
         if (counter_.fetch_sub(n, memory_order_release) == n) {
             __atomic_add_fetch(&generation_, 1, __ATOMIC_RELEASE);
-            syscall(SYS_futex, generation_address(), FUTEX_WAKE,
+            syscall(SYS_futex, generation_address(), FUTEX_WAKE_PRIVATE,
                     0x7fffffff, NULL, NULL, 0);
         }
     }
@@ -86,7 +86,7 @@ public:
                 __atomic_load_n(&generation_, __ATOMIC_ACQUIRE);
             if (counter_.load(memory_order_acquire) == 0)
                 return;
-            syscall(SYS_futex, generation_address(), FUTEX_WAIT,
+            syscall(SYS_futex, generation_address(), FUTEX_WAIT_PRIVATE,
                     generation, NULL, NULL, 0);
         }
     }

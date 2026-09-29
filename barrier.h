@@ -72,7 +72,7 @@ class barrier {
                                             __ATOMIC_RELEASE,
                                             __ATOMIC_RELAXED)) {
         }
-        syscall(SYS_futex, wake_address(), FUTEX_WAKE,
+        syscall(SYS_futex, wake_address(), FUTEX_WAKE_PRIVATE,
                 0x7fffffff, NULL, NULL, 0);
     }
 
@@ -140,7 +140,7 @@ public:
                 if (generation == ~0U) {
                     (void)syscall(SYS_sched_yield);
                 } else {
-                    syscall(SYS_futex, wake_address(), FUTEX_WAIT,
+                    syscall(SYS_futex, wake_address(), FUTEX_WAIT_PRIVATE,
                             generation, NULL, NULL, 0);
                 }
             }

@@ -53,12 +53,12 @@ inline int* mutex_futex_address(volatile int* state) noexcept {
 }
 
 inline void mutex_futex_wait(volatile int* state) noexcept {
-    (void)syscall(SYS_futex, mutex_futex_address(state), FUTEX_WAIT, 2,
+    (void)syscall(SYS_futex, mutex_futex_address(state), FUTEX_WAIT_PRIVATE, 2,
                   nullptr, nullptr, 0);
 }
 
 inline void mutex_futex_wake(volatile int* state) noexcept {
-    (void)syscall(SYS_futex, mutex_futex_address(state), FUTEX_WAKE, 1,
+    (void)syscall(SYS_futex, mutex_futex_address(state), FUTEX_WAKE_PRIVATE, 1,
                   nullptr, nullptr, 0);
 }
 
@@ -433,7 +433,7 @@ namespace __detail {
 
 inline void once_wake(volatile int* state) noexcept {
 #if defined(RIN_MUTEX_HAS_LINUX_FUTEX)
-    (void)syscall(SYS_futex, state, FUTEX_WAKE, 0x7fffffff,
+    (void)syscall(SYS_futex, state, FUTEX_WAKE_PRIVATE, 0x7fffffff,
                   nullptr, nullptr, 0);
 #else
     (void)state;
@@ -442,7 +442,7 @@ inline void once_wake(volatile int* state) noexcept {
 
 inline void once_wait(volatile int* state) noexcept {
 #if defined(RIN_MUTEX_HAS_LINUX_FUTEX)
-    (void)syscall(SYS_futex, state, FUTEX_WAIT, 1, nullptr, nullptr, 0);
+    (void)syscall(SYS_futex, state, FUTEX_WAIT_PRIVATE, 1, nullptr, nullptr, 0);
 #else
     __asm__ volatile("pause" ::: "memory");
     (void)state;
