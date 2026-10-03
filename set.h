@@ -1600,8 +1600,8 @@ private:
         }
         value_type* new_data = allocate_data(new_cap);
 
-        size_type constructed = 0;
 #if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+        size_type constructed = 0;
         try {
 #endif
             for (size_type i = 0; i < new_size; ++i) {
@@ -1611,7 +1611,9 @@ private:
                     size_type old_i = i < pos ? i : i - 1;
                     construct_value(new_data + i, data_[old_i]);
                 }
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
                 ++constructed;
+#endif
             }
 #if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
         } catch (...) {

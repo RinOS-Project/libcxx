@@ -26,7 +26,7 @@ namespace std {
 
 template<typename T>
 class object_pool {
-    static constexpr size_t PAGE_SIZE = 4096;
+    static constexpr size_t OBJECT_POOL_PAGE_SIZE = 4096;
     static constexpr size_t HEADER_SIZE = sizeof(void*);  /* PageHeader.next */
 
     /* フリーノード（解放済みオブジェクト領域にオーバーレイ） */
@@ -53,7 +53,7 @@ class object_pool {
 
     /* ヘッダ後の使用可能領域 */
     static constexpr size_t ALIGNED_HEADER = (sizeof(PageHeader) + OBJ_ALIGN - 1) & ~(OBJ_ALIGN - 1);
-    static constexpr size_t USABLE = PAGE_SIZE > ALIGNED_HEADER ? PAGE_SIZE - ALIGNED_HEADER : 0;
+    static constexpr size_t USABLE = OBJECT_POOL_PAGE_SIZE > ALIGNED_HEADER ? OBJECT_POOL_PAGE_SIZE - ALIGNED_HEADER : 0;
 
     /* ページあたりオブジェクト数 */
     static constexpr size_t OBJS_PER_PAGE = USABLE / ALIGNED_OBJ > 0 ? USABLE / ALIGNED_OBJ : 1;
@@ -61,7 +61,7 @@ class object_pool {
     /* 実際のページサイズ（大きいオブジェクトはPAGE_SIZEを超える） */
     static constexpr size_t ACTUAL_PAGE_SIZE =
         OBJS_PER_PAGE > 0 && USABLE >= ALIGNED_OBJ
-            ? PAGE_SIZE
+            ? OBJECT_POOL_PAGE_SIZE
             : ALIGNED_HEADER + ALIGNED_OBJ;
 
     FreeNode* m_free;
