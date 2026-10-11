@@ -591,7 +591,7 @@ class shared_ptr {
     template<typename T1, typename U1> friend shared_ptr<T1> const_pointer_cast(shared_ptr<U1>&&) noexcept;
     template<typename T1, typename U1> friend shared_ptr<T1> reinterpret_pointer_cast(const shared_ptr<U1>&) noexcept;
     template<typename T1, typename U1> friend shared_ptr<T1> reinterpret_pointer_cast(shared_ptr<U1>&&) noexcept;
-    template<typename U> friend class owner_less;
+    template<typename U> friend struct owner_less;
     template<typename T1, typename Alloc, typename... Args,
              typename enable_if<!is_array<T1>::value, int>::type>
     friend shared_ptr<T1> allocate_shared(const Alloc&, Args&&...);
@@ -1073,7 +1073,7 @@ template<typename T>
 class weak_ptr {
     template<typename U> friend class shared_ptr;
     template<typename U> friend class weak_ptr;
-    template<typename U> friend class owner_less;
+    template<typename U> friend struct owner_less;
     
 private:
     using element_type = typename remove_extent<T>::type;
