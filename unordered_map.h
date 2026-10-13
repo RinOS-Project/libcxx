@@ -758,46 +758,11 @@ public:
     
     /* 要素アクセス */
     mapped_type& operator[](const key_type& key) {
-        size_t h = m_hash(key);
-        ensure_bucket_storage();
-        size_type idx = bucket_index(h);
-        
-        for (Node* node = m_buckets[idx]; node; node = node->next) {
-            if (node->hash_value == h && m_equal(node->data().first, key)) {
-                return node->data().second;
-            }
-        }
-        
-        /* 新規挿入 */
-        rehash_if_needed();
-        idx = bucket_index(h);
-        
-        Node* new_node = allocate_node(key, mapped_type{}, h);
-        new_node->next = m_buckets[idx];
-        m_buckets[idx] = new_node;
-        ++m_size;
-        return new_node->data().second;
+        return try_emplace(key).first->second;
     }
     
     mapped_type& operator[](key_type&& key) {
-        size_t h = m_hash(key);
-        ensure_bucket_storage();
-        size_type idx = bucket_index(h);
-        
-        for (Node* node = m_buckets[idx]; node; node = node->next) {
-            if (node->hash_value == h && m_equal(node->data().first, key)) {
-                return node->data().second;
-            }
-        }
-        
-        rehash_if_needed();
-        idx = bucket_index(h);
-        
-        Node* new_node = allocate_node(std::move(key), mapped_type{}, h);
-        new_node->next = m_buckets[idx];
-        m_buckets[idx] = new_node;
-        ++m_size;
-        return new_node->data().second;
+        return try_emplace(std::move(key)).first->second;
     }
 
 #if defined(RIN_UNORDERED_HAS_HETERO_INSERTION)
