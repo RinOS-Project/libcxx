@@ -1775,14 +1775,15 @@ public:
 
 #if __cplusplus >= 202002L
     friend constexpr auto iter_move(const move_iterator& value)
-        noexcept(noexcept(ranges::iter_move(value.current)))
-        -> decltype(ranges::iter_move(value.current)) {
+        noexcept(noexcept(ranges::iter_move(declval<const Iterator&>())))
+        -> decltype(ranges::iter_move(declval<const Iterator&>())) {
         return ranges::iter_move(value.current);
     }
 
     friend constexpr void iter_swap(move_iterator& left,
                                     move_iterator& right)
-        noexcept(noexcept(ranges::iter_swap(left.current, right.current))) {
+        noexcept(noexcept(ranges::iter_swap(declval<Iterator&>(),
+                                            declval<Iterator&>()))) {
         ranges::iter_swap(left.current, right.current);
     }
 #endif
