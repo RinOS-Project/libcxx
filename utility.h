@@ -509,7 +509,14 @@ constexpr detail::copy_cvref_t<T, remove_reference_t<U>> forward_like(U&& value)
     return static_cast<result_type>(value);
 }
 
+namespace detail {
+inline void unreachable_constant_evaluation() noexcept {}
+}
+
 [[noreturn]] constexpr void unreachable() noexcept {
+    // A non-constexpr call makes constant evaluation fail without returning
+    // from a function declared [[noreturn]]. Runtime always takes the builtin.
+    if (is_constant_evaluated()) detail::unreachable_constant_evaluation();
     __builtin_unreachable();
 }
 #endif
