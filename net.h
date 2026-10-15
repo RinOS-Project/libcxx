@@ -22,8 +22,8 @@
 #include "chrono.h"
 #include "cerrno.h"
 #include <rin/net/ipv6_text.h>
-#include "../../../src/shared/dns_abi.h"
-#include "../../../src/shared/netif_addrconfig_policy.h"
+#include <rin/net/dns_abi.h>
+#include <rin/net/netif_addrconfig_policy.h>
 
 /* C socket API */
 extern "C" {
