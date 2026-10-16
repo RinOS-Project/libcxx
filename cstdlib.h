@@ -47,7 +47,7 @@
 #endif
 #if defined(RIN_FREESTANDING)
 #include "../libc/sys/syscall.h"
-#include "../libc/internal/rin_system_owner.h"
+#include "../../include/rinos/internal/rin_system_owner.h"
 #endif
 #include "../libunicode/rin_unicode.h"
 #if __cplusplus >= 201703L
@@ -59,7 +59,7 @@
 #define RINCXX_CSTDLIB_PARSE_BINARY80 1
 #define RIN_FP_PARSE_BINARY80 1
 #endif
-#include "../libc/internal/rin_float_parse.h"
+#include "../../include/rinos/internal/rin_float_parse.h"
 #ifdef RINCXX_CSTDLIB_PARSE_BINARY80
 #undef RIN_FP_PARSE_BINARY80
 #undef RINCXX_CSTDLIB_PARSE_BINARY80

@@ -16,7 +16,7 @@
 #include "initializer_list.h"
 #include "memory.h"   /* std::allocator and allocator_traits */
 #include "__string_hash.h"
-#include "../libc/internal/rin_float_parse.h"
+#include "../../include/rinos/internal/rin_float_parse.h"
 
 #if __cplusplus >= 202002L
 #include "compare.h"
