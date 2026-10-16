@@ -11,6 +11,8 @@
 #include "../libc/stdint.h"
 #if defined(RIN_FREESTANDING) && RIN_FREESTANDING
 #include "../libc/rin_stdlib_runtime.h"
+#include "../libc/sys/syscall.h"
+#include "../libc/internal/rin_system_owner.h"
 #endif
 
 /* A host C++ <stdlib.h>/<cstdlib> included before this header has already
@@ -397,7 +399,7 @@ namespace std {
     }
 
     inline double atof(const char* s) {
-#if __cplusplus >= 201703L
+#if __cplusplus >= 201703L && !defined(RINCXX_STRING_H)
         return __detail::convert_floating<double>(s, nullptr);
 #else
         return __detail::convert_floating_double(s, nullptr);
@@ -426,7 +428,7 @@ namespace std {
     }
 
     inline double strtod(const char* s, char** endptr) {
-#if __cplusplus >= 201703L
+#if __cplusplus >= 201703L && !defined(RINCXX_STRING_H)
         return __detail::convert_floating<double>(s, endptr);
 #else
         return __detail::convert_floating_double(s, endptr);
@@ -434,7 +436,7 @@ namespace std {
     }
 
     inline float strtof(const char* s, char** endptr) {
-#if __cplusplus >= 201703L
+#if __cplusplus >= 201703L && !defined(RINCXX_STRING_H)
         return __detail::convert_floating<float>(s, endptr);
 #else
         return __detail::convert_floating_float(s, endptr);
@@ -442,7 +444,7 @@ namespace std {
     }
 
     inline long double strtold(const char* s, char** endptr) {
-#if __cplusplus >= 201703L
+#if __cplusplus >= 201703L && !defined(RINCXX_STRING_H)
         return __detail::convert_floating<long double>(s, endptr);
 #else
         return __detail::convert_floating_long_double(s, endptr);
