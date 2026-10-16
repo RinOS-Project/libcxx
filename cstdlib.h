@@ -47,7 +47,7 @@
 #endif
 #if defined(RIN_FREESTANDING)
 #include "../libc/sys/syscall.h"
-#include "../../include/rinos/internal/rin_system_owner.h"
+#include "../libc/internal/rin_system_owner.h"
 #endif
 #include "../libunicode/rin_unicode.h"
 #if __cplusplus >= 201703L
