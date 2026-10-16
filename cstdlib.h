@@ -59,7 +59,7 @@
 #define RINCXX_CSTDLIB_PARSE_BINARY80 1
 #define RIN_FP_PARSE_BINARY80 1
 #endif
-#include "../../include/rinos/internal/rin_float_parse.h"
+#include "../libc/internal/rin_float_parse.h"
 #ifdef RINCXX_CSTDLIB_PARSE_BINARY80
 #undef RIN_FP_PARSE_BINARY80
 #undef RINCXX_CSTDLIB_PARSE_BINARY80
