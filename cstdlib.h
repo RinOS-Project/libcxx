@@ -83,7 +83,7 @@ extern "C" void quick_exit(int status) __attribute__((noreturn));
 #if !defined(environ)
 extern "C" char** environ;
 #endif
-#if !defined(RIN_FREESTANDING)
+#if !defined(RIN_FREESTANDING) || !RIN_FREESTANDING
 extern "C" void exit(int status) __attribute__((noreturn));
 extern "C" void _Exit(int status) __attribute__((noreturn));
 extern "C" void abort(void) __attribute__((noreturn));
@@ -127,7 +127,7 @@ namespace std {
     using ::at_quick_exit;
     using ::quick_exit;
 
-#if !defined(RIN_FREESTANDING)
+#if !defined(RIN_FREESTANDING) || !RIN_FREESTANDING
     /* Preserve the host process-control ABI when this header is first.  A
      * later host <stdlib.h> can safely re-export these same entities. */
     using ::exit;
@@ -597,7 +597,7 @@ namespace std {
     }
 
     inline char* getenv(const char* name) {
-#if defined(RIN_FREESTANDING) && defined(RIN_USERSPACE)
+#if defined(RIN_FREESTANDING) && RIN_FREESTANDING && defined(RIN_USERSPACE)
         return rin_stdlib_getenv(name);
 #else
         size_t name_length = __detail::environment_bounded_length(name);
@@ -648,7 +648,7 @@ namespace std {
     }
 
     inline int system(const char* command) {
-#if !defined(RIN_FREESTANDING)
+#if !defined(RIN_FREESTANDING) || !RIN_FREESTANDING
         /* Hosted builds already have a process command processor.  Delegate
          * both the NULL availability query and command status to that C ABI
          * instead of claiming a shell is unavailable unconditionally. */
