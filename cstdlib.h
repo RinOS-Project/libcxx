@@ -9,6 +9,9 @@
 
 #include "../libc/stddef.h"
 #include "../libc/stdint.h"
+#if defined(RIN_FREESTANDING) && RIN_FREESTANDING
+#include "../libc/rin_stdlib_runtime.h"
+#endif
 
 /* A host C++ <stdlib.h>/<cstdlib> included before this header has already
  * populated namespace std.  Adding Rin inline definitions beside it is
@@ -42,28 +45,21 @@
  * violation; use the already selected host errno owner there. */
 #if !defined(RIN_FREESTANDING) && defined(__STDC_HOSTED__) && __STDC_HOSTED__
 #include <errno.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+double strtod(const char*, char**) noexcept;
+float strtof(const char*, char**) noexcept;
+long double strtold(const char*, char**) noexcept;
+#ifdef __cplusplus
+}
+#endif
 #else
 #include "../libc/errno.h"
 #endif
-#if defined(RIN_FREESTANDING)
-#include "../libc/sys/syscall.h"
-#include "../libc/internal/rin_system_owner.h"
-#endif
 #include "../libunicode/rin_unicode.h"
-#if __cplusplus >= 201703L
+#if __cplusplus >= 201703L && !defined(RINCXX_STRING_H)
 #include "charconv.h"
-#else
-#if defined(__LDBL_MANT_DIG__) && defined(__LDBL_MAX_EXP__) && \
-    __LDBL_MANT_DIG__ == 64 && __LDBL_MAX_EXP__ == 16384 && \
-    defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-#define RINCXX_CSTDLIB_PARSE_BINARY80 1
-#define RIN_FP_PARSE_BINARY80 1
-#endif
-#include "../libc/internal/rin_float_parse.h"
-#ifdef RINCXX_CSTDLIB_PARSE_BINARY80
-#undef RIN_FP_PARSE_BINARY80
-#undef RINCXX_CSTDLIB_PARSE_BINARY80
-#endif
 #endif
 
 #ifndef RAND_MAX
@@ -296,7 +292,7 @@ namespace std {
         /* C++11/14 cannot expose the C++17 charconv parser.  The libc parser
          * has the same classic-locale conversion contract and is independent
          * of C++ language-mode declarations. */
-#if __cplusplus >= 201703L
+#if __cplusplus >= 201703L && !defined(RINCXX_STRING_H)
         template<typename Floating>
         inline Floating convert_floating(const char* string, char** endptr) {
             const char* original = string;
@@ -358,44 +354,27 @@ namespace std {
         }
 #else
         inline float convert_floating_float(const char* string, char** endptr) {
-            rin_float_parse_result parsed = rin_float_parse_binary32(string);
-            if (endptr) *endptr = const_cast<char*>(parsed.end);
-            if (parsed.invalid_input) {
-                if (endptr) *endptr = const_cast<char*>(string);
-                errno = EINVAL;
-                return 0.0f;
-            }
-            if (parsed.range_direction != 0 || parsed.subnormal) errno = ERANGE;
-            return rin_float_parse_binary32_value(parsed.bits);
+#if defined(RIN_FREESTANDING) && RIN_FREESTANDING
+            return rin_stdlib_strtof(string, endptr);
+#else
+            return ::strtof(string, endptr);
+#endif
         }
 
         inline double convert_floating_double(const char* string, char** endptr) {
-            rin_float_parse_result parsed = rin_float_parse_binary64(string);
-            if (endptr) *endptr = const_cast<char*>(parsed.end);
-            if (parsed.invalid_input) {
-                if (endptr) *endptr = const_cast<char*>(string);
-                errno = EINVAL;
-                return 0.0;
-            }
-            if (parsed.range_direction != 0 || parsed.subnormal) errno = ERANGE;
-            return rin_float_parse_binary64_value(parsed.bits);
+#if defined(RIN_FREESTANDING) && RIN_FREESTANDING
+            return rin_stdlib_strtod(string, endptr);
+#else
+            return ::strtod(string, endptr);
+#endif
         }
 
         inline long double convert_floating_long_double(const char* string,
                                                         char** endptr) {
-#if defined(RIN_FP_HAS_BINARY80)
-            rin_long_double_parse_result parsed = rin_float_parse_binary80(string);
-            if (endptr) *endptr = const_cast<char*>(parsed.end);
-            if (parsed.invalid_input) {
-                if (endptr) *endptr = const_cast<char*>(string);
-                errno = EINVAL;
-                return 0.0L;
-            }
-            if (parsed.range_direction != 0 || parsed.subnormal) errno = ERANGE;
-            return parsed.value;
+#if defined(RIN_FREESTANDING) && RIN_FREESTANDING
+            return rin_stdlib_strtold(string, endptr);
 #else
-            return static_cast<long double>(
-                convert_floating_double(string, endptr));
+            return ::strtold(string, endptr);
 #endif
         }
 #endif
@@ -617,6 +596,9 @@ namespace std {
     }
 
     inline char* getenv(const char* name) {
+#if defined(RIN_FREESTANDING) && defined(RIN_USERSPACE)
+        return rin_stdlib_getenv(name);
+#else
         size_t name_length = __detail::environment_bounded_length(name);
         size_t total_bytes = 0u;
         char* result = nullptr;
@@ -661,6 +643,7 @@ namespace std {
         return table[__detail::environment_count_max] == nullptr
                    ? result
                    : nullptr;
+#endif
     }
 
     inline int system(const char* command) {
@@ -669,8 +652,12 @@ namespace std {
          * both the NULL availability query and command status to that C ABI
          * instead of claiming a shell is unavailable unconditionally. */
         return ::system(command);
+#elif defined(RIN_USERSPACE)
+        return rin_stdlib_system(command);
 #else
-        return _rin_system_owner(command);
+        (void)command;
+        errno = ENOSYS;
+        return -1;
 #endif
     }
 

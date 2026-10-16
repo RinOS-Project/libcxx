@@ -16,7 +16,7 @@
 #include "initializer_list.h"
 #include "memory.h"   /* std::allocator and allocator_traits */
 #include "__string_hash.h"
-#include "../libc/internal/rin_float_parse.h"
+#include "cstdlib.h"
 
 #if __cplusplus >= 202002L
 #include "compare.h"
@@ -3228,28 +3228,40 @@ inline unsigned long long stoull(const string& str, size_t* pos = nullptr,
 
 inline double stod(const string& str, size_t* pos = nullptr) {
     const char* begin = str.c_str();
-    const rin_float_parse_result parsed = rin_float_parse_binary64(begin);
-    if (!parsed.converted) {
+    char* end = nullptr;
+    errno = 0;
+#if defined(RIN_FREESTANDING) && RIN_FREESTANDING
+    const double value = rin_stdlib_strtod(begin, &end);
+#else
+    const double value = std::strtod(begin, &end);
+#endif
+    if (end == begin) {
         __detail::string_numeric_invalid("invalid floating-point value");
     }
-    if (parsed.range_direction != 0 || parsed.subnormal) {
+    if (errno == ERANGE) {
         __detail::string_numeric_range("floating-point conversion out of range");
     }
-    if (pos) *pos = static_cast<size_t>(parsed.end - begin);
-    return rin_float_parse_binary64_value(parsed.bits);
+    if (pos) *pos = static_cast<size_t>(end - begin);
+    return value;
 }
 
 inline float stof(const string& str, size_t* pos = nullptr) {
     const char* begin = str.c_str();
-    const rin_float_parse_result parsed = rin_float_parse_binary32(begin);
-    if (!parsed.converted) {
+    char* end = nullptr;
+    errno = 0;
+#if defined(RIN_FREESTANDING) && RIN_FREESTANDING
+    const float value = rin_stdlib_strtof(begin, &end);
+#else
+    const float value = std::strtof(begin, &end);
+#endif
+    if (end == begin) {
         __detail::string_numeric_invalid("invalid floating-point value");
     }
-    if (parsed.range_direction != 0 || parsed.subnormal) {
+    if (errno == ERANGE) {
         __detail::string_numeric_range("floating-point conversion out of range");
     }
-    if (pos) *pos = static_cast<size_t>(parsed.end - begin);
-    return rin_float_parse_binary32_value(parsed.bits);
+    if (pos) *pos = static_cast<size_t>(end - begin);
+    return value;
 }
 
 inline wstring to_wstring(double value) {
