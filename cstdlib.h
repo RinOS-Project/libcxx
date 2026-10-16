@@ -89,6 +89,19 @@ extern "C" void _Exit(int status) __attribute__((noreturn));
 extern "C" void abort(void) __attribute__((noreturn));
 extern "C" int system(const char* command);
 #endif
+#if defined(RIN_FREESTANDING) && RIN_FREESTANDING
+/* Keep one abort declaration visible to both the C and C++ standard-library
+ * surfaces.  A number of upstream runtime headers intentionally use the C
+ * spelling from a scope that imports std; defining a second std::abort body
+ * would make those calls ambiguous under RinOS. */
+#ifndef _RIN_CSTDLIB_GLOBAL_ABORT_DEFINED
+#define _RIN_CSTDLIB_GLOBAL_ABORT_DEFINED
+__attribute__((noreturn)) static inline void abort(void) {
+    _syscall1((uintptr_t)SYS_EXIT, (uintptr_t)1u);
+    for (;;) {}
+}
+#endif
+#endif
 #if defined(__MINGW32__)
 extern "C" char*** __p__environ(void);
 #endif
@@ -143,10 +156,7 @@ namespace std {
         for(;;) {}
     }
 
-    [[noreturn]] inline void abort() {
-        _syscall1((uintptr_t)SYS_EXIT, (uintptr_t)1);
-        for(;;) {}
-    }
+    using ::abort;
 
 #endif
 
