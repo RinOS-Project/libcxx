@@ -12,7 +12,6 @@
 #if defined(RIN_FREESTANDING) && RIN_FREESTANDING
 #include "../libc/rin_stdlib_runtime.h"
 #include "../libc/sys/syscall.h"
-#include "../libc/internal/rin_system_owner.h"
 #endif
 
 /* A host C++ <stdlib.h>/<cstdlib> included before this header has already
