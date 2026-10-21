@@ -46,6 +46,7 @@ public:
 class bad_alloc : public exception {
 public:
     bad_alloc() noexcept {}
+    virtual ~bad_alloc() noexcept;
     const char* what() const noexcept override { return "std::bad_alloc"; }
 };
 
