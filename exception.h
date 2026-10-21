@@ -221,7 +221,8 @@ private:
 
     explicit exception_ptr(void* object) noexcept;
 
-#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS) || \
+    defined(RIN_CXX_ABI_RUNTIME_BUILD)
     void _M_addref() noexcept;
     void _M_release() noexcept;
 #else
@@ -297,7 +298,8 @@ inline void swap(exception_ptr& left, exception_ptr& right) noexcept {
 
 } /* namespace __exception_ptr */
 
-#if !defined(__cpp_exceptions) && !defined(__EXCEPTIONS)
+#if !defined(__cpp_exceptions) && !defined(__EXCEPTIONS) && \
+    !defined(RIN_CXX_ABI_RUNTIME_BUILD)
 inline exception_ptr current_exception() noexcept { return exception_ptr(); }
 [[noreturn]] inline void rethrow_exception(exception_ptr) { terminate(); }
 #endif
