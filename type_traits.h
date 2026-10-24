@@ -160,7 +160,9 @@ template<typename T> struct is_integral<const volatile T> : is_integral<T> {};
 template<typename T> struct is_floating_point : false_type {};
 template<> struct is_floating_point<float> : true_type {};
 template<> struct is_floating_point<double> : true_type {};
+#if !defined(__RINOS__)
 template<> struct is_floating_point<long double> : true_type {};
+#endif
 template<typename T>
 struct is_floating_point<const T> : is_floating_point<T> {};
 template<typename T>
@@ -168,8 +170,16 @@ struct is_floating_point<volatile T> : is_floating_point<T> {};
 template<typename T>
 struct is_floating_point<const volatile T> : is_floating_point<T> {};
 
-template<typename T> struct is_arithmetic : 
-    integral_constant<bool, is_integral<T>::value || is_floating_point<T>::value> {};
+template<typename T> struct is_arithmetic : is_integral<T> {};
+template<> struct is_arithmetic<float> : true_type {};
+template<> struct is_arithmetic<double> : true_type {};
+#if !defined(__RINOS__)
+template<> struct is_arithmetic<long double> : true_type {};
+#endif
+template<typename T> struct is_arithmetic<const T> : is_arithmetic<T> {};
+template<typename T> struct is_arithmetic<volatile T> : is_arithmetic<T> {};
+template<typename T>
+struct is_arithmetic<const volatile T> : is_arithmetic<T> {};
 
 template<typename T> struct is_pointer : false_type {};
 template<typename T> struct is_pointer<T*> : true_type {};
@@ -229,9 +239,13 @@ using enable_if_t = typename enable_if<B, T>::type;
 
 /* is_function - 関数型の検出。関数型に const を付けても変化しない性質を利用 */
 template<typename T>
+#if defined(__RINOS__)
+struct is_function : integral_constant<bool, __is_function(T)> {};
+#else
 struct is_function : integral_constant<bool,
     !is_const<const T>::value && !is_reference<T>::value
 > {};
+#endif
 
 #if __cplusplus >= 201703L
 template<typename T>
@@ -243,20 +257,46 @@ inline constexpr bool is_function_v = is_function<T>::value;
  * ═══════════════════════════════════════════════════════════════*/
 
 template<typename T>
-struct decay {
-private:
-    using U = typename remove_reference<T>::type;
-public:
-    using type = typename conditional<
-        is_array<U>::value,
-        typename remove_extent<U>::type*,
-        typename conditional<
-            is_function<U>::value,
-            typename add_pointer<U>::type,
-            typename remove_cv<U>::type
-        >::type
-    >::type;
+struct __rcc_decay_impl {
+    using type = typename remove_cv<T>::type;
 };
+
+template<typename T>
+struct __rcc_decay_impl<T[]> {
+    using type = typename remove_extent<T>::type*;
+};
+
+template<typename T, size_t N>
+struct __rcc_decay_impl<T[N]> {
+    using type = typename remove_extent<T[N]>::type*;
+};
+
+template<typename R, typename... Args>
+struct __rcc_decay_impl<R(Args...)> {
+    using type = R (*)(Args...);
+};
+
+template<typename R, typename... Args>
+struct __rcc_decay_impl<R(Args..., ...)> {
+    using type = R (*)(Args..., ...);
+};
+
+#if __cplusplus >= 201703L
+template<typename R, typename... Args>
+struct __rcc_decay_impl<R(Args...) noexcept> {
+    using Function = R(Args...) noexcept;
+    using type = typename add_pointer<Function>::type;
+};
+
+template<typename R, typename... Args>
+struct __rcc_decay_impl<R(Args..., ...) noexcept> {
+    using Function = R(Args..., ...) noexcept;
+    using type = typename add_pointer<Function>::type;
+};
+#endif
+
+template<typename T>
+struct decay : __rcc_decay_impl<typename remove_reference<T>::type> {};
 
 template<typename T>
 using decay_t = typename decay<T>::type;
@@ -300,7 +340,7 @@ typename add_rvalue_reference<T>::type declval() noexcept;
 namespace detail {
 
 template<typename To>
-static void test_convertible(To);
+void test_convertible(To);
 
 template<typename From, typename To, typename = void>
 struct is_convertible_impl : false_type {};
@@ -337,7 +377,7 @@ inline constexpr bool is_convertible_v = is_convertible<From, To>::value;
 namespace detail {
 
 template<typename To>
-static void test_nothrow_convertible(To) noexcept;
+void test_nothrow_convertible(To) noexcept;
 
 template<typename From, typename To, typename = void>
 struct is_nothrow_convertible_impl : false_type {};

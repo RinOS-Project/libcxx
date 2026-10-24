@@ -15,8 +15,10 @@ namespace std {
     // nullptr_t - defined here since not in C stddef.h
     using nullptr_t = decltype(nullptr);
 
-    // max_align_t - use compiler builtin or define
-#ifdef __BIGGEST_ALIGNMENT__
+    // max_align_t - use the target ABI's complete object type when available.
+#if defined(__RINOS__)
+    using max_align_t = ::max_align_t;
+#elif defined(__BIGGEST_ALIGNMENT__)
     struct max_align_t {
         alignas(__BIGGEST_ALIGNMENT__) char _[__BIGGEST_ALIGNMENT__];
     };

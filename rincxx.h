@@ -180,13 +180,12 @@ namespace std {
 #else
     inline
 #endif
-    auto swap(T& a, T& b)
-        noexcept(noexcept(T(std::move(a))) &&
-                 noexcept(a = std::move(b)))
-        -> decltype(T(std::move(a)), a = std::move(b), void()) {
-        T tmp = std::move(a);
-        a = std::move(b);
-        b = std::move(tmp);
+    void swap(T& a, T& b)
+        noexcept(noexcept(T(static_cast<T&&>(a))) &&
+                 noexcept(a = static_cast<T&&>(b))) {
+        T tmp = static_cast<T&&>(a);
+        a = static_cast<T&&>(b);
+        b = static_cast<T&&>(tmp);
     }
     
     /* min/max - defined in algorithm.h */
