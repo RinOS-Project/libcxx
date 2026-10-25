@@ -59,61 +59,18 @@ __declspec(noreturn) void rin_panic(const char* msg);
 #ifdef __cplusplus
 }
 
-#if defined(RIN_CXX_NEW_EXCEPTION_BRIDGE)
-namespace rin_cxx_detail {
-/*
- * <new> defines this bridge after it has made std::bad_alloc complete.  The
- * declaration lives here so the global operator-new definitions can remain in
- * the foundational header without creating an exception/string include cycle.
- */
-void* throwing_new(size_t size);
-}
-#endif
-
 /* ═══════════════════════════════════════════════════════════════
  * C++ new/delete 演算子
  * ═══════════════════════════════════════════════════════════════*/
 
 #if !defined(_MSC_VER)
-inline void* operator new(size_t size) {
-#if defined(RIN_CXX_NEW_EXCEPTION_BRIDGE)
-    return rin_cxx_detail::throwing_new(size);
-#elif defined(RIN_CXX_USE_PRODUCT_NEW_OWNER)
-    return rin_cxx_operator_new(size);
-#else
-    /* Debug: detect corrupted size before syscall */
-    if (size > 0x100000) {
-        rin_log("[NEW] bad allocation size\n");
-    }
-    return rin_malloc(size);
-#endif
-}
-
-inline void* operator new[](size_t size) {
-#if defined(RIN_CXX_NEW_EXCEPTION_BRIDGE)
-    return rin_cxx_detail::throwing_new(size);
-#elif defined(RIN_CXX_USE_PRODUCT_NEW_OWNER)
-    return rin_cxx_operator_new(size);
-#else
-    return rin_malloc(size);
-#endif
-}
-
-inline void operator delete(void* ptr) noexcept {
-    rin_free(ptr);
-}
-
-inline void operator delete[](void* ptr) noexcept {
-    rin_free(ptr);
-}
-
-inline void operator delete(void* ptr, size_t) noexcept {
-    rin_free(ptr);
-}
-
-inline void operator delete[](void* ptr, size_t) noexcept {
-    rin_free(ptr);
-}
+/* Replaceable allocation functions have one out-of-line owner per image. */
+void* operator new(size_t size);
+void* operator new[](size_t size);
+void operator delete(void* ptr) noexcept;
+void operator delete[](void* ptr) noexcept;
+void operator delete(void* ptr, size_t size) noexcept;
+void operator delete[](void* ptr, size_t size) noexcept;
 #endif
 
 /* placement new */

@@ -6,9 +6,7 @@
 #ifndef RINCXX_NEW_H
 #define RINCXX_NEW_H
 
-#define RIN_CXX_NEW_EXCEPTION_BRIDGE 1
 #include "rincxx.h"
-#undef RIN_CXX_NEW_EXCEPTION_BRIDGE
 #include "exception.h"
 
 /* These facilities are fully declared below, so publish their standard
@@ -39,25 +37,8 @@ namespace rin_cxx_detail {
  * standard bad_alloc object, while freestanding no-exception products retain
  * the existing terminal operator-new path.
  */
-inline void* throwing_new(size_t size) {
-    void* allocation = rin_cxx_operator_new_nothrow(size);
-    if (allocation) return allocation;
-#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
-    throw std::bad_alloc();
-#else
-    return rin_cxx_operator_new(size);
-#endif
-}
-
-inline void* throwing_aligned_new(size_t size, size_t alignment) {
-    void* allocation = rin_cxx_operator_new_aligned_nothrow(size, alignment);
-    if (allocation) return allocation;
-#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
-    throw std::bad_alloc();
-#else
-    return rin_cxx_operator_new_aligned(size, alignment);
-#endif
-}
+void* throwing_new(size_t size);
+void* throwing_aligned_new(size_t size, size_t alignment);
 
 } /* namespace rin_cxx_detail */
 
@@ -146,28 +127,13 @@ RIN_NEW_NODISCARD constexpr T* launder(T* p) noexcept {
 
 } /* namespace std */
 
-/* ═══════════════════════════════════════════════════════════════
- * operator new / delete (nothrowバリアント)
- * 注: 基本的なnew/deleteは rincxx.h で定義済み
- * ═══════════════════════════════════════════════════════════════*/
+/* Replaceable overloads are declared here and defined once by the active
+ * per-image C++ allocation owner. Placement forms remain header-only. */
 
-/* nothrow new */
-RIN_NEW_NODISCARD inline void* operator new(size_t size, const std::nothrow_t&) noexcept {
-    return rin_cxx_operator_new_nothrow(size);
-}
-
-RIN_NEW_NODISCARD inline void* operator new[](size_t size, const std::nothrow_t&) noexcept {
-    return rin_cxx_operator_new_nothrow(size);
-}
-
-/* nothrow delete */
-inline void operator delete(void* ptr, const std::nothrow_t&) noexcept {
-    rin_free(ptr);
-}
-
-inline void operator delete[](void* ptr, const std::nothrow_t&) noexcept {
-    rin_free(ptr);
-}
+RIN_NEW_NODISCARD void* operator new(size_t size, const std::nothrow_t&) noexcept;
+RIN_NEW_NODISCARD void* operator new[](size_t size, const std::nothrow_t&) noexcept;
+void operator delete(void* ptr, const std::nothrow_t&) noexcept;
+void operator delete[](void* ptr, const std::nothrow_t&) noexcept;
 
 #if __cplusplus >= 201703L
 /* C++17 over-aligned placement forms.  The supplied storage is owned by the
@@ -191,53 +157,20 @@ inline void operator delete[](void* ptr, std::align_val_t, void* placement) noex
     (void)placement;
 }
 
-inline void operator delete(void* ptr, std::align_val_t,
-                            const std::nothrow_t&) noexcept {
-    rin_aligned_free(ptr);
-}
-
-inline void operator delete[](void* ptr, std::align_val_t,
-                              const std::nothrow_t&) noexcept {
-    rin_aligned_free(ptr);
-}
-
-/* アライメント指定new (C++17) - rin_aligned_alloc を使用 */
-RIN_NEW_NODISCARD inline void* operator new(size_t size, std::align_val_t alignment) {
-    return rin_cxx_detail::throwing_aligned_new(
-        size, static_cast<size_t>(alignment));
-}
-
-RIN_NEW_NODISCARD inline void* operator new[](size_t size, std::align_val_t alignment) {
-    return rin_cxx_detail::throwing_aligned_new(
-        size, static_cast<size_t>(alignment));
-}
-
-RIN_NEW_NODISCARD inline void* operator new(size_t size, std::align_val_t alignment, const std::nothrow_t&) noexcept {
-    return rin_cxx_operator_new_aligned_nothrow(
-        size, static_cast<size_t>(alignment));
-}
-
-[[nodiscard]] inline void* operator new[](size_t size, std::align_val_t alignment, const std::nothrow_t&) noexcept {
-    return rin_cxx_operator_new_aligned_nothrow(
-        size, static_cast<size_t>(alignment));
-}
-
-/* アライメント指定delete - rin_aligned_free を使用 */
-inline void operator delete(void* ptr, std::align_val_t) noexcept {
-    rin_aligned_free(ptr);
-}
-
-inline void operator delete[](void* ptr, std::align_val_t) noexcept {
-    rin_aligned_free(ptr);
-}
-
-inline void operator delete(void* ptr, size_t, std::align_val_t) noexcept {
-    rin_aligned_free(ptr);
-}
-
-inline void operator delete[](void* ptr, size_t, std::align_val_t) noexcept {
-    rin_aligned_free(ptr);
-}
+RIN_NEW_NODISCARD void* operator new(size_t size, std::align_val_t alignment);
+RIN_NEW_NODISCARD void* operator new[](size_t size, std::align_val_t alignment);
+RIN_NEW_NODISCARD void* operator new(size_t size, std::align_val_t alignment,
+                                     const std::nothrow_t&) noexcept;
+RIN_NEW_NODISCARD void* operator new[](size_t size, std::align_val_t alignment,
+                                       const std::nothrow_t&) noexcept;
+void operator delete(void* ptr, std::align_val_t alignment) noexcept;
+void operator delete[](void* ptr, std::align_val_t alignment) noexcept;
+void operator delete(void* ptr, size_t size, std::align_val_t alignment) noexcept;
+void operator delete[](void* ptr, size_t size, std::align_val_t alignment) noexcept;
+void operator delete(void* ptr, std::align_val_t alignment,
+                     const std::nothrow_t&) noexcept;
+void operator delete[](void* ptr, std::align_val_t alignment,
+                       const std::nothrow_t&) noexcept;
 #endif
 
 #undef RIN_NEW_NODISCARD
