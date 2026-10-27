@@ -3643,8 +3643,7 @@ inline bool copy_directory_nodes_impl(const path& from, const path& to,
         const bool skip_links =
             (bits & static_cast<unsigned>(copy_options::skip_symlinks)) != 0u;
         const bool copy_links =
-            (bits & static_cast<unsigned>(copy_options::copy_symlinks)) != 0u &&
-            (bits & static_cast<unsigned>(copy_options::directories_only)) == 0u;
+            (bits & static_cast<unsigned>(copy_options::copy_symlinks)) != 0u;
         if (skip_links || copy_links) {
             stat_record link_status = {};
             volatile stat_record* link_view = &link_status;
@@ -3808,12 +3807,6 @@ inline void copy(const path& from, const path& to, copy_options options,
         ec = make_error_code(errc::invalid_argument);
         return;
     }
-    if ((bits & static_cast<unsigned>(copy_options::directories_only)) != 0u &&
-        (link_modes & (static_cast<unsigned>(copy_options::copy_symlinks) |
-                       static_cast<unsigned>(copy_options::create_symlinks))) != 0u) {
-        ec = make_error_code(errc::not_supported);
-        return;
-    }
     if ((bits & static_cast<unsigned>(copy_options::directories_only)) == 0u &&
         (replacement == (static_cast<unsigned>(copy_options::skip_existing) |
                          static_cast<unsigned>(copy_options::overwrite_existing)) ||
@@ -3828,6 +3821,26 @@ inline void copy(const path& from, const path& to, copy_options options,
         ec = make_error_code(errc::invalid_argument);
         return;
     }
+    if ((bits & static_cast<unsigned>(copy_options::create_symlinks)) != 0u) {
+        detail::stat_record link_status = {};
+        volatile detail::stat_record* link_view = &link_status;
+        if (rin_lstat(from.c_str(), &link_status) != 0 ||
+            link_view->st_size < 0) {
+            ec = link_view->st_size < 0
+                ? make_error_code(errc::io_error)
+                : make_error_code(detail::filesystem_error_from_errno());
+            return;
+        }
+        const unsigned int source_type = link_view->st_mode & 0170000;
+        if (source_type == 0120000) {
+            ec = make_error_code(errc::operation_not_permitted);
+            return;
+        }
+        if (source_type == 0040000) {
+            ec = make_error_code(errc::is_a_directory);
+            return;
+        }
+    }
     if ((bits & static_cast<unsigned>(copy_options::skip_symlinks)) != 0u) {
         detail::stat_record link_status = {};
         volatile detail::stat_record* link_view = &link_status;
@@ -3840,8 +3853,7 @@ inline void copy(const path& from, const path& to, copy_options options,
         }
         if ((link_view->st_mode & 0170000) == 0120000) return;
     }
-    if ((bits & static_cast<unsigned>(copy_options::copy_symlinks)) != 0u &&
-        (bits & static_cast<unsigned>(copy_options::directories_only)) == 0u) {
+    if ((bits & static_cast<unsigned>(copy_options::copy_symlinks)) != 0u) {
         detail::stat_record link_status = {};
         volatile detail::stat_record* link_view = &link_status;
         if (rin_lstat(from.c_str(), &link_status) != 0 ||
@@ -3866,7 +3878,6 @@ inline void copy(const path& from, const path& to, copy_options options,
     }
     if ((source_view->st_mode & 0170000) == 0100000) {
         if ((bits & static_cast<unsigned>(copy_options::directories_only)) != 0u) {
-            ec = make_error_code(errc::not_supported);
             return;
         }
         if ((bits & static_cast<unsigned>(copy_options::create_hard_links)) != 0u) {
