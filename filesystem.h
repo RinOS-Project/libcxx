@@ -24,6 +24,11 @@
 #endif
 
 /* Cファイルシステム関数 */
+#if defined(__GNUC__) || defined(__clang__)
+#define RIN_FILESYSTEM_WEAK_IMPORT __attribute__((weak))
+#else
+#define RIN_FILESYSTEM_WEAK_IMPORT
+#endif
 extern "C" {
     /* ファイル操作 */
     int rin_open(const char* path, int flags);
@@ -45,8 +50,9 @@ extern "C" {
     int rin_rename(const char* oldpath, const char* newpath);
     /* 0は公開成功、1は新しいまたは同時刻の宛先を維持したことを示す。 */
     int rin_rename_if_newer(const char* oldpath, const char* newpath,
-                            long long source_mtime);
-    int rin_random_get(void* buffer, unsigned int length, unsigned int flags);
+                            long long source_mtime) RIN_FILESYSTEM_WEAK_IMPORT;
+    int rin_random_get(void* buffer, unsigned int length, unsigned int flags)
+        RIN_FILESYSTEM_WEAK_IMPORT;
     int rin_symlink(const char* target, const char* linkpath);
     int rin_link(const char* oldpath, const char* newpath);
     int rin_readlink(const char* path, char* buffer, unsigned long capacity);
@@ -75,6 +81,7 @@ extern "C" {
     int rin_set_times(const char* path, long long access_seconds,
                       long long write_seconds);
 }
+#undef RIN_FILESYSTEM_WEAK_IMPORT
 
 namespace std {
 namespace filesystem {
@@ -3016,6 +3023,12 @@ inline bool copy_staging_path(const path& destination, char* output,
         ec = make_error_code(errc::filename_too_long);
         return false;
     }
+#if defined(__GNUC__) || defined(__clang__)
+    if (!rin_random_get) {
+        ec = make_error_code(errc::function_not_supported);
+        return false;
+    }
+#endif
     if (rin_random_get(nonce, static_cast<unsigned int>(sizeof(nonce)), 0u) != 0) {
         ec = make_error_code(filesystem_error_from_errno());
         return false;
@@ -3046,6 +3059,14 @@ inline bool copy_publish_staged_path(const char* staging, const path& to,
                                      unsigned int replacement,
                                      long source_mtime,
                                      error_code& ec) noexcept {
+#if defined(__GNUC__) || defined(__clang__)
+    if (replacement == static_cast<unsigned>(copy_options::update_existing) &&
+        !rin_rename_if_newer) {
+        ec = make_error_code(errc::function_not_supported);
+        copy_discard_staging_path(staging, ec);
+        return false;
+    }
+#endif
     const int publish_result =
         replacement == static_cast<unsigned>(copy_options::update_existing)
             ? rin_rename_if_newer(staging, to.c_str(), source_mtime)
