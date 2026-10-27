@@ -2983,6 +2983,19 @@ namespace detail {
 static constexpr size_t copy_path_capacity = 4096u;
 static constexpr int copy_rename_skipped = 1;
 
+inline bool copy_paths_equivalent(const path& from,
+                                  const path& to) noexcept {
+    stat_record source = {};
+    stat_record destination = {};
+    volatile stat_record* source_view = &source;
+    volatile stat_record* destination_view = &destination;
+    if (rin_stat(from.c_str(), &source) != 0 ||
+        rin_stat(to.c_str(), &destination) != 0)
+        return false;
+    return source_view->st_dev == destination_view->st_dev &&
+           source_view->st_ino == destination_view->st_ino;
+}
+
 /* 128ビット乱数の一時名を宛先と同じディレクトリに作り、renameで公開する。 */
 inline bool copy_staging_path(const path& destination, char* output,
                               size_t capacity, error_code& ec) noexcept {
@@ -3066,6 +3079,10 @@ inline bool copy_hard_link(const path& from, const path& to,
                                  : errc::operation_not_permitted);
         return false;
     }
+    if (copy_paths_equivalent(from, to)) {
+        ec = make_error_code(errc::invalid_argument);
+        return false;
+    }
     const int destination_status = rin_lstat(to.c_str(), &destination);
     if (destination_status != 0) {
         const errc destination_error = filesystem_error_from_errno();
@@ -3131,6 +3148,10 @@ inline bool copy_symlink_node(const path& from, const path& to,
         : rin_stat(from.c_str(), &source);
     if (source_status != 0) {
         ec = make_error_code(filesystem_error_from_errno());
+        return false;
+    }
+    if (copy_paths_equivalent(from, to)) {
+        ec = make_error_code(errc::invalid_argument);
         return false;
     }
     const int destination_status = rin_lstat(to.c_str(), &destination);
@@ -3779,6 +3800,10 @@ inline void copy(const path& from, const path& to, copy_options options,
                          static_cast<unsigned>(copy_options::update_existing)) ||
          replacement == (static_cast<unsigned>(copy_options::overwrite_existing) |
                          static_cast<unsigned>(copy_options::update_existing)))) {
+        ec = make_error_code(errc::invalid_argument);
+        return;
+    }
+    if (detail::copy_paths_equivalent(from, to)) {
         ec = make_error_code(errc::invalid_argument);
         return;
     }
