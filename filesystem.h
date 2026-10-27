@@ -43,6 +43,10 @@ extern "C" {
     int rin_rmdir(const char* path);
     int rin_unlink(const char* path);
     int rin_rename(const char* oldpath, const char* newpath);
+    /* 0は公開成功、1は新しいまたは同時刻の宛先を維持したことを示す。 */
+    int rin_rename_if_newer(const char* oldpath, const char* newpath,
+                            long long source_mtime);
+    int rin_random_get(void* buffer, unsigned int length, unsigned int flags);
     int rin_symlink(const char* target, const char* linkpath);
     int rin_link(const char* oldpath, const char* newpath);
     int rin_readlink(const char* path, char* buffer, unsigned long capacity);
@@ -2976,47 +2980,92 @@ inline bool copy_file(const path& from, const path& to,
 
 namespace detail {
 
-/* Bounded create_hard_links branch for copy().  It only publishes a link at a
- * missing destination (or performs skip_existing); replacing an existing
- * node would require an atomic unlink/link transaction that the provider ABI
- * does not expose yet. */
-inline bool copy_hard_link(const path& from, const path& to,
-                           unsigned int replacement, error_code& ec) noexcept {
-    stat_record destination = {};
-    volatile stat_record* destination_view = &destination;
-    const int destination_status = rin_stat(to.c_str(), &destination);
-    if (destination_status != 0) {
-        const errc destination_error = filesystem_error_from_errno();
-        if (destination_error != errc::no_such_file_or_directory) {
-            ec = make_error_code(destination_error);
-            return false;
-        }
-    } else if (destination_view->st_size < 0) {
-        ec = make_error_code(errc::io_error);
+static constexpr size_t copy_path_capacity = 4096u;
+static constexpr int copy_rename_skipped = 1;
+
+/* 128ビット乱数の一時名を宛先と同じディレクトリに作り、renameで公開する。 */
+inline bool copy_staging_path(const path& destination, char* output,
+                              size_t capacity, error_code& ec) noexcept {
+    static const char hex[] = "0123456789abcdef";
+    unsigned char nonce[16];
+    const char* destination_text = destination.c_str();
+    size_t destination_length = 0u;
+    size_t parent_length = 0u;
+    while (destination_text[destination_length] != '\0') ++destination_length;
+    for (size_t index = 0u; index < destination_length; ++index) {
+        if (destination_text[index] == '/' || destination_text[index] == '\\')
+            parent_length = index + 1u;
+    }
+    static const char suffix[] = ".rin-copy-";
+    const size_t suffix_length = sizeof(suffix) - 1u;
+    const size_t required = parent_length + suffix_length + sizeof(nonce) * 2u;
+    if (required >= capacity) {
+        ec = make_error_code(errc::filename_too_long);
         return false;
     }
-    if (destination_status == 0) {
-        if (replacement == static_cast<unsigned>(copy_options::skip_existing))
-            return true;
-        ec = replacement == 0u ? make_error_code(errc::file_exists)
-                               : make_error_code(errc::not_supported);
-        return false;
-    }
-    if (rin_link(from.c_str(), to.c_str()) != 0) {
+    if (rin_random_get(nonce, static_cast<unsigned int>(sizeof(nonce)), 0u) != 0) {
         ec = make_error_code(filesystem_error_from_errno());
+        return false;
+    }
+    for (size_t index = 0u; index < parent_length; ++index)
+        output[index] = destination_text[index];
+    for (size_t index = 0u; index < suffix_length; ++index)
+        output[parent_length + index] = suffix[index];
+    for (size_t index = 0u; index < sizeof(nonce); ++index) {
+        output[parent_length + suffix_length + index * 2u] =
+            hex[nonce[index] >> 4u];
+        output[parent_length + suffix_length + index * 2u + 1u] =
+            hex[nonce[index] & 0x0fu];
+    }
+    output[required] = '\0';
+    return true;
+}
+
+inline void copy_discard_staging_path(const char* staging,
+                                      error_code& ec) noexcept {
+    if (rin_unlink(staging) == 0) return;
+    const errc cleanup_error = filesystem_error_from_errno();
+    if (cleanup_error != errc::no_such_file_or_directory && !ec)
+        ec = make_error_code(cleanup_error);
+}
+
+inline bool copy_publish_staged_path(const char* staging, const path& to,
+                                     unsigned int replacement,
+                                     long source_mtime,
+                                     error_code& ec) noexcept {
+    const int publish_result =
+        replacement == static_cast<unsigned>(copy_options::update_existing)
+            ? rin_rename_if_newer(staging, to.c_str(), source_mtime)
+            : rin_rename(staging, to.c_str());
+    if (publish_result == copy_rename_skipped) {
+        copy_discard_staging_path(staging, ec);
+        return !ec;
+    }
+    if (publish_result != 0) {
+        ec = make_error_code(filesystem_error_from_errno());
+        copy_discard_staging_path(staging, ec);
         return false;
     }
     return true;
 }
 
-/* Bounded symbolic-link publication used by copy_symlinks and
- * create_symlinks.  The target is collected before the destination is
- * mutated, and existing nodes are never unlinked implicitly. */
-inline bool copy_symlink_node(const path& from, const path& to,
-                              unsigned int replacement, bool preserve_target,
-                              error_code& ec) noexcept {
+/* create_hard_linksの各置換モードを原子的に処理する。 */
+inline bool copy_hard_link(const path& from, const path& to,
+                           unsigned int replacement, error_code& ec) noexcept {
+    stat_record source = {};
+    volatile stat_record* source_view = &source;
     stat_record destination = {};
     volatile stat_record* destination_view = &destination;
+    if (rin_stat(from.c_str(), &source) != 0) {
+        ec = make_error_code(filesystem_error_from_errno());
+        return false;
+    }
+    if ((source_view->st_mode & 0170000) != 0100000) {
+        ec = make_error_code((source_view->st_mode & 0170000) == 0040000
+                                 ? errc::is_a_directory
+                                 : errc::operation_not_permitted);
+        return false;
+    }
     const int destination_status = rin_lstat(to.c_str(), &destination);
     if (destination_status != 0) {
         const errc destination_error = filesystem_error_from_errno();
@@ -3031,9 +3080,84 @@ inline bool copy_symlink_node(const path& from, const path& to,
     if (destination_status == 0) {
         if (replacement == static_cast<unsigned>(copy_options::skip_existing))
             return true;
-        ec = replacement == 0u ? make_error_code(errc::file_exists)
-                               : make_error_code(errc::not_supported);
+        if ((destination_view->st_mode & 0170000) == 0040000) {
+            ec = make_error_code(errc::is_a_directory);
+            return false;
+        }
+        if (replacement == 0u) {
+            ec = make_error_code(errc::file_exists);
+            return false;
+        }
+        if (replacement == static_cast<unsigned>(copy_options::update_existing) &&
+            source_view->st_mtime <= destination_view->st_mtime)
+            return true;
+    }
+
+    if (replacement == 0u ||
+        replacement == static_cast<unsigned>(copy_options::skip_existing)) {
+        if (rin_link(from.c_str(), to.c_str()) == 0) return true;
+        ec = make_error_code(filesystem_error_from_errno());
+        if (replacement == static_cast<unsigned>(copy_options::skip_existing) &&
+            ec == make_error_code(errc::file_exists)) {
+            ec.clear();
+            return true;
+        }
         return false;
+    }
+
+    char staging[copy_path_capacity];
+    for (unsigned int attempt = 0u; attempt < 8u; ++attempt) {
+        if (!copy_staging_path(to, staging, sizeof(staging), ec)) return false;
+        if (rin_link(from.c_str(), staging) == 0)
+            return copy_publish_staged_path(staging, to, replacement,
+                                            source_view->st_mtime, ec);
+        ec = make_error_code(filesystem_error_from_errno());
+        if (ec != make_error_code(errc::file_exists)) return false;
+    }
+    ec = make_error_code(errc::resource_unavailable_try_again);
+    return false;
+}
+
+/* copy_symlinksとcreate_symlinksのリンクを原子的に公開する。 */
+inline bool copy_symlink_node(const path& from, const path& to,
+                              unsigned int replacement, bool preserve_target,
+                              error_code& ec) noexcept {
+    stat_record destination = {};
+    volatile stat_record* destination_view = &destination;
+    stat_record source = {};
+    volatile stat_record* source_view = &source;
+    const int source_status = preserve_target
+        ? rin_lstat(from.c_str(), &source)
+        : rin_stat(from.c_str(), &source);
+    if (source_status != 0) {
+        ec = make_error_code(filesystem_error_from_errno());
+        return false;
+    }
+    const int destination_status = rin_lstat(to.c_str(), &destination);
+    if (destination_status != 0) {
+        const errc destination_error = filesystem_error_from_errno();
+        if (destination_error != errc::no_such_file_or_directory) {
+            ec = make_error_code(destination_error);
+            return false;
+        }
+    } else if (destination_view->st_size < 0) {
+        ec = make_error_code(errc::io_error);
+        return false;
+    }
+    if (destination_status == 0) {
+        if (replacement == static_cast<unsigned>(copy_options::skip_existing))
+            return true;
+        if ((destination_view->st_mode & 0170000) == 0040000) {
+            ec = make_error_code(errc::is_a_directory);
+            return false;
+        }
+        if (replacement == 0u) {
+            ec = make_error_code(errc::file_exists);
+            return false;
+        }
+        if (replacement == static_cast<unsigned>(copy_options::update_existing) &&
+            source_view->st_mtime <= destination_view->st_mtime)
+            return true;
     }
 
     char target[4096];
@@ -3062,18 +3186,34 @@ inline bool copy_symlink_node(const path& from, const path& to,
         for (unsigned long i = 0; i <= length; ++i)
             target[i] = source[i];
     }
-    if (rin_symlink(target, to.c_str()) != 0) {
+    if (replacement == 0u ||
+        replacement == static_cast<unsigned>(copy_options::skip_existing)) {
+        if (rin_symlink(target, to.c_str()) == 0) return true;
         ec = make_error_code(filesystem_error_from_errno());
+        if (replacement == static_cast<unsigned>(copy_options::skip_existing) &&
+            ec == make_error_code(errc::file_exists)) {
+            ec.clear();
+            return true;
+        }
         return false;
     }
-    return true;
+
+    char staging[copy_path_capacity];
+    for (unsigned int attempt = 0u; attempt < 8u; ++attempt) {
+        if (!copy_staging_path(to, staging, sizeof(staging), ec)) return false;
+        if (rin_symlink(target, staging) == 0)
+            return copy_publish_staged_path(staging, to, replacement,
+                                            source_view->st_mtime, ec);
+        ec = make_error_code(filesystem_error_from_errno());
+        if (ec != make_error_code(errc::file_exists)) return false;
+    }
+    ec = make_error_code(errc::resource_unavailable_try_again);
+    return false;
 }
 
 /* Lexically resolve a path into a fixed-size buffer.  copy() uses this only
  * to reject a destination nested inside its source before that destination
  * can become part of the traversal. */
-static constexpr size_t copy_path_capacity = 4096u;
-
 struct normalized_copy_path {
     char text[copy_path_capacity];
     size_t length;
@@ -3583,10 +3723,7 @@ inline bool copy_directory_nodes(const path& from, const path& to,
 
 } /* namespace detail */
 
-/* copy: regular files (the recursive bit is irrelevant for a file) and
- * recursive directory trees share the bounded copy_file transfer.  Symlink,
- * hard-link, and durable-publication modes remain explicit unsupported cases;
- * they are never reported as a successful no-op. */
+/* copy: 通常ファイルと再帰ディレクトリを処理し、未対応のモードは成功扱いにしない。 */
 inline void copy(const path& from, const path& to, copy_options options,
                  error_code& ec) noexcept {
     ec.clear();
