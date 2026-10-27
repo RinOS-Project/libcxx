@@ -1791,6 +1791,53 @@ public:
         return snapshot_active_ ? &snapshot_ : &current_entry();
     }
 
+    /* Internal error-code access for algorithms that must not turn a cache
+     * allocation failure into a process-wide filesystem_failure.  The
+     * ordinary input-iterator dereference operators retain their standard
+     * precondition and exception behavior. */
+    bool current(const directory_entry*& entry, error_code& ec) const noexcept {
+        ec.clear();
+        entry = nullptr;
+        state* current_state = state_;
+        if (!current_state) {
+            ec = make_error_code(errc::io_error);
+            return false;
+        }
+        state_lock(current_state);
+        if (current_state->at_end) {
+            state_unlock(current_state);
+            ec = make_error_code(errc::io_error);
+            return false;
+        }
+        if (!view_valid_ || view_owner_ != current_state ||
+            view_generation_ != current_state->generation) {
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+            try {
+                view_ = current_state->entry;
+            } catch (...) {
+                state_unlock(current_state);
+                ec = make_error_code(errc::not_enough_memory);
+                return false;
+            }
+#else
+            view_ = directory_entry();
+            view_ = current_state->entry;
+            if (view_.path() != current_state->entry.path()) {
+                view_valid_ = false;
+                state_unlock(current_state);
+                ec = make_error_code(errc::not_enough_memory);
+                return false;
+            }
+#endif
+            view_owner_ = current_state;
+            view_generation_ = current_state->generation;
+            view_valid_ = true;
+        }
+        entry = &view_;
+        state_unlock(current_state);
+        return true;
+    }
+
     directory_iterator& operator++() {
         snapshot_active_ = false;
         snapshot_generation_ = 0;
@@ -3022,88 +3069,395 @@ inline bool copy_symlink_node(const path& from, const path& to,
     return true;
 }
 
-/* Bounded directory-tree copier used by copy(recursive).  Directory nodes are
- * created before their descendants; regular leaves reuse copy_file so their
- * replacement policy, identity checks, and provider error mapping stay in one
- * implementation.  Links and other special nodes remain explicit failures
- * (or are omitted by directories_only). */
-inline bool copy_directory_nodes(const path& from, const path& to,
-                                 unsigned int bits, unsigned int depth,
-                                 error_code& ec) noexcept {
-    if (depth > 64u) {
-        ec = make_error_code(errc::not_supported);
-        return false;
+/* Lexically resolve a path into a fixed-size buffer.  copy() uses this only
+ * to reject a destination nested inside its source before that destination
+ * can become part of the traversal. */
+static constexpr size_t copy_path_capacity = 4096u;
+
+struct normalized_copy_path {
+    char text[copy_path_capacity];
+    size_t length;
+    bool absolute;
+};
+
+inline bool normalize_copy_path(const char* input, const char* cwd,
+                                normalized_copy_path& output,
+                                error_code& ec) noexcept {
+    char absolute[copy_path_capacity];
+    size_t input_length = 0u;
+    while (input[input_length] != '\0') {
+        if (input_length + 1u >= copy_path_capacity) {
+            ec = make_error_code(errc::filename_too_long);
+            return false;
+        }
+        ++input_length;
     }
 
-    stat_record destination = {};
+    const char* source = input;
+    size_t source_length = input_length;
+    if (input[0] != '/') {
+        size_t cwd_length = 0u;
+        while (cwd[cwd_length] != '\0') {
+            if (cwd_length + 1u >= copy_path_capacity) {
+                ec = make_error_code(errc::filename_too_long);
+                return false;
+            }
+            ++cwd_length;
+        }
+        if (cwd_length == 0u || cwd[0] != '/') {
+            ec = make_error_code(errc::io_error);
+            return false;
+        }
+        size_t combined_length = cwd_length;
+        const bool separator = cwd[cwd_length - 1u] != '/' &&
+                               input_length != 0u;
+        if (separator) ++combined_length;
+        if (combined_length >= copy_path_capacity ||
+            input_length > copy_path_capacity - 1u - combined_length) {
+            ec = make_error_code(errc::filename_too_long);
+            return false;
+        }
+        for (size_t index = 0u; index < cwd_length; ++index)
+            absolute[index] = cwd[index];
+        if (separator) absolute[cwd_length++] = '/';
+        for (size_t index = 0u; index < input_length; ++index)
+            absolute[cwd_length + index] = input[index];
+        source_length = cwd_length + input_length;
+        absolute[source_length] = '\0';
+        source = absolute;
+    }
+
+    output.length = 0u;
+    output.absolute = source_length != 0u && source[0] == '/';
+    if (output.absolute) output.text[output.length++] = '/';
+    size_t cursor = output.absolute ? 1u : 0u;
+    while (cursor < source_length) {
+        while (cursor < source_length && source[cursor] == '/') ++cursor;
+        const size_t component_begin = cursor;
+        while (cursor < source_length && source[cursor] != '/') ++cursor;
+        const size_t component_length = cursor - component_begin;
+        if (component_length == 0u ||
+            (component_length == 1u && source[component_begin] == '.'))
+            continue;
+        const bool parent = component_length == 2u &&
+            source[component_begin] == '.' && source[component_begin + 1u] == '.';
+        if (parent) {
+            size_t last_begin = output.length;
+            while (last_begin > (output.absolute ? 1u : 0u) &&
+                   output.text[last_begin - 1u] != '/')
+                --last_begin;
+            const size_t last_length = output.length - last_begin;
+            const bool last_is_parent = last_length == 2u &&
+                output.text[last_begin] == '.' &&
+                output.text[last_begin + 1u] == '.';
+            if (last_begin < output.length && !last_is_parent) {
+                output.length = last_begin;
+                if (output.length != 0u &&
+                    output.text[output.length - 1u] == '/')
+                    --output.length;
+                if (output.absolute && output.length == 0u)
+                    output.text[output.length++] = '/';
+                continue;
+            }
+            if (output.absolute) continue;
+        }
+        const size_t separator = output.length != 0u &&
+                                 output.text[output.length - 1u] != '/' ? 1u : 0u;
+        if (output.length + separator >= copy_path_capacity ||
+            component_length > copy_path_capacity - 1u - output.length -
+                                  separator) {
+            ec = make_error_code(errc::filename_too_long);
+            return false;
+        }
+        if (separator) output.text[output.length++] = '/';
+        for (size_t index = 0u; index < component_length; ++index)
+            output.text[output.length++] = source[component_begin + index];
+    }
+    if (output.length == 0u) output.text[output.length++] = '.';
+    output.text[output.length] = '\0';
+    return true;
+}
+
+inline bool copy_destination_is_within_source(const path& from,
+                                              const path& to,
+                                              error_code& ec) noexcept {
+    char cwd[copy_path_capacity];
+    const bool needs_cwd = from.c_str()[0] != '/' || to.c_str()[0] != '/';
+    const char* cwd_value = "";
+    if (needs_cwd) {
+        if (!rin_getcwd(cwd, sizeof(cwd))) {
+            ec = make_error_code(filesystem_error_from_errno());
+            return false;
+        }
+        cwd_value = cwd;
+    }
+    normalized_copy_path source = {};
+    normalized_copy_path destination = {};
+    if (!normalize_copy_path(from.c_str(), cwd_value, source, ec) ||
+        !normalize_copy_path(to.c_str(), cwd_value, destination, ec))
+        return false;
+    if (destination.length < source.length) return false;
+    for (size_t index = 0u; index < source.length; ++index)
+        if (source.text[index] != destination.text[index]) return false;
+    if (destination.length == source.length) return true;
+    return source.length == 1u && source.text[0] == '/' ? true
+        : destination.text[source.length] == '/';
+}
+
+inline bool copy_child_destination(const path& parent, const path& child,
+                                   path& result, error_code& ec) noexcept {
+    const char* source = child.c_str();
+    size_t source_length = 0u;
+    size_t basename = 0u;
+    while (source[source_length] != '\0') {
+        if (source[source_length] == '/') basename = source_length + 1u;
+        ++source_length;
+    }
+    const size_t basename_length = source_length - basename;
+    if (basename_length == 0u) {
+        ec = make_error_code(errc::io_error);
+        return false;
+    }
+    const char* target = parent.c_str();
+    size_t target_length = 0u;
+    while (target[target_length] != '\0') ++target_length;
+    const bool separator = target_length != 0u &&
+                           target[target_length - 1u] != '/';
+    const size_t separator_length = separator ? 1u : 0u;
+    if (target_length >= copy_path_capacity ||
+        separator_length > copy_path_capacity - 1u - target_length ||
+        basename_length > copy_path_capacity - 1u - target_length -
+                              separator_length) {
+        ec = make_error_code(errc::filename_too_long);
+        return false;
+    }
+    result = parent;
+    if (result != parent) {
+        ec = make_error_code(errc::not_enough_memory);
+        return false;
+    }
+    result /= source + basename;
+    const char* actual = result.c_str();
+    size_t position = 0u;
+    for (size_t index = 0u; index < target_length; ++index, ++position)
+        if (actual[position] != target[index]) goto allocation_failure;
+    if (separator && actual[position++] != '/') goto allocation_failure;
+    for (size_t index = 0u; index < basename_length; ++index, ++position)
+        if (actual[position] != source[basename + index])
+            goto allocation_failure;
+    if (actual[position] != '\0') goto allocation_failure;
+    return true;
+
+allocation_failure:
+    ec = make_error_code(errc::not_enough_memory);
+    return false;
+}
+
+inline bool prepare_copy_directory_destination(const path& to,
+                                               unsigned int bits,
+                                               stat_record& destination,
+                                               bool& skip,
+                                               error_code& ec) noexcept {
     volatile stat_record* destination_view = &destination;
     const int destination_status = rin_stat(to.c_str(), &destination);
-    if (destination_status != 0) {
+    bool destination_exists = destination_status == 0;
+    if (!destination_exists) {
         const errc destination_error = filesystem_error_from_errno();
         if (destination_error != errc::no_such_file_or_directory) {
             ec = make_error_code(destination_error);
             return false;
         }
-    } else if (destination_view->st_size < 0) {
+        if (rin_mkdir(to.c_str(), 0755u) != 0) {
+            /* A concurrent creator can win between the metadata probe and
+             * mkdir.  Accept only EEXIST followed by a validated recheck. */
+            const errc mkdir_error = filesystem_error_from_errno();
+            if (mkdir_error != errc::file_exists) {
+                ec = make_error_code(mkdir_error);
+                return false;
+            }
+            destination_exists = true;
+        }
+        if (rin_stat(to.c_str(), &destination) != 0) {
+            ec = make_error_code(filesystem_error_from_errno());
+            return false;
+        }
+    }
+    if (destination_view->st_size < 0) {
         ec = make_error_code(errc::io_error);
         return false;
     }
-    bool destination_exists = destination_status == 0;
-    if (destination_exists) {
-        if ((destination_view->st_mode & 0170000) != 0040000) {
-            /* A directory source cannot be copied into a regular (or other
-             * non-directory) destination.  Preserve the POSIX boundary as
-             * not_a_directory instead of collapsing the conflict into a
-             * generic I/O error. */
-            ec = make_error_code(errc::not_a_directory);
-            return false;
+    if ((destination_view->st_mode & 0170000) != 0040000) {
+        ec = make_error_code(errc::not_a_directory);
+        return false;
+    }
+    skip = destination_exists &&
+        (bits & static_cast<unsigned>(copy_options::skip_existing)) != 0u;
+    return true;
+}
+
+struct copy_directory_frame {
+    path source;
+    path destination;
+    directory_iterator iterator;
+    copy_directory_frame* parent;
+    unsigned long source_device;
+    unsigned long source_inode;
+
+    copy_directory_frame() noexcept
+        : source(), destination(), iterator(), parent(nullptr),
+          source_device(0u), source_inode(0u) {}
+};
+
+struct copy_directory_frame_stack {
+    copy_directory_frame* top;
+
+    copy_directory_frame_stack() noexcept : top(nullptr) {}
+    ~copy_directory_frame_stack() { clear(); }
+
+    void clear() noexcept {
+        while (top) {
+            copy_directory_frame* current = top;
+            top = current->parent;
+            current->~copy_directory_frame();
+            rin_free(current);
         }
-        if ((bits & static_cast<unsigned>(copy_options::skip_existing)) != 0u)
-            return true;
-    } else if (rin_mkdir(to.c_str(), 0755u) != 0) {
-        /* A concurrent creator can win between the metadata probe and
-         * mkdir.  Interpret only EEXIST by one exact metadata recheck; keep
-         * all other provider failures as errors and never guess a directory
-         * into existence. */
-        const errc mkdir_error = filesystem_error_from_errno();
-        if (mkdir_error != errc::file_exists) {
-            ec = make_error_code(mkdir_error);
-            return false;
+    }
+};
+
+inline copy_directory_frame* make_copy_directory_frame(
+        const path& source, const path& destination,
+        copy_directory_frame* parent, unsigned long device,
+        unsigned long inode, error_code& ec) noexcept {
+    void* storage = rin_malloc(sizeof(copy_directory_frame));
+    if (!storage) {
+        ec = make_error_code(errc::not_enough_memory);
+        return nullptr;
+    }
+    copy_directory_frame* frame = nullptr;
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+    try {
+#endif
+        frame = new (storage) copy_directory_frame();
+        frame->source = source;
+        frame->destination = destination;
+        if (frame->source != source || frame->destination != destination) {
+            frame->~copy_directory_frame();
+            rin_free(storage);
+            ec = make_error_code(errc::not_enough_memory);
+            return nullptr;
         }
-        stat_record raced = {};
-        volatile stat_record* raced_view = &raced;
-        const int raced_status = rin_stat(to.c_str(), &raced);
-        if (raced_status != 0) {
-            const errc raced_error = filesystem_error_from_errno();
-            ec = make_error_code(raced_error);
-            return false;
+        frame->parent = parent;
+        frame->source_device = device;
+        frame->source_inode = inode;
+        frame->iterator = directory_iterator(frame->source, ec);
+        if (ec) {
+            frame->~copy_directory_frame();
+            rin_free(storage);
+            return nullptr;
         }
-        if (raced_view->st_size < 0) {
-            ec = make_error_code(errc::io_error);
-            return false;
-        }
-        if ((raced_view->st_mode & 0170000) != 0040000) {
-            ec = make_error_code(errc::not_a_directory);
-            return false;
-        }
-        destination_exists = true;
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+    } catch (const length_error&) {
+        if (frame) frame->~copy_directory_frame();
+        rin_free(storage);
+        ec = make_error_code(errc::filename_too_long);
+        return nullptr;
+    } catch (...) {
+        if (frame) frame->~copy_directory_frame();
+        rin_free(storage);
+        ec = make_error_code(errc::not_enough_memory);
+        return nullptr;
+    }
+#endif
+    return frame;
+}
+
+inline bool copy_directory_nodes_impl(const path& from, const path& to,
+                                      unsigned int bits,
+                                      error_code& ec) noexcept {
+    stat_record source_status = {};
+    volatile stat_record* source_view = &source_status;
+    if (rin_stat(from.c_str(), &source_status) != 0 ||
+        source_view->st_size < 0) {
+        ec = source_view->st_size < 0
+            ? make_error_code(errc::io_error)
+            : make_error_code(filesystem_error_from_errno());
+        return false;
+    }
+    if ((source_view->st_mode & 0170000) != 0040000) {
+        ec = make_error_code(errc::not_a_directory);
+        return false;
     }
 
-    /* A raced directory has the same skip_existing meaning as one observed
-     * by the initial probe: do not traverse or publish any descendant. */
-    if (destination_exists &&
-        (bits & static_cast<unsigned>(copy_options::skip_existing)) != 0u)
-        return true;
+    /* Preserve skip_existing's no-op for an already present destination. */
+    if ((bits & static_cast<unsigned>(copy_options::skip_existing)) != 0u) {
+        stat_record existing = {};
+        volatile stat_record* existing_view = &existing;
+        const int existing_status = rin_stat(to.c_str(), &existing);
+        if (existing_status == 0) {
+            if (existing_view->st_size < 0) {
+                ec = make_error_code(errc::io_error);
+                return false;
+            }
+            if ((existing_view->st_mode & 0170000) != 0040000) {
+                ec = make_error_code(errc::not_a_directory);
+                return false;
+            }
+            return true;
+        }
+        const errc existing_error = filesystem_error_from_errno();
+        if (existing_error != errc::no_such_file_or_directory) {
+            ec = make_error_code(existing_error);
+            return false;
+        }
+    }
 
-    if ((bits & static_cast<unsigned>(copy_options::recursive)) == 0u)
-        return true;
-
-    directory_iterator iter(from, ec);
+    if ((bits & static_cast<unsigned>(copy_options::recursive)) != 0u &&
+        copy_destination_is_within_source(from, to, ec)) {
+        ec = make_error_code(errc::invalid_argument);
+        return false;
+    }
     if (ec) return false;
+
+    stat_record destination_status = {};
+    bool skip_destination = false;
+    if (!prepare_copy_directory_destination(to, bits, destination_status,
+                                            skip_destination, ec))
+        return false;
+    if (skip_destination ||
+        (bits & static_cast<unsigned>(copy_options::recursive)) == 0u)
+        return true;
+    if (destination_status.st_dev == source_status.st_dev &&
+        destination_status.st_ino == source_status.st_ino) {
+        ec = make_error_code(errc::invalid_argument);
+        return false;
+    }
+
+    copy_directory_frame_stack stack;
+    stack.top = make_copy_directory_frame(from, to, nullptr,
+        source_status.st_dev, source_status.st_ino, ec);
+    if (!stack.top) return false;
     const directory_iterator finish;
-    while (iter != finish) {
-        const path child_from = iter->path();
-        const path child_to = to / child_from.filename();
+    while (stack.top) {
+        copy_directory_frame* frame = stack.top;
+        if (frame->iterator == finish) {
+            copy_directory_frame* parent = frame->parent;
+            stack.top = parent;
+            frame->~copy_directory_frame();
+            rin_free(frame);
+            if (parent) {
+                parent->iterator.increment(ec);
+                if (ec) return false;
+            }
+            continue;
+        }
+
+        const directory_entry* entry = nullptr;
+        if (!frame->iterator.current(entry, ec)) return false;
+        const path& child_from = entry->path();
+        path child_to;
+        if (!copy_child_destination(frame->destination, child_from, child_to,
+                                   ec))
+            return false;
         const bool skip_links =
             (bits & static_cast<unsigned>(copy_options::skip_symlinks)) != 0u;
         const bool copy_links =
@@ -3129,11 +3483,12 @@ inline bool copy_directory_nodes(const path& from, const path& to,
                                              true, ec);
                     if (ec) return false;
                 }
-                iter.increment(ec);
+                frame->iterator.increment(ec);
                 if (ec) return false;
                 continue;
             }
         }
+
         stat_record child_status = {};
         volatile stat_record* child_view = &child_status;
         if (rin_stat(child_from.c_str(), &child_status) != 0 ||
@@ -3158,29 +3513,72 @@ inline bool copy_directory_nodes(const path& from, const path& to,
                                 static_cast<copy_options>(replacement), ec);
             }
             if (ec) return false;
-            iter.increment(ec);
+            frame->iterator.increment(ec);
             if (ec) return false;
             continue;
-        } else if (child_type != 0040000) {
-            /* `directories_only` intentionally omits regular files and other
-             * leaf nodes from a recursive walk.  They are not an unsupported
-             * operation: advance the source iterator and keep copying later
-             * directory descendants. */
+        }
+        if (child_type != 0040000) {
+            /* directories_only omits leaves; other unsupported node types
+             * remain an explicit error instead of being reported as copied. */
             if ((bits & static_cast<unsigned>(copy_options::directories_only)) != 0u) {
-                iter.increment(ec);
+                frame->iterator.increment(ec);
                 if (ec) return false;
                 continue;
             }
             ec = make_error_code(errc::not_supported);
             return false;
         }
-        if (!copy_directory_nodes(child_from, child_to, bits, depth + 1u,
-                                  ec))
+
+        for (copy_directory_frame* ancestor = frame; ancestor;
+             ancestor = ancestor->parent) {
+            if (ancestor->source_device == child_status.st_dev &&
+                ancestor->source_inode == child_status.st_ino) {
+                ec = make_error_code(errc::too_many_symbolic_link_levels);
+                return false;
+            }
+        }
+        if (destination_status.st_dev == child_status.st_dev &&
+            destination_status.st_ino == child_status.st_ino) {
+            ec = make_error_code(errc::invalid_argument);
             return false;
-        iter.increment(ec);
-        if (ec) return false;
+        }
+        bool skip_child = false;
+        stat_record child_destination_status = {};
+        if (!prepare_copy_directory_destination(child_to, bits,
+                child_destination_status, skip_child, ec))
+            return false;
+        if (skip_child) {
+            frame->iterator.increment(ec);
+            if (ec) return false;
+            continue;
+        }
+        copy_directory_frame* child = make_copy_directory_frame(
+            child_from, child_to, frame, child_status.st_dev,
+            child_status.st_ino, ec);
+        if (!child) return false;
+        stack.top = child;
     }
     return true;
+}
+
+/* Iterative depth-first copy keeps traversal off the C stack.  Every active
+ * directory owns one heap frame; frame and iterator allocation failures use
+ * the error-code overload instead of terminating the process. */
+inline bool copy_directory_nodes(const path& from, const path& to,
+                                 unsigned int bits, error_code& ec) noexcept {
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+    try {
+        return copy_directory_nodes_impl(from, to, bits, ec);
+    } catch (const length_error&) {
+        ec = make_error_code(errc::filename_too_long);
+        return false;
+    } catch (...) {
+        ec = make_error_code(errc::not_enough_memory);
+        return false;
+    }
+#else
+    return copy_directory_nodes_impl(from, to, bits, ec);
+#endif
 }
 
 } /* namespace detail */
@@ -3308,7 +3706,7 @@ inline void copy(const path& from, const path& to, copy_options options,
                 ec = make_error_code(errc::not_supported);
                 return;
             }
-            (void)detail::copy_directory_nodes(from, to, bits, 0u, ec);
+            (void)detail::copy_directory_nodes(from, to, bits, ec);
             return;
         }
         /* A directory-only copy is intentionally bounded to one directory:
@@ -3374,7 +3772,7 @@ inline void copy(const path& from, const path& to, copy_options options,
     }
     if ((source_view->st_mode & 0170000) == 0040000 &&
         (bits & static_cast<unsigned>(copy_options::recursive)) != 0u) {
-        (void)detail::copy_directory_nodes(from, to, bits, 0u, ec);
+        (void)detail::copy_directory_nodes(from, to, bits, ec);
         return;
     }
     ec = make_error_code((source_view->st_mode & 0170000) == 0040000
