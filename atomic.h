@@ -30,6 +30,14 @@
 #endif
 #endif
 
+/* Product user-space builds use RinOS's fixed-width futex adapter.  Keep the
+ * Linux syscall adapter above isolated to its explicit regression build so
+ * target binaries never inherit Linux syscall numbers or ABI details. */
+#if defined(RIN_USERSPACE) && !defined(RIN_HOST_LINUX_FUTEX_TEST)
+#include "rin_atomic_wait.h"
+#define RIN_ATOMIC_HAS_RINOS_FUTEX 1
+#endif
+
 namespace std {
 
 /* ═══════════════════════════════════════════════════════════════
@@ -498,12 +506,12 @@ struct __atomic_ops<8> {
 };
 
 /*
- * C++20 atomic wait/notify needs a notification channel even when the
- * target has no futex backend.  Keep the atomic object's ABI unchanged by
- * using a bounded, address-hashed generation table.  A hash collision can
- * cause an internal wake/recheck, but wait never returns until the value
- * differs from the requested old value.  The generation is sampled after
- * the value check, so a notify racing with registration cannot be lost.
+ * C++20 atomic wait/notify keeps the atomic object's ABI unchanged by using
+ * a bounded, address-hashed generation table as the futex word.  Wake every
+ * waiter in a hash slot so collisions cannot consume notify_one's only wake;
+ * waiters for other objects recheck their own value and park again.  Sampling
+ * the generation after the value check closes the value-check/registration
+ * race.
  */
 struct __atomic_wait_registry {
     volatile uint32_t sequence[64];
@@ -530,10 +538,16 @@ inline void __atomic_wait_notify(const void* address, bool all) noexcept {
 #if defined(RIN_ATOMIC_HAS_LINUX_FUTEX)
     /* The generation increment closes the sample→wait race: a waiter that
      * observed the old value receives EAGAIN when the notify won the race.
-     * Wake one for notify_one and all for notify_all; hash collisions still
-     * only cause a value recheck. */
+     * Wake the whole hash slot even for notify_one: a collision waiter may
+     * otherwise consume the single wake while the notified object's waiter
+     * remains parked indefinitely.  Other objects only recheck their value. */
+    (void)all;
     (void)syscall(SYS_futex, const_cast<uint32_t*>(sequence), FUTEX_WAKE_PRIVATE,
-                  all ? 0x7fffffff : 1, nullptr, nullptr, 0);
+                  0x7fffffff, nullptr, nullptr, 0);
+#elif defined(RIN_ATOMIC_HAS_RINOS_FUTEX)
+    (void)all;
+    if (rin_atomic_notify_all_u32(sequence) < 0)
+        rin_panic("atomic::notify futex wake failed");
 #else
     (void)all;
 #endif
@@ -544,6 +558,9 @@ inline void __atomic_wait_futex(volatile uint32_t* sequence,
 #if defined(RIN_ATOMIC_HAS_LINUX_FUTEX)
     (void)syscall(SYS_futex, const_cast<uint32_t*>(sequence), FUTEX_WAIT_PRIVATE,
                   static_cast<int>(generation), nullptr, nullptr, 0);
+#elif defined(RIN_ATOMIC_HAS_RINOS_FUTEX)
+    if (rin_atomic_wait_u32(sequence, generation, nullptr) != 0)
+        rin_panic("atomic::wait futex wait failed");
 #else
     (void)sequence;
     (void)generation;
