@@ -40,6 +40,7 @@ extern "C" {
     /* ファイル情報 */
     int rin_stat(const char* path, void* buf);
     int rin_lstat(const char* path, void* buf);
+    int rin_fstat(int fd, void* buf);
     int rin_access(const char* path, int mode);
 
     /* ディレクトリ操作 */
@@ -488,7 +489,8 @@ public:
             if (component == "..") {
                 if (!normalized.empty() && normalized.back() != "..") {
                     normalized.pop_back();
-                    trailing_separator = !normalized.empty();
+                    trailing_separator = !normalized.empty() &&
+                                         normalized.back() != "..";
                 } else if (!absolute) {
                     normalized.push_back(component);
                     trailing_separator = false;
