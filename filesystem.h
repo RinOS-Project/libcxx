@@ -2669,11 +2669,16 @@ inline bool remove(const path& p, error_code& ec) noexcept {
      * call unlink.  Preserve the probe failure and keep the operation
      * failure-atomic. */
     error_code status_ec;
-    const bool directory = is_directory(p, status_ec);
+    const file_status entry_status = symlink_status(p, status_ec);
     if (status_ec) {
+        if (status_ec == make_error_code(errc::no_such_file_or_directory) ||
+            status_ec == make_error_code(errc::not_a_directory)) {
+            return false;
+        }
         ec = status_ec;
         return false;
     }
+    const bool directory = is_directory(entry_status);
     const bool removed = directory
         ? rin_rmdir(p.c_str()) == 0
         : rin_unlink(p.c_str()) == 0;
@@ -2687,11 +2692,18 @@ inline bool remove(const path& p, error_code& ec) noexcept {
 inline uintmax_t remove_all(const path& p, error_code& ec) noexcept {
     ec.clear();
     error_code status_ec;
-    const bool directory = is_directory(p, status_ec);
+    /* remove_all removes a symlink itself.  Following it here would recurse
+     * into and delete the target before rmdir eventually rejects the link. */
+    const file_status entry_status = symlink_status(p, status_ec);
     if (status_ec) {
+        if (status_ec == make_error_code(errc::no_such_file_or_directory) ||
+            status_ec == make_error_code(errc::not_a_directory)) {
+            return 0;
+        }
         ec = status_ec;
         return static_cast<uintmax_t>(-1);
     }
+    const bool directory = is_directory(entry_status);
     if (!directory) {
         if (rin_unlink(p.c_str()) != 0) {
             ec = make_error_code(detail::filesystem_error_from_errno());
