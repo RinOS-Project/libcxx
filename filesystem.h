@@ -587,36 +587,48 @@ public:
     }
 
     path lexically_relative(const path& base) const {
-        const path target_normal = lexically_normal();
-        const path base_normal = base.lexically_normal();
-        vector<string_type> target_components;
-        vector<string_type> base_components;
-        bool target_absolute = false;
-        bool base_absolute = false;
-        bool target_trailing = false;
-        bool base_trailing = false;
-        split_raw_components(target_normal.pathname_, target_components,
-                             target_absolute, target_trailing);
-        split_raw_components(base_normal.pathname_, base_components,
-                             base_absolute, base_trailing);
-        if (target_absolute != base_absolute) return path();
-
-        size_t common = 0;
-        while (common < target_components.size() &&
-               common < base_components.size() &&
-               target_components[common] == base_components[common]) {
-            ++common;
+        if (root_name() != base.root_name() ||
+            is_absolute() != base.is_absolute() ||
+            (!has_root_directory() && base.has_root_directory())) {
+            return path();
         }
 
-        vector<string_type> relative;
-        for (size_t index = common; index < base_components.size(); ++index) {
-            if (base_components[index] == "..") return path();
-            relative.push_back("..");
+        iterator target = begin();
+        iterator target_end = end();
+        iterator base_component = base.begin();
+        iterator base_end = base.end();
+        while (target != target_end && base_component != base_end &&
+               *target == *base_component) {
+            ++target;
+            ++base_component;
         }
-        for (size_t index = common; index < target_components.size(); ++index)
-            relative.push_back(target_components[index]);
-        if (relative.empty()) return path(".");
-        return compose_components(false, relative, target_trailing);
+
+        if (target == target_end && base_component == base_end)
+            return path(".");
+
+        ptrdiff_t parent_count = 0;
+        for (iterator current = base_component; current != base_end; ++current) {
+            const path component = *current;
+            if (component == path("..")) {
+                --parent_count;
+            } else if (!component.empty() && component != path(".")) {
+                ++parent_count;
+            }
+        }
+        if (parent_count < 0) return path();
+
+        if (parent_count == 0 &&
+            (target == target_end || (*target).empty())) {
+            return path(".");
+        }
+
+        path relative;
+        while (parent_count > 0) {
+            relative /= path("..");
+            --parent_count;
+        }
+        for (; target != target_end; ++target) relative /= *target;
+        return relative;
     }
 
     path lexically_proximate(const path& base) const {
