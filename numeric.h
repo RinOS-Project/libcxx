@@ -308,16 +308,19 @@ constexpr OutputIt transform_exclusive_scan(InputIt first, InputIt last,
 
 #if __cplusplus >= 201703L
 /*
- * Execution-policy exception boundary.  RinOS currently has no scheduler-
- * backed parallel algorithm owner, so all policies still use the checked
- * sequential core.  The policy exception contract is nevertheless kept
- * distinct: sequenced execution propagates a callable exception, while the
- * parallel and unsequenced policies terminate as required by the standard.
+ * Execution-policy exception boundary. Numeric algorithms use the checked
+ * sequential core until their reduction operations are decomposed; every
+ * standard execution policy still enforces the required terminate behavior
+ * when an invoked element operation exits by exception.
  */
 namespace __numeric_detail {
 
 template<class Policy>
 struct policy_terminates_on_exception : false_type {};
+
+template<>
+struct policy_terminates_on_exception<execution::sequenced_policy>
+    : true_type {};
 
 template<>
 struct policy_terminates_on_exception<execution::parallel_policy> : true_type {};
@@ -354,10 +357,8 @@ inline auto invoke_policy(Policy&& policy, Function&& function)
 
 /*
  * Execution-policy overloads.  The current freestanding runtime has no
- * scheduler-backed parallel algorithm owner, so every policy is deliberately
- * evaluated through the already-checked sequential implementation.  Policy
- * exception handling remains standard-conforming even while scheduling is
- * unavailable: seq propagates, and par/unsequenced terminate.
+ * numeric reductions currently use the checked sequential implementation;
+ * exception handling is shared by all standard execution policies.
  */
 template<typename ExecutionPolicy, typename InputIt,
          enable_if_t<is_execution_policy<remove_cv_t<

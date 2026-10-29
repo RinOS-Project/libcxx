@@ -32,7 +32,12 @@
 
 namespace std {
 
+class thread;
+
 namespace detail {
+
+template<typename Callable, typename... Args>
+int try_start_thread(thread& output, Callable&& function, Args&&... args);
 
 [[noreturn]] inline void thread_operation_failed(int error,
                                                  const char* operation) {
@@ -160,6 +165,9 @@ public:
 private:
     pthread_t thread_id_;
 
+    template<typename Callable, typename... Args>
+    friend int detail::try_start_thread(thread&, Callable&&, Args&&...);
+
     /* スレッド関数呼び出し用ラッパー */
     template<typename Callable>
     struct thread_data {
@@ -194,32 +202,17 @@ public:
                  is_invocable<decay_t<Callable>, decay_t<Args>...>::value,
                  int> = 0>
     explicit thread(Callable&& f, Args&&... args) : thread_id_(0) {
-        /* C++11でもdecay-copyした関数と引数を新しいthread上でrvalueとして呼ぶ */
-        using bound_type = detail::thread_invoker<
-            decay_t<Callable>, decay_t<Args>...>;
-        bound_type bound(std::forward<Callable>(f),
-                         std::forward<Args>(args)...);
-        using Data = thread_data<bound_type>;
-        void* storage = ::rin_malloc(sizeof(Data));
-        if (!storage) detail::thread_allocation_failed();
-        Data* data = nullptr;
-#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
-        try {
-            data = ::new (storage) Data(std::move(bound));
-        } catch (...) {
-            ::rin_free(storage);
-            throw;
-        }
-#else
-        data = ::new (storage) Data(std::move(bound));
-#endif
-
-        int result = pthread_create(&thread_id_, nullptr, Data::thread_func, data);
+        const int result = detail::try_start_thread(
+            *this, std::forward<Callable>(f), std::forward<Args>(args)...);
         if (result != 0) {
-            Data::destroy(data);
-            thread_id_ = 0;
             detail::thread_operation_failed(result, "thread construction");
         }
+    }
+
+    template<typename Callable, typename... Args>
+    bool try_start(Callable&& f, Args&&... args) {
+        return detail::try_start_thread(
+            *this, std::forward<Callable>(f), std::forward<Args>(args)...) == 0;
     }
 
     /* コピー禁止 */
@@ -315,6 +308,48 @@ public:
 #endif
     }
 };
+
+namespace detail {
+
+/* The execution-policy dispatcher needs to treat OS thread exhaustion as a
+ * recoverable condition and run that chunk on the caller. Keep the standard
+ * constructor's throwing contract while exposing this internal result path. */
+template<typename Callable, typename... Args>
+int try_start_thread(thread& output, Callable&& function, Args&&... args) {
+    if (output.thread_id_ != 0) return EBUSY;
+
+    using bound_type = thread_invoker<
+        decay_t<Callable>, decay_t<Args>...>;
+    bound_type bound(std::forward<Callable>(function),
+                     std::forward<Args>(args)...);
+    using Data = thread::thread_data<bound_type>;
+    void* storage = ::rin_malloc(sizeof(Data));
+    if (!storage) return ENOMEM;
+
+    Data* data = nullptr;
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+    try {
+        data = ::new (storage) Data(std::move(bound));
+    } catch (...) {
+        ::rin_free(storage);
+        throw;
+    }
+#else
+    data = ::new (storage) Data(std::move(bound));
+#endif
+
+    pthread_t created_thread = 0;
+    const int result = pthread_create(
+        &created_thread, nullptr, Data::thread_func, data);
+    if (result != 0) {
+        Data::destroy(data);
+        return result;
+    }
+    output.thread_id_ = created_thread;
+    return 0;
+}
+
+} /* namespace detail */
 
 inline void swap(thread& x, thread& y) noexcept {
     x.swap(y);

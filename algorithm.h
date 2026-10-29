@@ -2092,19 +2092,367 @@ pair<ForwardIt, ForwardIt> minmax_element(ForwardIt first, ForwardIt last, Compa
 
 #if __cplusplus >= 201703L
 /*
- * Execution-policy overloads currently share the checked sequential cores.
- * This keeps the standard overload set usable without pretending that RinOS
- * has a parallel scheduler: policy objects affect participation only, while
- * ordering, iterator results, and callable exceptions remain identical to
- * the corresponding non-policy operation.
+ * Standard execution-policy boundary and bounded worker dispatch. Elementwise
+ * random-access ranges can use up to eight workers; small ranges, nested
+ * dispatch, and non-random-access iterators stay on the caller. Unsequenced
+ * policy loops carry compiler vectorization hints, while worker startup failure
+ * degrades the affected chunk to caller execution.
  */
+
+} /* namespace std */
+
+namespace std {
+class thread;
+[[noreturn]] void terminate() noexcept;
+} /* namespace std */
+
+#include "atomic.h"
+#include "exception.h"
+#include "thread.h"
+
+namespace std {
+namespace __detail {
+
+template<typename Policy>
+struct is_parallel_algorithm_policy : false_type {};
+
+template<>
+struct is_parallel_algorithm_policy<execution::parallel_policy> : true_type {};
+
+template<>
+struct is_parallel_algorithm_policy<execution::parallel_unsequenced_policy>
+    : true_type {};
+
+template<typename Policy>
+struct is_unsequenced_algorithm_policy : false_type {};
+
+template<>
+struct is_unsequenced_algorithm_policy<execution::parallel_unsequenced_policy>
+    : true_type {};
+
+#if __cplusplus >= 202002L
+template<>
+struct is_unsequenced_algorithm_policy<execution::unsequenced_policy>
+    : true_type {};
+#endif
+
+/* A policy algorithm may be called recursively from an element operation.
+ * Nested dispatch stays on the current worker so bounded per-call workers do
+ * not multiply into an unbounded thread tree. */
+inline unsigned& algorithm_worker_depth() noexcept {
+    static thread_local unsigned depth = 0;
+    return depth;
+}
+
+struct algorithm_worker_depth_guard {
+    algorithm_worker_depth_guard() noexcept { ++algorithm_worker_depth(); }
+    ~algorithm_worker_depth_guard() { --algorithm_worker_depth(); }
+};
+
+template<typename Policy, typename Function>
+inline auto invoke_algorithm_policy(Policy&&, Function&& function)
+    -> decltype(std::forward<Function>(function)()) {
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+    try {
+        return std::forward<Function>(function)();
+    } catch (...) {
+        /* All standard execution-policy overloads terminate when an
+         * operation invoked by the algorithm lets an exception escape. */
+        std::terminate();
+    }
+#else
+    return std::forward<Function>(function)();
+#endif
+}
+
+template<typename RandomIt, typename Difference, typename Function,
+         typename Vectorize, typename Thread = thread>
+inline void parallel_for_index(RandomIt first, Difference count,
+                               Function function, false_type, Vectorize) {
+    (void)first;
+    if constexpr (Vectorize::value) {
+#if defined(__clang__)
+#pragma clang loop vectorize(enable) interleave(enable)
+#elif defined(__GNUC__)
+#pragma GCC ivdep
+#endif
+        for (Difference index = 0; index < count; ++index)
+            function(index);
+    } else {
+        for (Difference index = 0; index < count; ++index)
+            function(index);
+    }
+}
+
+template<typename RandomIt, typename Difference, typename Function,
+         typename Vectorize, typename Thread = thread>
+inline void parallel_for_index(RandomIt first, Difference count,
+                               Function function, true_type, Vectorize) {
+    if (count <= 0) return;
+
+    constexpr Difference minimum_parallel_range =
+        static_cast<Difference>(2048);
+    if (algorithm_worker_depth() != 0 || count < minimum_parallel_range) {
+        if constexpr (Vectorize::value) {
+#if defined(__clang__)
+#pragma clang loop vectorize(enable) interleave(enable)
+#elif defined(__GNUC__)
+#pragma GCC ivdep
+#endif
+            for (Difference index = 0; index < count; ++index)
+                function(index);
+        } else {
+            for (Difference index = 0; index < count; ++index)
+                function(index);
+        }
+        return;
+    }
+
+    unsigned int hardware_workers = Thread::hardware_concurrency();
+    if (hardware_workers < 2u) {
+        if constexpr (Vectorize::value) {
+#if defined(__clang__)
+#pragma clang loop vectorize(enable) interleave(enable)
+#elif defined(__GNUC__)
+#pragma GCC ivdep
+#endif
+            for (Difference index = 0; index < count; ++index)
+                function(index);
+        } else {
+            for (Difference index = 0; index < count; ++index)
+                function(index);
+        }
+        return;
+    }
+    if (hardware_workers > 8u) hardware_workers = 8u;
+
+    const Difference range_workers = count / minimum_parallel_range +
+        (count % minimum_parallel_range != 0 ? 1 : 0);
+    unsigned int worker_count = hardware_workers;
+    if (static_cast<unsigned long long>(range_workers) < worker_count)
+        worker_count = static_cast<unsigned int>(range_workers);
+    if (worker_count < 2u) {
+        if constexpr (Vectorize::value) {
+#if defined(__clang__)
+#pragma clang loop vectorize(enable) interleave(enable)
+#elif defined(__GNUC__)
+#pragma GCC ivdep
+#endif
+            for (Difference index = 0; index < count; ++index)
+                function(index);
+        } else {
+            for (Difference index = 0; index < count; ++index)
+                function(index);
+        }
+        return;
+    }
+
+    const Difference worker_divisor = static_cast<Difference>(worker_count);
+    const Difference base_chunk = count / worker_divisor;
+    const Difference extra_items = count % worker_divisor;
+    auto run_chunk = [function](Difference begin, Difference end) mutable {
+        algorithm_worker_depth_guard depth_guard;
+        if constexpr (Vectorize::value) {
+#if defined(__clang__)
+#pragma clang loop vectorize(enable) interleave(enable)
+#elif defined(__GNUC__)
+#pragma GCC ivdep
+#endif
+            for (Difference index = begin; index < end; ++index)
+                function(index);
+        } else {
+            for (Difference index = begin; index < end; ++index)
+                function(index);
+        }
+    };
+
+    Thread workers[7];
+    unsigned int started = 0u;
+    for (unsigned int worker = 1u; worker < worker_count; ++worker) {
+        const Difference worker_index = static_cast<Difference>(worker);
+        const Difference begin = worker_index * base_chunk +
+            (worker_index < extra_items ? worker_index : extra_items);
+        const Difference end = begin + base_chunk +
+            (worker_index < extra_items ? 1 : 0);
+        if (workers[started].try_start(run_chunk, begin, end))
+            ++started;
+        else
+            run_chunk(begin, end);
+    }
+
+    const Difference main_end = base_chunk + (extra_items != 0 ? 1 : 0);
+    run_chunk(0, main_end);
+    for (unsigned int worker = 0u; worker < started; ++worker)
+        workers[worker].join();
+}
+
+template<typename Function, typename Thread = thread>
+inline void parallel_for_tasks(unsigned int task_count, Function function) {
+    if (task_count == 0u) return;
+    if (algorithm_worker_depth() != 0u || task_count == 1u) {
+        for (unsigned int task = 0u; task < task_count; ++task)
+            function(task);
+        return;
+    }
+
+    auto run_task = [function](unsigned int task) mutable {
+        algorithm_worker_depth_guard depth_guard;
+        function(task);
+    };
+    Thread workers[7];
+    unsigned int started = 0u;
+    for (unsigned int task = 1u; task < task_count; ++task) {
+        if (workers[started].try_start(run_task, task))
+            ++started;
+        else
+            run_task(task);
+    }
+    run_task(0u);
+    for (unsigned int worker = 0u; worker < started; ++worker)
+        workers[worker].join();
+}
+
+
+
+template<typename Policy, typename RandomIt, typename Difference,
+         typename Function>
+inline void policy_for_index(Policy&&, RandomIt first, Difference count,
+                             Function function) {
+    using policy_type = remove_cv_t<remove_reference_t<Policy>>;
+    using should_parallelize = integral_constant<bool,
+        is_parallel_algorithm_policy<policy_type>::value>;
+    using should_vectorize = integral_constant<bool,
+        is_unsequenced_algorithm_policy<policy_type>::value>;
+    parallel_for_index(first, count,
+                       [function](Difference index) mutable {
+                           function(index);
+                       }, should_parallelize{}, should_vectorize{});
+}
+
+template<typename Policy, typename RandomIt, typename Function>
+inline void policy_for_each(Policy&& policy, RandomIt first, RandomIt last,
+                            Function function, true_type) {
+    using difference_type = typename iterator_traits<RandomIt>::difference_type;
+    const difference_type count = last - first;
+    policy_for_index(std::forward<Policy>(policy), first, count,
+                     [first, function](difference_type index) mutable {
+                         function(*(first + index));
+                     });
+}
+
+template<typename Policy, typename InputIt, typename Function>
+inline void policy_for_each(Policy&& policy, InputIt first, InputIt last,
+                            Function function, false_type) {
+    using policy_type = remove_cv_t<remove_reference_t<Policy>>;
+    if constexpr (is_unsequenced_algorithm_policy<policy_type>::value) {
+#if defined(__clang__)
+#pragma clang loop vectorize(enable) interleave(enable)
+#elif defined(__GNUC__)
+#pragma GCC ivdep
+#endif
+        for (; first != last; ++first) function(*first);
+    } else {
+        for (; first != last; ++first) function(*first);
+    }
+}
+
+template<typename Policy, typename InputIt, typename Function>
+inline void policy_for_each(Policy&& policy, InputIt first, InputIt last,
+                            Function function) {
+    using category = typename iterator_traits<InputIt>::iterator_category;
+    using random_access = is_base_of<random_access_iterator_tag, category>;
+    policy_for_each(std::forward<Policy>(policy), first, last, function,
+                    random_access{});
+}
+
+
+} /* namespace __detail */
+} /* namespace std */
+
+namespace std {
+
+namespace __detail {
+
+template<typename Policy, typename RandomIt, typename Compare,
+         typename Thread = thread>
+inline void policy_sort(Policy&& policy, RandomIt first, RandomIt last,
+                       Compare compare, bool stable) {
+    using policy_type = remove_cv_t<remove_reference_t<Policy>>;
+    using difference_type = typename iterator_traits<RandomIt>::difference_type;
+    const difference_type count = last - first;
+    constexpr difference_type minimum_parallel_range =
+        static_cast<difference_type>(4096);
+    if (!is_parallel_algorithm_policy<policy_type>::value ||
+        algorithm_worker_depth() != 0u || count < minimum_parallel_range) {
+        if (stable) std::stable_sort(first, last, compare);
+        else std::sort(first, last, compare);
+        return;
+    }
+
+    unsigned int worker_count = Thread::hardware_concurrency();
+    if (worker_count > 8u) worker_count = 8u;
+    if (worker_count < 2u) {
+        if (stable) std::stable_sort(first, last, compare);
+        else std::sort(first, last, compare);
+        return;
+    }
+    const difference_type range_workers =
+        count / minimum_parallel_range +
+        (count % minimum_parallel_range != 0 ? 1 : 0);
+    if (static_cast<unsigned long long>(range_workers) < worker_count)
+        worker_count = static_cast<unsigned int>(range_workers);
+    if (worker_count < 2u) {
+        if (stable) std::stable_sort(first, last, compare);
+        else std::sort(first, last, compare);
+        return;
+    }
+
+    const difference_type worker_divisor =
+        static_cast<difference_type>(worker_count);
+    const difference_type base_chunk = count / worker_divisor;
+    const difference_type extra_items = count % worker_divisor;
+    parallel_for_tasks(worker_count,
+        [first, count, base_chunk, extra_items, compare, stable]
+        (unsigned int task) mutable {
+            const difference_type task_index =
+                static_cast<difference_type>(task);
+            const difference_type begin = task_index * base_chunk +
+                (task_index < extra_items ? task_index : extra_items);
+            const difference_type end = begin + base_chunk +
+                (task_index < extra_items ? 1 : 0);
+            if (stable) std::stable_sort(first + begin, first + end, compare);
+            else std::sort(first + begin, first + end, compare);
+        });
+
+    difference_type run_size = base_chunk + (extra_items != 0 ? 1 : 0);
+    while (run_size < count) {
+        const bool final_pass = run_size >= count - run_size;
+        const difference_type combined_size =
+            final_pass ? count : run_size * 2;
+        for (difference_type begin = 0; begin < count;) {
+            if (run_size >= count - begin) break;
+            difference_type middle = begin + run_size;
+            const difference_type remaining = count - begin;
+            difference_type end = combined_size >= remaining
+                ? count : begin + combined_size;
+            std::inplace_merge(first + begin, first + middle, first + end,
+                               compare);
+            begin = end;
+        }
+        if (final_pass) break;
+        run_size = combined_size;
+    }
+}
+
+} /* namespace __detail */
 template<typename ExecutionPolicy, typename InputIt, typename UnaryFunc,
          enable_if_t<__detail::is_algorithm_execution_policy<
                           ExecutionPolicy>::value, int> = 0>
-UnaryFunc for_each(ExecutionPolicy&& policy, InputIt first, InputIt last,
-                   UnaryFunc function) {
-    (void)policy;
-    return for_each(first, last, function);
+void for_each(ExecutionPolicy&& policy, InputIt first, InputIt last,
+              UnaryFunc function) {
+    __detail::invoke_algorithm_policy(policy, [&]() {
+            __detail::policy_for_each(policy, first, last, function);
+        });
 }
 
 template<typename InputIt, typename Size, typename UnaryFunc>
@@ -2120,8 +2468,12 @@ template<typename ExecutionPolicy, typename InputIt, typename Size,
                           ExecutionPolicy>::value, int> = 0>
 InputIt for_each_n(ExecutionPolicy&& policy, InputIt first, Size count,
                    UnaryFunc function) {
-    (void)policy;
-    return for_each_n(first, count, function);
+    return __detail::invoke_algorithm_policy(policy, [&]() {
+            InputIt last = first;
+            for (Size index = 0; index < count; ++index) ++last;
+            __detail::policy_for_each(policy, first, last, function);
+            return last;
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt, typename UnaryPredicate,
@@ -2129,8 +2481,15 @@ template<typename ExecutionPolicy, typename InputIt, typename UnaryPredicate,
                           ExecutionPolicy>::value, int> = 0>
 bool all_of(ExecutionPolicy&& policy, InputIt first, InputIt last,
             UnaryPredicate predicate) {
-    (void)policy;
-    return all_of(first, last, predicate);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            atomic<bool> result(true);
+            __detail::policy_for_each(policy, first, last,
+                [predicate, &result](auto&& value) mutable {
+                    if (!predicate(value)) result.store(false);
+                });
+            return result.load();
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt, typename UnaryPredicate,
@@ -2138,8 +2497,15 @@ template<typename ExecutionPolicy, typename InputIt, typename UnaryPredicate,
                           ExecutionPolicy>::value, int> = 0>
 bool any_of(ExecutionPolicy&& policy, InputIt first, InputIt last,
             UnaryPredicate predicate) {
-    (void)policy;
-    return any_of(first, last, predicate);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            atomic<bool> result(false);
+            __detail::policy_for_each(policy, first, last,
+                [predicate, &result](auto&& value) mutable {
+                    if (predicate(value)) result.store(true);
+                });
+            return result.load();
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt, typename UnaryPredicate,
@@ -2147,8 +2513,15 @@ template<typename ExecutionPolicy, typename InputIt, typename UnaryPredicate,
                           ExecutionPolicy>::value, int> = 0>
 bool none_of(ExecutionPolicy&& policy, InputIt first, InputIt last,
              UnaryPredicate predicate) {
-    (void)policy;
-    return none_of(first, last, predicate);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            atomic<bool> result(true);
+            __detail::policy_for_each(policy, first, last,
+                [predicate, &result](auto&& value) mutable {
+                    if (predicate(value)) result.store(false);
+                });
+            return result.load();
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt, typename T,
@@ -2156,8 +2529,31 @@ template<typename ExecutionPolicy, typename InputIt, typename T,
                           ExecutionPolicy>::value, int> = 0>
 InputIt find(ExecutionPolicy&& policy, InputIt first, InputIt last,
              const T& value) {
-    (void)policy;
-    return find(first, last, value);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            using category =
+                typename iterator_traits<InputIt>::iterator_category;
+            if constexpr (is_base_of<random_access_iterator_tag,
+                                     category>::value) {
+                using difference_type =
+                    typename iterator_traits<InputIt>::difference_type;
+                const difference_type count = last - first;
+                atomic<difference_type> match(count);
+                __detail::policy_for_index(
+                    policy, first, count,
+                    [first, &match, &value](difference_type index) {
+                        if (index >= match.load()) return;
+                        if (*(first + index) != value) return;
+                        difference_type current = match.load();
+                        while (index < current &&
+                               !match.compare_exchange_weak(current, index)) {}
+                    });
+                const difference_type index = match.load();
+                return index < count ? first + index : last;
+            } else {
+                return find(first, last, value);
+            }
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt, typename UnaryPredicate,
@@ -2165,8 +2561,31 @@ template<typename ExecutionPolicy, typename InputIt, typename UnaryPredicate,
                           ExecutionPolicy>::value, int> = 0>
 InputIt find_if(ExecutionPolicy&& policy, InputIt first, InputIt last,
                 UnaryPredicate predicate) {
-    (void)policy;
-    return find_if(first, last, predicate);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            using category =
+                typename iterator_traits<InputIt>::iterator_category;
+            if constexpr (is_base_of<random_access_iterator_tag,
+                                     category>::value) {
+                using difference_type =
+                    typename iterator_traits<InputIt>::difference_type;
+                const difference_type count = last - first;
+                atomic<difference_type> match(count);
+                __detail::policy_for_index(
+                    policy, first, count,
+                    [first, &match, predicate](difference_type index) mutable {
+                        if (index >= match.load() ||
+                            !predicate(*(first + index))) return;
+                        difference_type current = match.load();
+                        while (index < current &&
+                               !match.compare_exchange_weak(current, index)) {}
+                    });
+                const difference_type index = match.load();
+                return index < count ? first + index : last;
+            } else {
+                return find_if(first, last, predicate);
+            }
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt, typename UnaryPredicate,
@@ -2174,8 +2593,31 @@ template<typename ExecutionPolicy, typename InputIt, typename UnaryPredicate,
                           ExecutionPolicy>::value, int> = 0>
 InputIt find_if_not(ExecutionPolicy&& policy, InputIt first, InputIt last,
                     UnaryPredicate predicate) {
-    (void)policy;
-    return find_if_not(first, last, predicate);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            using category =
+                typename iterator_traits<InputIt>::iterator_category;
+            if constexpr (is_base_of<random_access_iterator_tag,
+                                     category>::value) {
+                using difference_type =
+                    typename iterator_traits<InputIt>::difference_type;
+                const difference_type count = last - first;
+                atomic<difference_type> match(count);
+                __detail::policy_for_index(
+                    policy, first, count,
+                    [first, &match, predicate](difference_type index) mutable {
+                        if (index >= match.load() ||
+                            predicate(*(first + index))) return;
+                        difference_type current = match.load();
+                        while (index < current &&
+                               !match.compare_exchange_weak(current, index)) {}
+                    });
+                const difference_type index = match.load();
+                return index < count ? first + index : last;
+            } else {
+                return find_if_not(first, last, predicate);
+            }
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt, typename T,
@@ -2183,8 +2625,17 @@ template<typename ExecutionPolicy, typename InputIt, typename T,
                           ExecutionPolicy>::value, int> = 0>
 typename iterator_traits<InputIt>::difference_type
 count(ExecutionPolicy&& policy, InputIt first, InputIt last, const T& value) {
-    (void)policy;
-    return count(first, last, value);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            atomic<size_t> matches(0u);
+            __detail::policy_for_each(policy, first, last,
+                [&value, &matches](auto&& element) {
+                    if (element == value) matches.fetch_add(1u);
+                });
+            return static_cast<
+                typename iterator_traits<InputIt>::difference_type>(
+                    matches.load());
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt, typename UnaryPredicate,
@@ -2193,8 +2644,17 @@ template<typename ExecutionPolicy, typename InputIt, typename UnaryPredicate,
 typename iterator_traits<InputIt>::difference_type
 count_if(ExecutionPolicy&& policy, InputIt first, InputIt last,
          UnaryPredicate predicate) {
-    (void)policy;
-    return count_if(first, last, predicate);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            atomic<size_t> matches(0u);
+            __detail::policy_for_each(policy, first, last,
+                [predicate, &matches](auto&& element) mutable {
+                    if (predicate(element)) matches.fetch_add(1u);
+                });
+            return static_cast<
+                typename iterator_traits<InputIt>::difference_type>(
+                    matches.load());
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt, typename OutputIt,
@@ -2202,8 +2662,30 @@ template<typename ExecutionPolicy, typename InputIt, typename OutputIt,
                           ExecutionPolicy>::value, int> = 0>
 OutputIt copy(ExecutionPolicy&& policy, InputIt first, InputIt last,
               OutputIt result) {
-    (void)policy;
-    return copy(first, last, result);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            using input_category =
+                typename iterator_traits<InputIt>::iterator_category;
+            using output_category =
+                typename iterator_traits<OutputIt>::iterator_category;
+            if constexpr (
+                is_base_of<random_access_iterator_tag,
+                           input_category>::value &&
+                is_base_of<random_access_iterator_tag,
+                           output_category>::value) {
+                using difference_type =
+                    typename iterator_traits<InputIt>::difference_type;
+                const difference_type count = last - first;
+                __detail::policy_for_index(
+                    policy, first, count,
+                    [first, result](difference_type index) {
+                        *(result + index) = *(first + index);
+                    });
+                return result + count;
+            } else {
+                return copy(first, last, result);
+            }
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt, typename OutputIt,
@@ -2212,8 +2694,10 @@ template<typename ExecutionPolicy, typename InputIt, typename OutputIt,
                           ExecutionPolicy>::value, int> = 0>
 OutputIt copy_if(ExecutionPolicy&& policy, InputIt first, InputIt last,
                  OutputIt result, UnaryPredicate predicate) {
-    (void)policy;
-    return copy_if(first, last, result, predicate);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return copy_if(first, last, result, predicate);
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt, typename Size,
@@ -2222,8 +2706,32 @@ template<typename ExecutionPolicy, typename InputIt, typename Size,
                           ExecutionPolicy>::value, int> = 0>
 OutputIt copy_n(ExecutionPolicy&& policy, InputIt first, Size count,
                 OutputIt result) {
-    (void)policy;
-    return copy_n(first, count, result);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            using input_category =
+                typename iterator_traits<InputIt>::iterator_category;
+            using output_category =
+                typename iterator_traits<OutputIt>::iterator_category;
+            if constexpr (
+                is_base_of<random_access_iterator_tag,
+                           input_category>::value &&
+                is_base_of<random_access_iterator_tag,
+                           output_category>::value) {
+                using difference_type =
+                    typename iterator_traits<InputIt>::difference_type;
+                if (count <= 0) return result;
+                const difference_type length =
+                    static_cast<difference_type>(count);
+                __detail::policy_for_index(
+                    policy, first, length,
+                    [first, result](difference_type index) {
+                        *(result + index) = *(first + index);
+                    });
+                return result + length;
+            } else {
+                return copy_n(first, count, result);
+            }
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt, typename OutputIt,
@@ -2231,8 +2739,30 @@ template<typename ExecutionPolicy, typename InputIt, typename OutputIt,
                           ExecutionPolicy>::value, int> = 0>
 OutputIt move(ExecutionPolicy&& policy, InputIt first, InputIt last,
               OutputIt result) {
-    (void)policy;
-    return move(first, last, result);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            using input_category =
+                typename iterator_traits<InputIt>::iterator_category;
+            using output_category =
+                typename iterator_traits<OutputIt>::iterator_category;
+            if constexpr (
+                is_base_of<random_access_iterator_tag,
+                           input_category>::value &&
+                is_base_of<random_access_iterator_tag,
+                           output_category>::value) {
+                using difference_type =
+                    typename iterator_traits<InputIt>::difference_type;
+                const difference_type count = last - first;
+                __detail::policy_for_index(
+                    policy, first, count,
+                    [first, result](difference_type index) {
+                        *(result + index) = std::move(*(first + index));
+                    });
+                return result + count;
+            } else {
+                return move(first, last, result);
+            }
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt, typename OutputIt,
@@ -2241,8 +2771,30 @@ template<typename ExecutionPolicy, typename InputIt, typename OutputIt,
                           ExecutionPolicy>::value, int> = 0>
 OutputIt transform(ExecutionPolicy&& policy, InputIt first, InputIt last,
                    OutputIt result, UnaryOperation operation) {
-    (void)policy;
-    return transform(first, last, result, operation);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            using input_category =
+                typename iterator_traits<InputIt>::iterator_category;
+            using output_category =
+                typename iterator_traits<OutputIt>::iterator_category;
+            if constexpr (
+                is_base_of<random_access_iterator_tag,
+                           input_category>::value &&
+                is_base_of<random_access_iterator_tag,
+                           output_category>::value) {
+                using difference_type =
+                    typename iterator_traits<InputIt>::difference_type;
+                const difference_type count = last - first;
+                __detail::policy_for_index(
+                    policy, first, count,
+                    [first, result, operation](difference_type index) mutable {
+                        *(result + index) = operation(*(first + index));
+                    });
+                return result + count;
+            } else {
+                return transform(first, last, result, operation);
+            }
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
@@ -2252,8 +2804,36 @@ template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
 OutputIt transform(ExecutionPolicy&& policy, InputIt1 first1, InputIt1 last1,
                    InputIt2 first2, OutputIt result,
                    BinaryOperation operation) {
-    (void)policy;
-    return transform(first1, last1, first2, result, operation);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            using input1_category =
+                typename iterator_traits<InputIt1>::iterator_category;
+            using input2_category =
+                typename iterator_traits<InputIt2>::iterator_category;
+            using output_category =
+                typename iterator_traits<OutputIt>::iterator_category;
+            if constexpr (
+                is_base_of<random_access_iterator_tag,
+                           input1_category>::value &&
+                is_base_of<random_access_iterator_tag,
+                           input2_category>::value &&
+                is_base_of<random_access_iterator_tag,
+                           output_category>::value) {
+                using difference_type =
+                    typename iterator_traits<InputIt1>::difference_type;
+                const difference_type count = last1 - first1;
+                __detail::policy_for_index(
+                    policy, first1, count,
+                    [first1, first2, result, operation]
+                    (difference_type index) mutable {
+                        *(result + index) = operation(
+                            *(first1 + index), *(first2 + index));
+                    });
+                return result + count;
+            } else {
+                return transform(first1, last1, first2, result, operation);
+            }
+        });
 }
 
 template<typename ExecutionPolicy, typename ForwardIt, typename T,
@@ -2261,8 +2841,10 @@ template<typename ExecutionPolicy, typename ForwardIt, typename T,
                           ExecutionPolicy>::value, int> = 0>
 void fill(ExecutionPolicy&& policy, ForwardIt first, ForwardIt last,
           const T& value) {
-    (void)policy;
-    fill(first, last, value);
+    __detail::invoke_algorithm_policy(policy, [&]() {
+            __detail::policy_for_each(policy, first, last,
+                [&value](auto&& element) { element = value; });
+        });
 }
 
 template<typename ExecutionPolicy, typename OutputIt, typename Size,
@@ -2271,8 +2853,14 @@ template<typename ExecutionPolicy, typename OutputIt, typename Size,
                           ExecutionPolicy>::value, int> = 0>
 OutputIt fill_n(ExecutionPolicy&& policy, OutputIt first, Size count,
                 const T& value) {
-    (void)policy;
-    return fill_n(first, count, value);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            OutputIt last = first;
+            for (Size index = 0; index < count; ++index) ++last;
+            __detail::policy_for_each(policy, first, last,
+                [&value](auto&& element) { element = value; });
+            return last;
+        });
 }
 
 template<typename ExecutionPolicy, typename ForwardIt, typename Generator,
@@ -2280,8 +2868,12 @@ template<typename ExecutionPolicy, typename ForwardIt, typename Generator,
                           ExecutionPolicy>::value, int> = 0>
 void generate(ExecutionPolicy&& policy, ForwardIt first, ForwardIt last,
               Generator generator) {
-    (void)policy;
-    generate(first, last, generator);
+    __detail::invoke_algorithm_policy(policy, [&]() {
+            __detail::policy_for_each(policy, first, last,
+                [generator](auto&& element) mutable {
+                    element = generator();
+                });
+        });
 }
 
 template<typename ExecutionPolicy, typename OutputIt, typename Size,
@@ -2290,8 +2882,16 @@ template<typename ExecutionPolicy, typename OutputIt, typename Size,
                           ExecutionPolicy>::value, int> = 0>
 OutputIt generate_n(ExecutionPolicy&& policy, OutputIt first, Size count,
                     Generator generator) {
-    (void)policy;
-    return generate_n(first, count, generator);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            OutputIt last = first;
+            for (Size index = 0; index < count; ++index) ++last;
+            __detail::policy_for_each(policy, first, last,
+                [generator](auto&& element) mutable {
+                    element = generator();
+                });
+            return last;
+        });
 }
 
 template<typename ExecutionPolicy, typename ForwardIt, typename T,
@@ -2299,8 +2899,12 @@ template<typename ExecutionPolicy, typename ForwardIt, typename T,
                           ExecutionPolicy>::value, int> = 0>
 void replace(ExecutionPolicy&& policy, ForwardIt first, ForwardIt last,
              const T& old_value, const T& new_value) {
-    (void)policy;
-    replace(first, last, old_value, new_value);
+    __detail::invoke_algorithm_policy(policy, [&]() {
+            __detail::policy_for_each(policy, first, last,
+                [&old_value, &new_value](auto&& element) {
+                    if (element == old_value) element = new_value;
+                });
+        });
 }
 
 template<typename ExecutionPolicy, typename ForwardIt, typename UnaryPredicate,
@@ -2309,8 +2913,12 @@ template<typename ExecutionPolicy, typename ForwardIt, typename UnaryPredicate,
                           ExecutionPolicy>::value, int> = 0>
 void replace_if(ExecutionPolicy&& policy, ForwardIt first, ForwardIt last,
                 UnaryPredicate predicate, const T& new_value) {
-    (void)policy;
-    replace_if(first, last, predicate, new_value);
+    __detail::invoke_algorithm_policy(policy, [&]() {
+            __detail::policy_for_each(policy, first, last,
+                [predicate, &new_value](auto&& element) mutable {
+                    if (predicate(element)) element = new_value;
+                });
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt, typename OutputIt,
@@ -2320,8 +2928,33 @@ template<typename ExecutionPolicy, typename InputIt, typename OutputIt,
 OutputIt replace_copy(ExecutionPolicy&& policy, InputIt first, InputIt last,
                       OutputIt result, const T& old_value,
                       const T& new_value) {
-    (void)policy;
-    return replace_copy(first, last, result, old_value, new_value);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            using input_category =
+                typename iterator_traits<InputIt>::iterator_category;
+            using output_category =
+                typename iterator_traits<OutputIt>::iterator_category;
+            if constexpr (
+                is_base_of<random_access_iterator_tag,
+                           input_category>::value &&
+                is_base_of<random_access_iterator_tag,
+                           output_category>::value) {
+                using difference_type =
+                    typename iterator_traits<InputIt>::difference_type;
+                const difference_type count = last - first;
+                __detail::policy_for_index(
+                    policy, first, count,
+                    [first, result, &old_value, &new_value]
+                    (difference_type index) {
+                        const auto& value = *(first + index);
+                        *(result + index) = value == old_value
+                            ? new_value : value;
+                    });
+                return result + count;
+            } else {
+                return replace_copy(first, last, result, old_value, new_value);
+            }
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt, typename OutputIt,
@@ -2331,8 +2964,34 @@ template<typename ExecutionPolicy, typename InputIt, typename OutputIt,
 OutputIt replace_copy_if(ExecutionPolicy&& policy, InputIt first,
                          InputIt last, OutputIt result,
                          UnaryPredicate predicate, const T& new_value) {
-    (void)policy;
-    return replace_copy_if(first, last, result, predicate, new_value);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            using input_category =
+                typename iterator_traits<InputIt>::iterator_category;
+            using output_category =
+                typename iterator_traits<OutputIt>::iterator_category;
+            if constexpr (
+                is_base_of<random_access_iterator_tag,
+                           input_category>::value &&
+                is_base_of<random_access_iterator_tag,
+                           output_category>::value) {
+                using difference_type =
+                    typename iterator_traits<InputIt>::difference_type;
+                const difference_type count = last - first;
+                __detail::policy_for_index(
+                    policy, first, count,
+                    [first, result, predicate, &new_value]
+                    (difference_type index) mutable {
+                        const auto& value = *(first + index);
+                        *(result + index) = predicate(value)
+                            ? new_value : value;
+                    });
+                return result + count;
+            } else {
+                return replace_copy_if(first, last, result, predicate,
+                                       new_value);
+            }
+        });
 }
 
 template<typename ExecutionPolicy, typename ForwardIt, typename T,
@@ -2340,8 +2999,10 @@ template<typename ExecutionPolicy, typename ForwardIt, typename T,
                           ExecutionPolicy>::value, int> = 0>
 ForwardIt remove(ExecutionPolicy&& policy, ForwardIt first, ForwardIt last,
                  const T& value) {
-    (void)policy;
-    return remove(first, last, value);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return remove(first, last, value);
+        });
 }
 
 template<typename ExecutionPolicy, typename ForwardIt, typename UnaryPredicate,
@@ -2349,8 +3010,10 @@ template<typename ExecutionPolicy, typename ForwardIt, typename UnaryPredicate,
                           ExecutionPolicy>::value, int> = 0>
 ForwardIt remove_if(ExecutionPolicy&& policy, ForwardIt first, ForwardIt last,
                     UnaryPredicate predicate) {
-    (void)policy;
-    return remove_if(first, last, predicate);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return remove_if(first, last, predicate);
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt, typename OutputIt,
@@ -2359,8 +3022,10 @@ template<typename ExecutionPolicy, typename InputIt, typename OutputIt,
                           ExecutionPolicy>::value, int> = 0>
 OutputIt remove_copy(ExecutionPolicy&& policy, InputIt first, InputIt last,
                      OutputIt result, const T& value) {
-    (void)policy;
-    return remove_copy(first, last, result, value);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return remove_copy(first, last, result, value);
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt, typename OutputIt,
@@ -2369,24 +3034,44 @@ template<typename ExecutionPolicy, typename InputIt, typename OutputIt,
                           ExecutionPolicy>::value, int> = 0>
 OutputIt remove_copy_if(ExecutionPolicy&& policy, InputIt first, InputIt last,
                         OutputIt result, UnaryPredicate predicate) {
-    (void)policy;
-    return remove_copy_if(first, last, result, predicate);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return remove_copy_if(first, last, result, predicate);
+        });
 }
 
 template<typename ExecutionPolicy, typename ForwardIt,
          enable_if_t<__detail::is_algorithm_execution_policy<
                           ExecutionPolicy>::value, int> = 0>
 ForwardIt unique(ExecutionPolicy&& policy, ForwardIt first, ForwardIt last) {
-    (void)policy;
-    return unique(first, last);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return unique(first, last);
+        });
 }
 
 template<typename ExecutionPolicy, typename BidirIt,
          enable_if_t<__detail::is_algorithm_execution_policy<
                           ExecutionPolicy>::value, int> = 0>
 void reverse(ExecutionPolicy&& policy, BidirIt first, BidirIt last) {
-    (void)policy;
-    reverse(first, last);
+    __detail::invoke_algorithm_policy(policy, [&]() {
+            using category =
+                typename iterator_traits<BidirIt>::iterator_category;
+            if constexpr (is_base_of<random_access_iterator_tag,
+                                     category>::value) {
+                using difference_type =
+                    typename iterator_traits<BidirIt>::difference_type;
+                const difference_type count = last - first;
+                const difference_type pairs = count / 2;
+                __detail::policy_for_index(
+                    policy, first, pairs,
+                    [first, last](difference_type index) {
+                        iter_swap(first + index, last - index - 1);
+                    });
+            } else {
+                reverse(first, last);
+            }
+        });
 }
 
 template<typename ExecutionPolicy, typename BidirIt, typename OutputIt,
@@ -2394,8 +3079,30 @@ template<typename ExecutionPolicy, typename BidirIt, typename OutputIt,
                           ExecutionPolicy>::value, int> = 0>
 OutputIt reverse_copy(ExecutionPolicy&& policy, BidirIt first, BidirIt last,
                       OutputIt result) {
-    (void)policy;
-    return reverse_copy(first, last, result);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            using input_category =
+                typename iterator_traits<BidirIt>::iterator_category;
+            using output_category =
+                typename iterator_traits<OutputIt>::iterator_category;
+            if constexpr (
+                is_base_of<random_access_iterator_tag,
+                           input_category>::value &&
+                is_base_of<random_access_iterator_tag,
+                           output_category>::value) {
+                using difference_type =
+                    typename iterator_traits<BidirIt>::difference_type;
+                const difference_type count = last - first;
+                __detail::policy_for_index(
+                    policy, first, count,
+                    [first, last, result](difference_type index) {
+                        *(result + index) = *(last - index - 1);
+                    });
+                return result + count;
+            } else {
+                return reverse_copy(first, last, result);
+            }
+        });
 }
 
 template<typename ExecutionPolicy, typename ForwardIt,
@@ -2403,8 +3110,10 @@ template<typename ExecutionPolicy, typename ForwardIt,
                           ExecutionPolicy>::value, int> = 0>
 ForwardIt rotate(ExecutionPolicy&& policy, ForwardIt first,
                 ForwardIt middle, ForwardIt last) {
-    (void)policy;
-    return rotate(first, middle, last);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return rotate(first, middle, last);
+        });
 }
 
 template<typename ExecutionPolicy, typename ForwardIt, typename OutputIt,
@@ -2412,16 +3121,20 @@ template<typename ExecutionPolicy, typename ForwardIt, typename OutputIt,
                           ExecutionPolicy>::value, int> = 0>
 OutputIt rotate_copy(ExecutionPolicy&& policy, ForwardIt first,
                      ForwardIt middle, ForwardIt last, OutputIt result) {
-    (void)policy;
-    return rotate_copy(first, middle, last, result);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return rotate_copy(first, middle, last, result);
+        });
 }
 
 template<typename ExecutionPolicy, typename RandomIt,
          enable_if_t<__detail::is_algorithm_execution_policy<
                           ExecutionPolicy>::value, int> = 0>
 void sort(ExecutionPolicy&& policy, RandomIt first, RandomIt last) {
-    (void)policy;
-    sort(first, last);
+    __detail::invoke_algorithm_policy(policy, [&]() {
+            __detail::policy_sort(policy, first, last,
+                                  __detail::__algorithm_less(), false);
+        });
 }
 
 template<typename ExecutionPolicy, typename RandomIt, typename Compare,
@@ -2429,16 +3142,19 @@ template<typename ExecutionPolicy, typename RandomIt, typename Compare,
                           ExecutionPolicy>::value, int> = 0>
 void sort(ExecutionPolicy&& policy, RandomIt first, RandomIt last,
           Compare compare) {
-    (void)policy;
-    sort(first, last, compare);
+    __detail::invoke_algorithm_policy(policy, [&]() {
+            __detail::policy_sort(policy, first, last, compare, false);
+        });
 }
 
 template<typename ExecutionPolicy, typename RandomIt,
          enable_if_t<__detail::is_algorithm_execution_policy<
                           ExecutionPolicy>::value, int> = 0>
 void stable_sort(ExecutionPolicy&& policy, RandomIt first, RandomIt last) {
-    (void)policy;
-    stable_sort(first, last);
+    __detail::invoke_algorithm_policy(policy, [&]() {
+            __detail::policy_sort(policy, first, last,
+                                  __detail::__algorithm_less(), true);
+        });
 }
 
 template<typename ExecutionPolicy, typename RandomIt, typename Compare,
@@ -2446,8 +3162,9 @@ template<typename ExecutionPolicy, typename RandomIt, typename Compare,
                           ExecutionPolicy>::value, int> = 0>
 void stable_sort(ExecutionPolicy&& policy, RandomIt first, RandomIt last,
                  Compare compare) {
-    (void)policy;
-    stable_sort(first, last, compare);
+    __detail::invoke_algorithm_policy(policy, [&]() {
+            __detail::policy_sort(policy, first, last, compare, true);
+        });
 }
 
 template<typename ExecutionPolicy, typename RandomIt,
@@ -2455,8 +3172,10 @@ template<typename ExecutionPolicy, typename RandomIt,
                           ExecutionPolicy>::value, int> = 0>
 void partial_sort(ExecutionPolicy&& policy, RandomIt first, RandomIt middle,
                   RandomIt last) {
-    (void)policy;
-    partial_sort(first, middle, last);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            partial_sort(first, middle, last);
+        });
 }
 
 template<typename ExecutionPolicy, typename RandomIt, typename Compare,
@@ -2464,8 +3183,10 @@ template<typename ExecutionPolicy, typename RandomIt, typename Compare,
                           ExecutionPolicy>::value, int> = 0>
 void partial_sort(ExecutionPolicy&& policy, RandomIt first, RandomIt middle,
                   RandomIt last, Compare compare) {
-    (void)policy;
-    partial_sort(first, middle, last, compare);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            partial_sort(first, middle, last, compare);
+        });
 }
 
 template<typename ExecutionPolicy, typename RandomIt,
@@ -2473,8 +3194,10 @@ template<typename ExecutionPolicy, typename RandomIt,
                           ExecutionPolicy>::value, int> = 0>
 void nth_element(ExecutionPolicy&& policy, RandomIt first, RandomIt nth,
                  RandomIt last) {
-    (void)policy;
-    nth_element(first, nth, last);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            nth_element(first, nth, last);
+        });
 }
 
 template<typename ExecutionPolicy, typename RandomIt, typename Compare,
@@ -2482,8 +3205,10 @@ template<typename ExecutionPolicy, typename RandomIt, typename Compare,
                           ExecutionPolicy>::value, int> = 0>
 void nth_element(ExecutionPolicy&& policy, RandomIt first, RandomIt nth,
                  RandomIt last, Compare compare) {
-    (void)policy;
-    nth_element(first, nth, last, compare);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            nth_element(first, nth, last, compare);
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
@@ -2491,8 +3216,10 @@ template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
                           ExecutionPolicy>::value, int> = 0>
 pair<InputIt1, InputIt2> mismatch(ExecutionPolicy&& policy, InputIt1 first1,
                                   InputIt1 last1, InputIt2 first2) {
-    (void)policy;
-    return mismatch(first1, last1, first2);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return mismatch(first1, last1, first2);
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
@@ -2502,8 +3229,10 @@ template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
 pair<InputIt1, InputIt2> mismatch(ExecutionPolicy&& policy, InputIt1 first1,
                                   InputIt1 last1, InputIt2 first2,
                                   BinaryPredicate predicate) {
-    (void)policy;
-    return mismatch(first1, last1, first2, predicate);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return mismatch(first1, last1, first2, predicate);
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
@@ -2511,8 +3240,10 @@ template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
                           ExecutionPolicy>::value, int> = 0>
 bool equal(ExecutionPolicy&& policy, InputIt1 first1, InputIt1 last1,
            InputIt2 first2) {
-    (void)policy;
-    return equal(first1, last1, first2);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return equal(first1, last1, first2);
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
@@ -2521,8 +3252,10 @@ template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
                           ExecutionPolicy>::value, int> = 0>
 bool equal(ExecutionPolicy&& policy, InputIt1 first1, InputIt1 last1,
            InputIt2 first2, BinaryPredicate predicate) {
-    (void)policy;
-    return equal(first1, last1, first2, predicate);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return equal(first1, last1, first2, predicate);
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
@@ -2530,8 +3263,10 @@ template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
                           ExecutionPolicy>::value, int> = 0>
 bool equal(ExecutionPolicy&& policy, InputIt1 first1, InputIt1 last1,
            InputIt2 first2, InputIt2 last2) {
-    (void)policy;
-    return equal(first1, last1, first2, last2);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return equal(first1, last1, first2, last2);
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
@@ -2540,8 +3275,10 @@ template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
                           ExecutionPolicy>::value, int> = 0>
 bool equal(ExecutionPolicy&& policy, InputIt1 first1, InputIt1 last1,
            InputIt2 first2, InputIt2 last2, BinaryPredicate predicate) {
-    (void)policy;
-    return equal(first1, last1, first2, last2, predicate);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return equal(first1, last1, first2, last2, predicate);
+        });
 }
 
 template<typename ExecutionPolicy, typename BidirIt1, typename BidirIt2,
@@ -2549,8 +3286,10 @@ template<typename ExecutionPolicy, typename BidirIt1, typename BidirIt2,
                           ExecutionPolicy>::value, int> = 0>
 BidirIt2 copy_backward(ExecutionPolicy&& policy, BidirIt1 first,
                        BidirIt1 last, BidirIt2 result) {
-    (void)policy;
-    return copy_backward(first, last, result);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return copy_backward(first, last, result);
+        });
 }
 
 template<typename ExecutionPolicy, typename BidirIt1, typename BidirIt2,
@@ -2558,8 +3297,10 @@ template<typename ExecutionPolicy, typename BidirIt1, typename BidirIt2,
                           ExecutionPolicy>::value, int> = 0>
 BidirIt2 move_backward(ExecutionPolicy&& policy, BidirIt1 first,
                        BidirIt1 last, BidirIt2 result) {
-    (void)policy;
-    return move_backward(first, last, result);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return move_backward(first, last, result);
+        });
 }
 
 template<typename ExecutionPolicy, typename ForwardIt1, typename ForwardIt2,
@@ -2567,8 +3308,30 @@ template<typename ExecutionPolicy, typename ForwardIt1, typename ForwardIt2,
                           ExecutionPolicy>::value, int> = 0>
 ForwardIt2 swap_ranges(ExecutionPolicy&& policy, ForwardIt1 first,
                        ForwardIt1 last, ForwardIt2 result) {
-    (void)policy;
-    return swap_ranges(first, last, result);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            using input_category =
+                typename iterator_traits<ForwardIt1>::iterator_category;
+            using output_category =
+                typename iterator_traits<ForwardIt2>::iterator_category;
+            if constexpr (
+                is_base_of<random_access_iterator_tag,
+                           input_category>::value &&
+                is_base_of<random_access_iterator_tag,
+                           output_category>::value) {
+                using difference_type =
+                    typename iterator_traits<ForwardIt1>::difference_type;
+                const difference_type count = last - first;
+                __detail::policy_for_index(
+                    policy, first, count,
+                    [first, result](difference_type index) {
+                        iter_swap(first + index, result + index);
+                    });
+                return result + count;
+            } else {
+                return swap_ranges(first, last, result);
+            }
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt, typename OutputIt,
@@ -2576,8 +3339,10 @@ template<typename ExecutionPolicy, typename InputIt, typename OutputIt,
                           ExecutionPolicy>::value, int> = 0>
 OutputIt unique_copy(ExecutionPolicy&& policy, InputIt first, InputIt last,
                      OutputIt result) {
-    (void)policy;
-    return unique_copy(first, last, result);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return unique_copy(first, last, result);
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt, typename OutputIt,
@@ -2586,8 +3351,10 @@ template<typename ExecutionPolicy, typename InputIt, typename OutputIt,
                           ExecutionPolicy>::value, int> = 0>
 OutputIt unique_copy(ExecutionPolicy&& policy, InputIt first, InputIt last,
                      OutputIt result, BinaryPredicate predicate) {
-    (void)policy;
-    return unique_copy(first, last, result, predicate);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return unique_copy(first, last, result, predicate);
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt, typename OutputIt1,
@@ -2599,8 +3366,10 @@ pair<OutputIt1, OutputIt2> partition_copy(ExecutionPolicy&& policy,
                                            OutputIt1 true_result,
                                            OutputIt2 false_result,
                                            UnaryPredicate predicate) {
-    (void)policy;
-    return partition_copy(first, last, true_result, false_result, predicate);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return partition_copy(first, last, true_result, false_result, predicate);
+        });
 }
 
 template<typename ExecutionPolicy, typename BidirIt, typename UnaryPredicate,
@@ -2608,8 +3377,10 @@ template<typename ExecutionPolicy, typename BidirIt, typename UnaryPredicate,
                           ExecutionPolicy>::value, int> = 0>
 BidirIt stable_partition(ExecutionPolicy&& policy, BidirIt first, BidirIt last,
                          UnaryPredicate predicate) {
-    (void)policy;
-    return stable_partition(first, last, predicate);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return stable_partition(first, last, predicate);
+        });
 }
 
 template<typename ExecutionPolicy, typename ForwardIt, typename UnaryPredicate,
@@ -2617,8 +3388,10 @@ template<typename ExecutionPolicy, typename ForwardIt, typename UnaryPredicate,
                           ExecutionPolicy>::value, int> = 0>
 ForwardIt partition_point(ExecutionPolicy&& policy, ForwardIt first,
                           ForwardIt last, UnaryPredicate predicate) {
-    (void)policy;
-    return partition_point(first, last, predicate);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return partition_point(first, last, predicate);
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt, typename SearchIt,
@@ -2626,8 +3399,10 @@ template<typename ExecutionPolicy, typename InputIt, typename SearchIt,
                           ExecutionPolicy>::value, int> = 0>
 InputIt search(ExecutionPolicy&& policy, InputIt first, InputIt last,
                SearchIt search_first, SearchIt search_last) {
-    (void)policy;
-    return search(first, last, search_first, search_last);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return search(first, last, search_first, search_last);
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt, typename SearchIt,
@@ -2637,8 +3412,10 @@ template<typename ExecutionPolicy, typename InputIt, typename SearchIt,
 InputIt search(ExecutionPolicy&& policy, InputIt first, InputIt last,
                SearchIt search_first, SearchIt search_last,
                BinaryPredicate predicate) {
-    (void)policy;
-    return search(first, last, search_first, search_last, predicate);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return search(first, last, search_first, search_last, predicate);
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt, typename Size,
@@ -2647,8 +3424,10 @@ template<typename ExecutionPolicy, typename InputIt, typename Size,
                           ExecutionPolicy>::value, int> = 0>
 InputIt search_n(ExecutionPolicy&& policy, InputIt first, InputIt last,
                  Size count, const T& value) {
-    (void)policy;
-    return search_n(first, last, count, value);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return search_n(first, last, count, value);
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt, typename Size,
@@ -2657,8 +3436,10 @@ template<typename ExecutionPolicy, typename InputIt, typename Size,
                           ExecutionPolicy>::value, int> = 0>
 InputIt search_n(ExecutionPolicy&& policy, InputIt first, InputIt last,
                  Size count, const T& value, BinaryPredicate predicate) {
-    (void)policy;
-    return search_n(first, last, count, value, predicate);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return search_n(first, last, count, value, predicate);
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt, typename SearchIt,
@@ -2666,8 +3447,10 @@ template<typename ExecutionPolicy, typename InputIt, typename SearchIt,
                           ExecutionPolicy>::value, int> = 0>
 InputIt find_end(ExecutionPolicy&& policy, InputIt first, InputIt last,
                  SearchIt search_first, SearchIt search_last) {
-    (void)policy;
-    return find_end(first, last, search_first, search_last);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return find_end(first, last, search_first, search_last);
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt, typename SearchIt,
@@ -2677,8 +3460,10 @@ template<typename ExecutionPolicy, typename InputIt, typename SearchIt,
 InputIt find_end(ExecutionPolicy&& policy, InputIt first, InputIt last,
                  SearchIt search_first, SearchIt search_last,
                  BinaryPredicate predicate) {
-    (void)policy;
-    return find_end(first, last, search_first, search_last, predicate);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return find_end(first, last, search_first, search_last, predicate);
+        });
 }
 
 template<typename ExecutionPolicy, typename ForwardIt,
@@ -2686,8 +3471,10 @@ template<typename ExecutionPolicy, typename ForwardIt,
                           ExecutionPolicy>::value, int> = 0>
 ForwardIt adjacent_find(ExecutionPolicy&& policy, ForwardIt first,
                         ForwardIt last) {
-    (void)policy;
-    return adjacent_find(first, last);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return adjacent_find(first, last);
+        });
 }
 
 template<typename ExecutionPolicy, typename ForwardIt, typename BinaryPredicate,
@@ -2695,8 +3482,10 @@ template<typename ExecutionPolicy, typename ForwardIt, typename BinaryPredicate,
                           ExecutionPolicy>::value, int> = 0>
 ForwardIt adjacent_find(ExecutionPolicy&& policy, ForwardIt first,
                         ForwardIt last, BinaryPredicate predicate) {
-    (void)policy;
-    return adjacent_find(first, last, predicate);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return adjacent_find(first, last, predicate);
+        });
 }
 
 template<typename ExecutionPolicy, typename ForwardIt, typename T,
@@ -2704,8 +3493,10 @@ template<typename ExecutionPolicy, typename ForwardIt, typename T,
                           ExecutionPolicy>::value, int> = 0>
 ForwardIt lower_bound(ExecutionPolicy&& policy, ForwardIt first,
                       ForwardIt last, const T& value) {
-    (void)policy;
-    return lower_bound(first, last, value);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return lower_bound(first, last, value);
+        });
 }
 
 template<typename ExecutionPolicy, typename ForwardIt, typename T,
@@ -2714,8 +3505,10 @@ template<typename ExecutionPolicy, typename ForwardIt, typename T,
                           ExecutionPolicy>::value, int> = 0>
 ForwardIt lower_bound(ExecutionPolicy&& policy, ForwardIt first,
                       ForwardIt last, const T& value, Compare compare) {
-    (void)policy;
-    return lower_bound(first, last, value, compare);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return lower_bound(first, last, value, compare);
+        });
 }
 
 template<typename ExecutionPolicy, typename ForwardIt, typename T,
@@ -2723,8 +3516,10 @@ template<typename ExecutionPolicy, typename ForwardIt, typename T,
                           ExecutionPolicy>::value, int> = 0>
 ForwardIt upper_bound(ExecutionPolicy&& policy, ForwardIt first,
                       ForwardIt last, const T& value) {
-    (void)policy;
-    return upper_bound(first, last, value);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return upper_bound(first, last, value);
+        });
 }
 
 template<typename ExecutionPolicy, typename ForwardIt, typename T,
@@ -2733,8 +3528,10 @@ template<typename ExecutionPolicy, typename ForwardIt, typename T,
                           ExecutionPolicy>::value, int> = 0>
 ForwardIt upper_bound(ExecutionPolicy&& policy, ForwardIt first,
                       ForwardIt last, const T& value, Compare compare) {
-    (void)policy;
-    return upper_bound(first, last, value, compare);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return upper_bound(first, last, value, compare);
+        });
 }
 
 template<typename ExecutionPolicy, typename ForwardIt, typename T,
@@ -2742,8 +3539,10 @@ template<typename ExecutionPolicy, typename ForwardIt, typename T,
                           ExecutionPolicy>::value, int> = 0>
 bool binary_search(ExecutionPolicy&& policy, ForwardIt first, ForwardIt last,
                    const T& value) {
-    (void)policy;
-    return binary_search(first, last, value);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return binary_search(first, last, value);
+        });
 }
 
 template<typename ExecutionPolicy, typename ForwardIt, typename T,
@@ -2752,8 +3551,10 @@ template<typename ExecutionPolicy, typename ForwardIt, typename T,
                           ExecutionPolicy>::value, int> = 0>
 bool binary_search(ExecutionPolicy&& policy, ForwardIt first, ForwardIt last,
                    const T& value, Compare compare) {
-    (void)policy;
-    return binary_search(first, last, value, compare);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return binary_search(first, last, value, compare);
+        });
 }
 
 template<typename ExecutionPolicy, typename ForwardIt, typename T,
@@ -2762,8 +3563,10 @@ template<typename ExecutionPolicy, typename ForwardIt, typename T,
 pair<ForwardIt, ForwardIt> equal_range(ExecutionPolicy&& policy,
                                         ForwardIt first, ForwardIt last,
                                         const T& value) {
-    (void)policy;
-    return equal_range(first, last, value);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return equal_range(first, last, value);
+        });
 }
 
 template<typename ExecutionPolicy, typename ForwardIt, typename T,
@@ -2773,16 +3576,20 @@ template<typename ExecutionPolicy, typename ForwardIt, typename T,
 pair<ForwardIt, ForwardIt> equal_range(ExecutionPolicy&& policy,
                                         ForwardIt first, ForwardIt last,
                                         const T& value, Compare compare) {
-    (void)policy;
-    return equal_range(first, last, value, compare);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return equal_range(first, last, value, compare);
+        });
 }
 
 template<typename ExecutionPolicy, typename ForwardIt,
          enable_if_t<__detail::is_algorithm_execution_policy<
                           ExecutionPolicy>::value, int> = 0>
 bool is_sorted(ExecutionPolicy&& policy, ForwardIt first, ForwardIt last) {
-    (void)policy;
-    return is_sorted(first, last);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return is_sorted(first, last);
+        });
 }
 
 template<typename ExecutionPolicy, typename ForwardIt, typename Compare,
@@ -2790,8 +3597,10 @@ template<typename ExecutionPolicy, typename ForwardIt, typename Compare,
                           ExecutionPolicy>::value, int> = 0>
 bool is_sorted(ExecutionPolicy&& policy, ForwardIt first, ForwardIt last,
                Compare compare) {
-    (void)policy;
-    return is_sorted(first, last, compare);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return is_sorted(first, last, compare);
+        });
 }
 
 template<typename ExecutionPolicy, typename ForwardIt,
@@ -2799,8 +3608,10 @@ template<typename ExecutionPolicy, typename ForwardIt,
                           ExecutionPolicy>::value, int> = 0>
 ForwardIt is_sorted_until(ExecutionPolicy&& policy, ForwardIt first,
                           ForwardIt last) {
-    (void)policy;
-    return is_sorted_until(first, last);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return is_sorted_until(first, last);
+        });
 }
 
 template<typename ExecutionPolicy, typename ForwardIt, typename Compare,
@@ -2808,16 +3619,20 @@ template<typename ExecutionPolicy, typename ForwardIt, typename Compare,
                           ExecutionPolicy>::value, int> = 0>
 ForwardIt is_sorted_until(ExecutionPolicy&& policy, ForwardIt first,
                           ForwardIt last, Compare compare) {
-    (void)policy;
-    return is_sorted_until(first, last, compare);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return is_sorted_until(first, last, compare);
+        });
 }
 
 template<typename ExecutionPolicy, typename RandomIt,
          enable_if_t<__detail::is_algorithm_execution_policy<
                           ExecutionPolicy>::value, int> = 0>
 bool is_heap(ExecutionPolicy&& policy, RandomIt first, RandomIt last) {
-    (void)policy;
-    return is_heap(first, last);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return is_heap(first, last);
+        });
 }
 
 template<typename ExecutionPolicy, typename RandomIt, typename Compare,
@@ -2825,8 +3640,10 @@ template<typename ExecutionPolicy, typename RandomIt, typename Compare,
                           ExecutionPolicy>::value, int> = 0>
 bool is_heap(ExecutionPolicy&& policy, RandomIt first, RandomIt last,
              Compare compare) {
-    (void)policy;
-    return is_heap(first, last, compare);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return is_heap(first, last, compare);
+        });
 }
 
 template<typename ExecutionPolicy, typename RandomIt,
@@ -2834,8 +3651,10 @@ template<typename ExecutionPolicy, typename RandomIt,
                           ExecutionPolicy>::value, int> = 0>
 RandomIt is_heap_until(ExecutionPolicy&& policy, RandomIt first,
                        RandomIt last) {
-    (void)policy;
-    return is_heap_until(first, last);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return is_heap_until(first, last);
+        });
 }
 
 template<typename ExecutionPolicy, typename RandomIt, typename Compare,
@@ -2843,8 +3662,10 @@ template<typename ExecutionPolicy, typename RandomIt, typename Compare,
                           ExecutionPolicy>::value, int> = 0>
 RandomIt is_heap_until(ExecutionPolicy&& policy, RandomIt first,
                        RandomIt last, Compare compare) {
-    (void)policy;
-    return is_heap_until(first, last, compare);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return is_heap_until(first, last, compare);
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
@@ -2852,8 +3673,10 @@ template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
                           ExecutionPolicy>::value, int> = 0>
 bool includes(ExecutionPolicy&& policy, InputIt1 first1, InputIt1 last1,
               InputIt2 first2, InputIt2 last2) {
-    (void)policy;
-    return includes(first1, last1, first2, last2);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return includes(first1, last1, first2, last2);
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
@@ -2862,8 +3685,10 @@ template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
                           ExecutionPolicy>::value, int> = 0>
 bool includes(ExecutionPolicy&& policy, InputIt1 first1, InputIt1 last1,
               InputIt2 first2, InputIt2 last2, Compare compare) {
-    (void)policy;
-    return includes(first1, last1, first2, last2, compare);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return includes(first1, last1, first2, last2, compare);
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
@@ -2873,8 +3698,10 @@ template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
 OutputIt set_difference(ExecutionPolicy&& policy, InputIt1 first1,
                         InputIt1 last1, InputIt2 first2, InputIt2 last2,
                         OutputIt result) {
-    (void)policy;
-    return set_difference(first1, last1, first2, last2, result);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return set_difference(first1, last1, first2, last2, result);
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
@@ -2884,8 +3711,10 @@ template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
 OutputIt set_difference(ExecutionPolicy&& policy, InputIt1 first1,
                         InputIt1 last1, InputIt2 first2, InputIt2 last2,
                         OutputIt result, Compare compare) {
-    (void)policy;
-    return set_difference(first1, last1, first2, last2, result, compare);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return set_difference(first1, last1, first2, last2, result, compare);
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
@@ -2895,8 +3724,10 @@ template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
 OutputIt set_intersection(ExecutionPolicy&& policy, InputIt1 first1,
                           InputIt1 last1, InputIt2 first2, InputIt2 last2,
                           OutputIt result) {
-    (void)policy;
-    return set_intersection(first1, last1, first2, last2, result);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return set_intersection(first1, last1, first2, last2, result);
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
@@ -2906,8 +3737,10 @@ template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
 OutputIt set_intersection(ExecutionPolicy&& policy, InputIt1 first1,
                           InputIt1 last1, InputIt2 first2, InputIt2 last2,
                           OutputIt result, Compare compare) {
-    (void)policy;
-    return set_intersection(first1, last1, first2, last2, result, compare);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return set_intersection(first1, last1, first2, last2, result, compare);
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
@@ -2917,8 +3750,10 @@ template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
 OutputIt set_symmetric_difference(ExecutionPolicy&& policy, InputIt1 first1,
                                   InputIt1 last1, InputIt2 first2,
                                   InputIt2 last2, OutputIt result) {
-    (void)policy;
-    return set_symmetric_difference(first1, last1, first2, last2, result);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return set_symmetric_difference(first1, last1, first2, last2, result);
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
@@ -2929,9 +3764,11 @@ OutputIt set_symmetric_difference(ExecutionPolicy&& policy, InputIt1 first1,
                                   InputIt1 last1, InputIt2 first2,
                                   InputIt2 last2, OutputIt result,
                                   Compare compare) {
-    (void)policy;
-    return set_symmetric_difference(first1, last1, first2, last2, result,
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return set_symmetric_difference(first1, last1, first2, last2, result,
                                     compare);
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
@@ -2940,8 +3777,10 @@ template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
                           ExecutionPolicy>::value, int> = 0>
 OutputIt set_union(ExecutionPolicy&& policy, InputIt1 first1, InputIt1 last1,
                    InputIt2 first2, InputIt2 last2, OutputIt result) {
-    (void)policy;
-    return set_union(first1, last1, first2, last2, result);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return set_union(first1, last1, first2, last2, result);
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
@@ -2951,8 +3790,10 @@ template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
 OutputIt set_union(ExecutionPolicy&& policy, InputIt1 first1, InputIt1 last1,
                    InputIt2 first2, InputIt2 last2, OutputIt result,
                    Compare compare) {
-    (void)policy;
-    return set_union(first1, last1, first2, last2, result, compare);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return set_union(first1, last1, first2, last2, result, compare);
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
@@ -2961,8 +3802,10 @@ template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
                           ExecutionPolicy>::value, int> = 0>
 OutputIt merge(ExecutionPolicy&& policy, InputIt1 first1, InputIt1 last1,
                InputIt2 first2, InputIt2 last2, OutputIt result) {
-    (void)policy;
-    return merge(first1, last1, first2, last2, result);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return merge(first1, last1, first2, last2, result);
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
@@ -2972,8 +3815,10 @@ template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
 OutputIt merge(ExecutionPolicy&& policy, InputIt1 first1, InputIt1 last1,
                InputIt2 first2, InputIt2 last2, OutputIt result,
                Compare compare) {
-    (void)policy;
-    return merge(first1, last1, first2, last2, result, compare);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return merge(first1, last1, first2, last2, result, compare);
+        });
 }
 
 template<typename ExecutionPolicy, typename BidirIt,
@@ -2981,8 +3826,10 @@ template<typename ExecutionPolicy, typename BidirIt,
                           ExecutionPolicy>::value, int> = 0>
 void inplace_merge(ExecutionPolicy&& policy, BidirIt first, BidirIt middle,
                    BidirIt last) {
-    (void)policy;
-    inplace_merge(first, middle, last);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            inplace_merge(first, middle, last);
+        });
 }
 
 template<typename ExecutionPolicy, typename BidirIt, typename Compare,
@@ -2990,8 +3837,10 @@ template<typename ExecutionPolicy, typename BidirIt, typename Compare,
                           ExecutionPolicy>::value, int> = 0>
 void inplace_merge(ExecutionPolicy&& policy, BidirIt first, BidirIt middle,
                    BidirIt last, Compare compare) {
-    (void)policy;
-    inplace_merge(first, middle, last, compare);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            inplace_merge(first, middle, last, compare);
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
@@ -3000,8 +3849,10 @@ template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
 bool lexicographical_compare(ExecutionPolicy&& policy, InputIt1 first1,
                              InputIt1 last1, InputIt2 first2,
                              InputIt2 last2) {
-    (void)policy;
-    return lexicographical_compare(first1, last1, first2, last2);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return lexicographical_compare(first1, last1, first2, last2);
+        });
 }
 
 template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
@@ -3011,8 +3862,10 @@ template<typename ExecutionPolicy, typename InputIt1, typename InputIt2,
 bool lexicographical_compare(ExecutionPolicy&& policy, InputIt1 first1,
                              InputIt1 last1, InputIt2 first2,
                              InputIt2 last2, Compare compare) {
-    (void)policy;
-    return lexicographical_compare(first1, last1, first2, last2, compare);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return lexicographical_compare(first1, last1, first2, last2, compare);
+        });
 }
 
 template<typename ExecutionPolicy, typename ForwardIt1, typename ForwardIt2,
@@ -3020,8 +3873,10 @@ template<typename ExecutionPolicy, typename ForwardIt1, typename ForwardIt2,
                           ExecutionPolicy>::value, int> = 0>
 bool is_permutation(ExecutionPolicy&& policy, ForwardIt1 first1,
                     ForwardIt1 last1, ForwardIt2 first2) {
-    (void)policy;
-    return is_permutation(first1, last1, first2);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return is_permutation(first1, last1, first2);
+        });
 }
 
 template<typename ExecutionPolicy, typename ForwardIt1, typename ForwardIt2,
@@ -3031,8 +3886,10 @@ template<typename ExecutionPolicy, typename ForwardIt1, typename ForwardIt2,
 bool is_permutation(ExecutionPolicy&& policy, ForwardIt1 first1,
                     ForwardIt1 last1, ForwardIt2 first2,
                     BinaryPredicate predicate) {
-    (void)policy;
-    return is_permutation(first1, last1, first2, predicate);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return is_permutation(first1, last1, first2, predicate);
+        });
 }
 
 template<typename ExecutionPolicy, typename ForwardIt,
@@ -3040,8 +3897,10 @@ template<typename ExecutionPolicy, typename ForwardIt,
                           ExecutionPolicy>::value, int> = 0>
 ForwardIt min_element(ExecutionPolicy&& policy, ForwardIt first,
                       ForwardIt last) {
-    (void)policy;
-    return min_element(first, last);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return min_element(first, last);
+        });
 }
 
 template<typename ExecutionPolicy, typename ForwardIt, typename Compare,
@@ -3049,8 +3908,10 @@ template<typename ExecutionPolicy, typename ForwardIt, typename Compare,
                           ExecutionPolicy>::value, int> = 0>
 ForwardIt min_element(ExecutionPolicy&& policy, ForwardIt first,
                       ForwardIt last, Compare compare) {
-    (void)policy;
-    return min_element(first, last, compare);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return min_element(first, last, compare);
+        });
 }
 
 template<typename ExecutionPolicy, typename ForwardIt,
@@ -3058,8 +3919,10 @@ template<typename ExecutionPolicy, typename ForwardIt,
                           ExecutionPolicy>::value, int> = 0>
 ForwardIt max_element(ExecutionPolicy&& policy, ForwardIt first,
                       ForwardIt last) {
-    (void)policy;
-    return max_element(first, last);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return max_element(first, last);
+        });
 }
 
 template<typename ExecutionPolicy, typename ForwardIt, typename Compare,
@@ -3067,8 +3930,10 @@ template<typename ExecutionPolicy, typename ForwardIt, typename Compare,
                           ExecutionPolicy>::value, int> = 0>
 ForwardIt max_element(ExecutionPolicy&& policy, ForwardIt first,
                       ForwardIt last, Compare compare) {
-    (void)policy;
-    return max_element(first, last, compare);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return max_element(first, last, compare);
+        });
 }
 
 template<typename ExecutionPolicy, typename ForwardIt,
@@ -3076,8 +3941,10 @@ template<typename ExecutionPolicy, typename ForwardIt,
                           ExecutionPolicy>::value, int> = 0>
 pair<ForwardIt, ForwardIt> minmax_element(ExecutionPolicy&& policy,
                                            ForwardIt first, ForwardIt last) {
-    (void)policy;
-    return minmax_element(first, last);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return minmax_element(first, last);
+        });
 }
 
 template<typename ExecutionPolicy, typename ForwardIt, typename Compare,
@@ -3086,8 +3953,10 @@ template<typename ExecutionPolicy, typename ForwardIt, typename Compare,
 pair<ForwardIt, ForwardIt> minmax_element(ExecutionPolicy&& policy,
                                            ForwardIt first, ForwardIt last,
                                            Compare compare) {
-    (void)policy;
-    return minmax_element(first, last, compare);
+    return __detail::invoke_algorithm_policy(
+        policy, [&]() -> decltype(auto) {
+            return minmax_element(first, last, compare);
+        });
 }
 #endif
 
