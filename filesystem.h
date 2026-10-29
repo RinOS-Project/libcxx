@@ -473,6 +473,8 @@ public:
     }
 
     path lexically_normal() const {
+        if (pathname_.empty()) return path();
+
         vector<string_type> raw;
         bool absolute = false;
         bool trailing_separator = false;
