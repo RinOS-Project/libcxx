@@ -931,6 +931,7 @@ namespace detail {
 static constexpr int copy_open_read = 0x01;
 static constexpr int copy_open_write = 0x02;
 static constexpr int copy_open_create = 0x04;
+static constexpr int copy_open_exclusive = 0x08;
 static constexpr int copy_open_trunc = 0x10;
 
 struct stat_record {
@@ -2834,9 +2835,170 @@ inline bool equivalent(const path& left, const path& right) {
     return result;
 }
 
-/* copy_file: bounded regular-file byte transfer.  Unsupported copy modes are
- * rejected before either descriptor is opened; this prevents a caller from
- * mistaking a directory/symlink policy fallback for a successful copy. */
+namespace detail {
+
+static constexpr size_t copy_file_path_capacity = 4096u;
+
+inline bool copy_staging_path(const char* destination, char* output,
+                              size_t capacity, error_code& ec) noexcept;
+inline bool copy_staging_path(const path& destination, char* output,
+                              size_t capacity, error_code& ec) noexcept;
+inline void copy_discard_staging_path(const char* staging,
+                                      error_code& ec) noexcept;
+inline bool copy_publish_staged_path(const char* staging, const char* to,
+                                     unsigned int replacement,
+                                     long source_mtime, error_code& ec,
+                                     bool* skipped_out = nullptr) noexcept;
+inline bool copy_publish_staged_path(const char* staging, const path& to,
+                                     unsigned int replacement,
+                                     long source_mtime, error_code& ec,
+                                     bool* skipped_out = nullptr) noexcept;
+
+/* Follow only the destination's final-component symlink chain. Intermediate
+ * components keep the kernel's normal path-resolution behavior. Returning a
+ * missing final target is intentional: copy_file creates that target through
+ * a dangling destination symlink just as open(O_CREAT) does. */
+inline bool copy_resolve_destination_path(const char* input, char* output,
+                                          size_t capacity,
+                                          error_code& ec) noexcept {
+    char current[copy_file_path_capacity];
+    size_t input_length = 0u;
+    unsigned int links_followed = 0u;
+    if (!input || !output || capacity == 0u) {
+        ec = make_error_code(errc::invalid_argument);
+        return false;
+    }
+    if (input[0] == '\0') {
+        ec = make_error_code(errc::no_such_file_or_directory);
+        return false;
+    }
+    if (input[0] == '/') {
+        while (input[input_length] != '\0') {
+            if (input_length + 1u >= sizeof(current) ||
+                input_length + 1u >= capacity) {
+                ec = make_error_code(errc::filename_too_long);
+                return false;
+            }
+            current[input_length] = input[input_length];
+            ++input_length;
+        }
+    } else {
+        char cwd[copy_file_path_capacity];
+        size_t cwd_length = 0u;
+        if (!rin_getcwd(cwd, static_cast<unsigned long>(sizeof(cwd)))) {
+            ec = make_error_code(filesystem_error_from_errno());
+            return false;
+        }
+        while (cwd[cwd_length] != '\0') ++cwd_length;
+        while (input[input_length] != '\0') {
+            if (input_length + 1u >= sizeof(current) ||
+                input_length + 1u >= capacity) {
+                ec = make_error_code(errc::filename_too_long);
+                return false;
+            }
+            ++input_length;
+        }
+        const bool separator = cwd_length != 0u &&
+                               cwd[cwd_length - 1u] != '/';
+        const size_t combined = cwd_length + (separator ? 1u : 0u) +
+                                input_length;
+        if (combined + 1u > sizeof(current) || combined + 1u > capacity) {
+            ec = make_error_code(errc::filename_too_long);
+            return false;
+        }
+        for (size_t index = 0u; index < cwd_length; ++index)
+            current[index] = cwd[index];
+        size_t cursor = cwd_length;
+        if (separator) current[cursor++] = '/';
+        for (size_t index = 0u; index < input_length; ++index)
+            current[cursor++] = input[index];
+        input_length = combined;
+    }
+    current[input_length] = '\0';
+
+    for (;;) {
+        stat_record status = {};
+        volatile stat_record* status_view = &status;
+        if (rin_lstat(current, &status) != 0) {
+            const errc error = filesystem_error_from_errno();
+            if (error != errc::no_such_file_or_directory) {
+                ec = make_error_code(error);
+                return false;
+            }
+            for (size_t index = 0u; index <= input_length; ++index)
+                output[index] = current[index];
+            return true;
+        }
+        if ((status_view->st_mode & 0170000u) != 0120000u) {
+            for (size_t index = 0u; index <= input_length; ++index)
+                output[index] = current[index];
+            return true;
+        }
+        if (links_followed == 40u) {
+            ec = make_error_code(errc::too_many_symbolic_link_levels);
+            return false;
+        }
+
+        char target[copy_file_path_capacity];
+        const int target_length = rin_readlink(
+            current, target, static_cast<unsigned long>(sizeof(target) - 1u));
+        if (target_length < 0) {
+            ec = make_error_code(filesystem_error_from_errno());
+            return false;
+        }
+        if (static_cast<size_t>(target_length) >= sizeof(target) - 1u) {
+            ec = make_error_code(errc::filename_too_long);
+            return false;
+        }
+        target[target_length] = '\0';
+        if (target_length == 0) {
+            ec = make_error_code(errc::io_error);
+            return false;
+        }
+
+        if (target[0] == '/') {
+            input_length = static_cast<size_t>(target_length);
+            if (input_length + 1u > sizeof(current) ||
+                input_length + 1u > capacity) {
+                ec = make_error_code(errc::filename_too_long);
+                return false;
+            }
+            for (size_t index = 0u; index <= input_length; ++index)
+                current[index] = target[index];
+        } else {
+            size_t parent_length = input_length;
+            while (parent_length > 0u && current[parent_length - 1u] != '/')
+                --parent_length;
+            if (parent_length == 0u) {
+                current[0] = '.';
+                current[1] = '\0';
+                parent_length = 1u;
+            } else if (parent_length > 1u) {
+                --parent_length;
+            }
+            const bool separator = parent_length != 0u &&
+                current[parent_length - 1u] != '/';
+            const size_t combined = parent_length + (separator ? 1u : 0u) +
+                                    static_cast<size_t>(target_length);
+            if (combined + 1u > sizeof(current) || combined + 1u > capacity) {
+                ec = make_error_code(errc::filename_too_long);
+                return false;
+            }
+            size_t cursor = parent_length;
+            if (separator) current[cursor++] = '/';
+            for (int index = 0; index < target_length; ++index)
+                current[cursor++] = target[index];
+            current[cursor] = '\0';
+            input_length = combined;
+        }
+        ++links_followed;
+    }
+}
+
+} /* namespace detail */
+
+/* copy_file copies into a private sibling and publishes it only after all
+ * reads, writes, and closes succeed. */
 inline bool copy_file(const path& from, const path& to, copy_options options,
                       error_code& ec) noexcept {
     ec.clear();
@@ -2862,60 +3024,16 @@ inline bool copy_file(const path& from, const path& to, copy_options options,
 
     detail::stat_record source = {};
     volatile detail::stat_record* source_view = &source;
-    const int source_status = rin_stat(from.c_str(), &source);
-    if (source_status != 0) {
+    if (rin_stat(from.c_str(), &source) != 0) {
         ec = make_error_code(detail::filesystem_error_from_errno());
         return false;
     }
-    if (source_view->st_size < 0) {
-        ec = make_error_code(errc::io_error);
-        return false;
-    }
-    if ((source_view->st_mode & 0170000) != 0100000) {
-        ec = make_error_code((source_view->st_mode & 0170000) == 0040000
+    if (source_view->st_size < 0 ||
+        (source_view->st_mode & 0170000u) != 0100000u) {
+        ec = make_error_code((source_view->st_mode & 0170000u) == 0040000u
                                  ? errc::is_a_directory
                                  : errc::io_error);
         return false;
-    }
-
-    detail::stat_record destination = {};
-    volatile detail::stat_record* destination_view = &destination;
-    /* copy_file writes to the destination path as resolved.  Match the later
-     * open() behavior here so a symlink to a regular file is classified by
-     * its target and is not rejected before the copy. */
-    const int destination_status = rin_stat(to.c_str(), &destination);
-    if (destination_status != 0) {
-        const errc destination_error = detail::filesystem_error_from_errno();
-        if (destination_error != errc::no_such_file_or_directory) {
-            ec = make_error_code(destination_error);
-            return false;
-        }
-    } else if (destination_view->st_size < 0) {
-        ec = make_error_code(errc::io_error);
-        return false;
-    }
-    const bool destination_exists = destination_status == 0;
-    if (destination_exists) {
-        if ((destination_view->st_mode & 0170000) != 0100000) {
-            ec = make_error_code((destination_view->st_mode & 0170000) == 0040000
-                                     ? errc::is_a_directory
-                                     : errc::io_error);
-            return false;
-        }
-        if (source_view->st_dev == destination_view->st_dev &&
-            source_view->st_ino == destination_view->st_ino) {
-            ec = make_error_code(errc::invalid_argument);
-            return false;
-        }
-        if ((bits & static_cast<unsigned>(copy_options::skip_existing)) != 0u)
-            return false;
-        if ((bits & static_cast<unsigned>(copy_options::update_existing)) != 0u &&
-            source_view->st_mtime <= destination_view->st_mtime)
-            return false;
-        if (replacement == 0u) {
-            ec = make_error_code(errc::file_exists);
-            return false;
-        }
     }
 
     const int source_fd = rin_open(from.c_str(), detail::copy_open_read);
@@ -2923,12 +3041,75 @@ inline bool copy_file(const path& from, const path& to, copy_options options,
         ec = make_error_code(detail::filesystem_error_from_errno());
         return false;
     }
-    const int destination_fd = rin_open(
-        to.c_str(), detail::copy_open_write | detail::copy_open_create |
-        detail::copy_open_trunc);
-    if (destination_fd < 0) {
+
+    char destination_text[detail::copy_file_path_capacity];
+    if (!detail::copy_resolve_destination_path(
+            to.c_str(), destination_text, sizeof(destination_text), ec)) {
         (void)rin_close(source_fd);
+        return false;
+    }
+    detail::stat_record destination = {};
+    volatile detail::stat_record* destination_view = &destination;
+    const int destination_status = rin_stat(destination_text, &destination);
+    if (destination_status != 0 &&
+        detail::filesystem_error_from_errno() != errc::no_such_file_or_directory) {
         ec = make_error_code(detail::filesystem_error_from_errno());
+        (void)rin_close(source_fd);
+        return false;
+    }
+    const bool destination_exists = destination_status == 0;
+    if (destination_exists) {
+        if (destination_view->st_size < 0 ||
+            (destination_view->st_mode & 0170000u) != 0100000u) {
+            ec = make_error_code((destination_view->st_mode & 0170000u) ==
+                                     0040000u
+                                     ? errc::is_a_directory
+                                     : errc::io_error);
+            (void)rin_close(source_fd);
+            return false;
+        }
+        if (source_view->st_dev == destination_view->st_dev &&
+            source_view->st_ino == destination_view->st_ino) {
+            ec = make_error_code(errc::invalid_argument);
+            (void)rin_close(source_fd);
+            return false;
+        }
+        if ((bits & static_cast<unsigned>(copy_options::skip_existing)) != 0u) {
+            (void)rin_close(source_fd);
+            return false;
+        }
+        if ((bits & static_cast<unsigned>(copy_options::update_existing)) != 0u &&
+            source_view->st_mtime <= destination_view->st_mtime) {
+            (void)rin_close(source_fd);
+            return false;
+        }
+        if (replacement == 0u) {
+            ec = make_error_code(errc::file_exists);
+            (void)rin_close(source_fd);
+            return false;
+        }
+    }
+
+    char staging[detail::copy_file_path_capacity];
+    int staging_fd = -1;
+    for (unsigned int attempt = 0u; attempt < 8u; ++attempt) {
+        if (!detail::copy_staging_path(
+                destination_text, staging, sizeof(staging), ec)) {
+            (void)rin_close(source_fd);
+            return false;
+        }
+        staging_fd = rin_open(staging, detail::copy_open_write |
+            detail::copy_open_create | detail::copy_open_exclusive);
+        if (staging_fd >= 0) break;
+        if (errno != EEXIST) {
+            ec = make_error_code(detail::filesystem_error_from_errno());
+            (void)rin_close(source_fd);
+            return false;
+        }
+    }
+    if (staging_fd < 0) {
+        ec = make_error_code(errc::resource_unavailable_try_again);
+        (void)rin_close(source_fd);
         return false;
     }
 
@@ -2950,7 +3131,7 @@ inline bool copy_file(const path& from, const path& to, copy_options options,
         long transferred = 0;
         while (transferred < read_count) {
             const long written = rin_write(
-                destination_fd, buffer + transferred,
+                staging_fd, buffer + transferred,
                 static_cast<unsigned long>(read_count - transferred));
             if (written < 0) {
                 ec = make_error_code(detail::filesystem_error_from_errno());
@@ -2968,21 +3149,46 @@ inline bool copy_file(const path& from, const path& to, copy_options options,
     const int source_close = rin_close(source_fd);
     const errc source_close_error = source_close != 0
         ? detail::filesystem_error_from_errno() : errc::io_error;
-    const int destination_close = rin_close(destination_fd);
-    const errc destination_close_error = destination_close != 0
+    const int staging_close = rin_close(staging_fd);
+    const errc staging_close_error = staging_close != 0
         ? detail::filesystem_error_from_errno() : errc::io_error;
-    if (source_close != 0 || destination_close != 0) {
+    if (source_close != 0 || staging_close != 0) {
         if (okay) {
             ec = make_error_code(source_close != 0 ? source_close_error
-                                                   : destination_close_error);
+                                                   : staging_close_error);
         }
         okay = false;
     }
     if (!okay) {
         if (!ec) ec = make_error_code(errc::io_error);
+        detail::copy_discard_staging_path(staging, ec);
         return false;
     }
-    return true;
+
+    if (replacement == 0u ||
+        replacement == static_cast<unsigned>(copy_options::skip_existing)) {
+        if (rin_link(staging, destination_text) != 0) {
+            const errc publish_error = detail::filesystem_error_from_errno();
+            detail::copy_discard_staging_path(staging, ec);
+            if (replacement == static_cast<unsigned>(copy_options::skip_existing) &&
+                publish_error == errc::file_exists && !ec)
+                return false;
+            if (!ec) ec = make_error_code(publish_error);
+            return false;
+        }
+        if (rin_unlink(staging) != 0) {
+            ec = make_error_code(detail::filesystem_error_from_errno());
+            return false;
+        }
+        return true;
+    }
+
+    bool skipped = false;
+    if (!detail::copy_publish_staged_path(
+            staging, destination_text, replacement, source_view->st_mtime,
+            ec, &skipped))
+        return false;
+    return !skipped;
 }
 
 inline bool copy_file(const path& from, const path& to, error_code& ec) noexcept {
@@ -3016,11 +3222,11 @@ inline bool copy_paths_equivalent(const path& from,
 }
 
 /* 128ビット乱数の一時名を宛先と同じディレクトリに作り、renameで公開する。 */
-inline bool copy_staging_path(const path& destination, char* output,
+inline bool copy_staging_path(const char* destination, char* output,
                               size_t capacity, error_code& ec) noexcept {
     static const char hex[] = "0123456789abcdef";
     unsigned char nonce[16];
-    const char* destination_text = destination.c_str();
+    const char* destination_text = destination;
     size_t destination_length = 0u;
     size_t parent_length = 0u;
     while (destination_text[destination_length] != '\0') ++destination_length;
@@ -3059,6 +3265,11 @@ inline bool copy_staging_path(const path& destination, char* output,
     return true;
 }
 
+inline bool copy_staging_path(const path& destination, char* output,
+                              size_t capacity, error_code& ec) noexcept {
+    return copy_staging_path(destination.c_str(), output, capacity, ec);
+}
+
 inline void copy_discard_staging_path(const char* staging,
                                       error_code& ec) noexcept {
     if (rin_unlink(staging) == 0) return;
@@ -3067,10 +3278,12 @@ inline void copy_discard_staging_path(const char* staging,
         ec = make_error_code(cleanup_error);
 }
 
-inline bool copy_publish_staged_path(const char* staging, const path& to,
+inline bool copy_publish_staged_path(const char* staging, const char* to,
                                      unsigned int replacement,
                                      long source_mtime,
-                                     error_code& ec) noexcept {
+                                     error_code& ec,
+                                     bool* skipped_out) noexcept {
+    if (skipped_out) *skipped_out = false;
 #if defined(__GNUC__) || defined(__clang__)
     if (replacement == static_cast<unsigned>(copy_options::update_existing) &&
         !rin_rename_if_newer) {
@@ -3081,9 +3294,10 @@ inline bool copy_publish_staged_path(const char* staging, const path& to,
 #endif
     const int publish_result =
         replacement == static_cast<unsigned>(copy_options::update_existing)
-            ? rin_rename_if_newer(staging, to.c_str(), source_mtime)
-            : rin_rename(staging, to.c_str());
+            ? rin_rename_if_newer(staging, to, source_mtime)
+            : rin_rename(staging, to);
     if (publish_result == copy_rename_skipped) {
+        if (skipped_out) *skipped_out = true;
         copy_discard_staging_path(staging, ec);
         return !ec;
     }
@@ -3093,6 +3307,14 @@ inline bool copy_publish_staged_path(const char* staging, const path& to,
         return false;
     }
     return true;
+}
+
+inline bool copy_publish_staged_path(const char* staging, const path& to,
+                                     unsigned int replacement,
+                                     long source_mtime, error_code& ec,
+                                     bool* skipped_out) noexcept {
+    return copy_publish_staged_path(staging, to.c_str(), replacement,
+                                    source_mtime, ec, skipped_out);
 }
 
 /* create_hard_linksの各置換モードを原子的に処理する。 */
