@@ -540,6 +540,7 @@ inline int fpclassify(long double x) {
 
 using ::issubnormal;
 using ::iszero;
+using ::issignaling;
 
 /* nextafter - 次の表現可能な浮動小数点値 */
 inline float nextafter(float from, float to) {
