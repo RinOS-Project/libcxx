@@ -9,6 +9,7 @@
 #include "rincxx.h"
 #include "mutex.h"
 #include "chrono.h"
+#include "stop_token.h"
 #include "system_error.h"
 #include "__pthread.h"
 #if !defined(RIN_FREESTANDING) && defined(__STDC_HOSTED__) && __STDC_HOSTED__
@@ -804,6 +805,60 @@ class condition_variable_any {
         wait_guard& operator=(const wait_guard&) = delete;
     };
 
+#if __cplusplus >= 202002L
+    template<typename Lock, typename Predicate, typename WaitOnce>
+    bool wait_stoppable(Lock& lock, stop_token stoken, Predicate pred,
+                        WaitOnce wait_once) {
+        detail::condition_variable_any_validate_lock(
+            lock, "condition_variable_any stoppable wait lock state");
+
+        /* Keep the wrapper alive while both the wait and its stop callback
+         * are registered.  The callback is destroyed before this guard, so
+         * destruction cannot race a callback that still references `this`. */
+        wait_guard guard(*this);
+        auto notify_for_stop = [this]() noexcept { notify_all(); };
+        stop_callback<decltype(notify_for_stop)> callback(
+            stoken, notify_for_stop);
+
+        for (;;) {
+            if (pred()) return true;
+            if (stoken.stop_requested()) return pred();
+
+            unique_lock<mutex> internal_lock(internal_mutex_);
+            if ((__atomic_load_n(&wait_state_, __ATOMIC_ACQUIRE) &
+                 closing_bit_) != 0u) {
+                internal_lock.unlock();
+                return pred();
+            }
+            /* Pair this check with the callback's internal-mutex acquisition.
+             * If stop arrives after this point, the callback cannot broadcast
+             * until cv_.wait atomically releases the mutex, so no wake is lost. */
+            if (stoken.stop_requested()) {
+                internal_lock.unlock();
+                return pred();
+            }
+
+            lock.unlock();
+            bool timed_out = false;
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+            try {
+                timed_out = wait_once(internal_lock);
+            } catch (...) {
+                internal_lock.unlock();
+                detail::condition_variable_any_relock_or_terminate(lock);
+                throw;
+            }
+#else
+            timed_out = wait_once(internal_lock);
+#endif
+
+            internal_lock.unlock();
+            detail::condition_variable_any_relock_or_terminate(lock);
+            if (timed_out) return pred();
+        }
+    }
+#endif
+
 public:
     condition_variable_any() : internal_mutex_(), cv_(), wait_state_(0u) {}
 
@@ -874,6 +929,17 @@ public:
             wait(lock);
         }
     }
+
+#if __cplusplus >= 202002L
+    template<typename Lock, typename Predicate>
+    bool wait(Lock& lock, stop_token stoken, Predicate pred) {
+        return wait_stoppable(lock, std::move(stoken), std::move(pred),
+            [this](unique_lock<mutex>& internal_lock) {
+                cv_.wait(internal_lock);
+                return false;
+            });
+    }
+#endif
 
     template<typename Lock, typename Rep, typename Period>
     cv_status wait_for(Lock& lock,
@@ -949,6 +1015,37 @@ public:
         }
         return true;
     }
+
+#if __cplusplus >= 202002L
+    template<typename Lock, typename Clock, typename Duration,
+             typename Predicate>
+    bool wait_until(Lock& lock, stop_token stoken,
+                    const chrono::time_point<Clock, Duration>& timeout_time,
+                    Predicate pred) {
+        return wait_stoppable(lock, std::move(stoken), std::move(pred),
+            [this, &timeout_time](unique_lock<mutex>& internal_lock) {
+                return cv_.wait_until(internal_lock, timeout_time) ==
+                       cv_status::timeout;
+            });
+    }
+
+    template<typename Lock, typename Rep, typename Period,
+             typename Predicate>
+    bool wait_for(Lock& lock, stop_token stoken,
+                  const chrono::duration<Rep, Period>& rel_time,
+                  Predicate pred) {
+        detail::condition_variable_any_validate_lock(
+            lock, "condition_variable_any stoppable wait_for lock state");
+        long long relative_nanoseconds = 0;
+        if (!detail::condition_variable_duration_to_nanoseconds(
+                rel_time, relative_nanoseconds)) {
+            return pred();
+        }
+        return wait_until(lock, std::move(stoken),
+            detail::condition_variable_steady_deadline(relative_nanoseconds),
+            std::move(pred));
+    }
+#endif
 
     /* Internal lifetime observation for close-race contract tests. */
     unsigned int __rin_active_waiters() const noexcept {
