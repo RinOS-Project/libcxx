@@ -549,31 +549,56 @@ struct shared_ptr_default_destroy<T[N]> {
     }
 };
 
-/* The C++11 shared-pointer atomic free functions predate atomic<T>
- * specializations.  A single process-wide gate is deliberately conservative:
- * it provides the required indivisible snapshot/replace contract without
- * exposing a lock-free claim that the target runtime cannot prove. */
-inline volatile unsigned int& shared_ptr_atomic_gate() noexcept {
-    static volatile unsigned int gate = 0u;
-    return gate;
+/* C++11 shared-pointer atomic free functions and atomic<shared_ptr<T>> use
+ * address-hashed gates.  Operations on one shared_ptr object remain atomic,
+ * while unrelated objects no longer wait for a process-wide lock owner. */
+inline volatile unsigned int* shared_ptr_atomic_gate_for(
+    const void* object) noexcept {
+    static volatile unsigned int gates[64] = {};
+    const size_t index =
+        (reinterpret_cast<size_t>(object) >> 4u) & (64u - 1u);
+    return &gates[index];
 }
 
-inline void shared_ptr_atomic_lock() noexcept {
+inline void shared_ptr_atomic_lock(const void* object) noexcept {
+    volatile unsigned int* gate = shared_ptr_atomic_gate_for(object);
 #if defined(__GNUC__) || defined(__clang__) || defined(__RCC__)
-    while (__sync_lock_test_and_set(&shared_ptr_atomic_gate(), 1u) != 0u)
+    while (__sync_lock_test_and_set(gate, 1u) != 0u)
         __asm__ volatile("pause" ::: "memory");
 #else
-    while (shared_ptr_atomic_gate() != 0u) {}
-    shared_ptr_atomic_gate() = 1u;
+    while (*gate != 0u) {}
+    *gate = 1u;
 #endif
 }
 
-inline void shared_ptr_atomic_unlock() noexcept {
+inline void shared_ptr_atomic_unlock(const void* object) noexcept {
+    volatile unsigned int* gate = shared_ptr_atomic_gate_for(object);
 #if defined(__GNUC__) || defined(__clang__) || defined(__RCC__)
-    __sync_lock_release(&shared_ptr_atomic_gate());
+    __sync_lock_release(gate);
 #else
-    shared_ptr_atomic_gate() = 0u;
+    *gate = 0u;
 #endif
+}
+
+inline void shared_ptr_atomic_seq_cst_point() noexcept {
+    /* A short atomic sequence point preserves the cross-object seq_cst order
+     * without making one descheduled lock owner block every shared_ptr. */
+    static volatile unsigned int sequence = 0u;
+#if defined(__GNUC__) || defined(__clang__) || defined(__RCC__)
+    (void)__sync_fetch_and_add(&sequence, 1u);
+#else
+    ++sequence;
+#endif
+}
+
+template<typename Order>
+inline bool shared_ptr_atomic_is_seq_cst(Order order) noexcept {
+    /* std::memory_order::seq_cst has the fixed value 5 in this library. */
+    return static_cast<int>(order) == 5;
+}
+
+inline void shared_ptr_atomic_commit(bool seq_cst) noexcept {
+    if (seq_cst) shared_ptr_atomic_seq_cst_point();
 }
 
 } /* namespace detail */
@@ -1334,12 +1359,38 @@ inline bool shared_ptr_atomic_equal(const shared_ptr<T>& left,
            !left.owner_before(right) && !right.owner_before(left);
 }
 
+namespace detail {
+
+template<typename T>
+bool shared_ptr_atomic_compare_exchange_impl(
+    shared_ptr<T>* value, shared_ptr<T>* expected, shared_ptr<T> desired,
+    bool seq_cst_on_success, bool seq_cst_on_failure) noexcept {
+    if (!value || !expected) return false;
+    shared_ptr_atomic_lock(value);
+    shared_ptr<T> actual(*value);
+    const bool matches = shared_ptr_atomic_equal(actual, *expected);
+    if (matches) {
+        value->swap(desired);
+    } else {
+        /* Keep the old expected value alive until after the gate is released;
+         * its destructor may re-enter shared_ptr atomic operations. */
+        expected->swap(actual);
+    }
+    shared_ptr_atomic_commit(
+        matches ? seq_cst_on_success : seq_cst_on_failure);
+    shared_ptr_atomic_unlock(value);
+    return matches;
+}
+
+} /* namespace detail */
+
 template<typename T>
 shared_ptr<T> atomic_load(const shared_ptr<T>* value) noexcept {
     if (!value) return shared_ptr<T>();
-    detail::shared_ptr_atomic_lock();
+    detail::shared_ptr_atomic_lock(value);
     shared_ptr<T> result(*value);
-    detail::shared_ptr_atomic_unlock();
+    detail::shared_ptr_atomic_commit(true);
+    detail::shared_ptr_atomic_unlock(value);
     return result;
 }
 
@@ -1354,8 +1405,14 @@ shared_ptr<T> atomic_load(const volatile shared_ptr<T>* value) noexcept {
 
 template<typename T, typename Order>
 shared_ptr<T> atomic_load_explicit(const shared_ptr<T>* value,
-                                   Order) noexcept {
-    return atomic_load(value);
+                                   Order order) noexcept {
+    if (!value) return shared_ptr<T>();
+    detail::shared_ptr_atomic_lock(value);
+    shared_ptr<T> result(*value);
+    detail::shared_ptr_atomic_commit(
+        detail::shared_ptr_atomic_is_seq_cst(order));
+    detail::shared_ptr_atomic_unlock(value);
+    return result;
 }
 
 template<typename T, typename Order>
@@ -1368,9 +1425,10 @@ shared_ptr<T> atomic_load_explicit(const volatile shared_ptr<T>* value,
 template<typename T>
 void atomic_store(shared_ptr<T>* value, shared_ptr<T> desired) noexcept {
     if (!value) return;
-    detail::shared_ptr_atomic_lock();
+    detail::shared_ptr_atomic_lock(value);
     value->swap(desired);
-    detail::shared_ptr_atomic_unlock();
+    detail::shared_ptr_atomic_commit(true);
+    detail::shared_ptr_atomic_unlock(value);
 }
 
 template<typename T>
@@ -1380,8 +1438,13 @@ void atomic_store(volatile shared_ptr<T>* value, shared_ptr<T> desired) noexcept
 
 template<typename T, typename Order>
 void atomic_store_explicit(shared_ptr<T>* value, shared_ptr<T> desired,
-                           Order) noexcept {
-    atomic_store(value, std::move(desired));
+                           Order order) noexcept {
+    if (!value) return;
+    detail::shared_ptr_atomic_lock(value);
+    value->swap(desired);
+    detail::shared_ptr_atomic_commit(
+        detail::shared_ptr_atomic_is_seq_cst(order));
+    detail::shared_ptr_atomic_unlock(value);
 }
 
 template<typename T, typename Order>
@@ -1395,10 +1458,11 @@ template<typename T>
 shared_ptr<T> atomic_exchange(shared_ptr<T>* value,
                               shared_ptr<T> desired) noexcept {
     if (!value) return shared_ptr<T>();
-    detail::shared_ptr_atomic_lock();
+    detail::shared_ptr_atomic_lock(value);
     shared_ptr<T> result(*value);
     value->swap(desired);
-    detail::shared_ptr_atomic_unlock();
+    detail::shared_ptr_atomic_commit(true);
+    detail::shared_ptr_atomic_unlock(value);
     return result;
 }
 
@@ -1412,8 +1476,15 @@ shared_ptr<T> atomic_exchange(volatile shared_ptr<T>* value,
 template<typename T, typename Order>
 shared_ptr<T> atomic_exchange_explicit(shared_ptr<T>* value,
                                        shared_ptr<T> desired,
-                                       Order) noexcept {
-    return atomic_exchange(value, std::move(desired));
+                                       Order order) noexcept {
+    if (!value) return shared_ptr<T>();
+    detail::shared_ptr_atomic_lock(value);
+    shared_ptr<T> result(*value);
+    value->swap(desired);
+    detail::shared_ptr_atomic_commit(
+        detail::shared_ptr_atomic_is_seq_cst(order));
+    detail::shared_ptr_atomic_unlock(value);
+    return result;
 }
 
 template<typename T, typename Order>
@@ -1428,17 +1499,8 @@ template<typename T>
 bool atomic_compare_exchange_strong(shared_ptr<T>* value,
                                     shared_ptr<T>* expected,
                                     shared_ptr<T> desired) noexcept {
-    if (!value || !expected) return false;
-    detail::shared_ptr_atomic_lock();
-    shared_ptr<T> actual(*value);
-    const bool matches = shared_ptr_atomic_equal(actual, *expected);
-    if (matches) {
-        value->swap(desired);
-    } else {
-        *expected = actual;
-    }
-    detail::shared_ptr_atomic_unlock();
-    return matches;
+    return detail::shared_ptr_atomic_compare_exchange_impl(
+        value, expected, std::move(desired), true, true);
 }
 
 template<typename T>
@@ -1470,9 +1532,11 @@ bool atomic_compare_exchange_weak(volatile shared_ptr<T>* value,
 template<typename T, typename Order>
 bool atomic_compare_exchange_strong_explicit(
     shared_ptr<T>* value, shared_ptr<T>* expected, shared_ptr<T> desired,
-    Order, Order) noexcept {
-    return atomic_compare_exchange_strong(value, expected,
-                                          std::move(desired));
+    Order success, Order failure) noexcept {
+    return detail::shared_ptr_atomic_compare_exchange_impl(
+        value, expected, std::move(desired),
+        detail::shared_ptr_atomic_is_seq_cst(success),
+        detail::shared_ptr_atomic_is_seq_cst(failure));
 }
 
 template<typename T, typename Order>
@@ -1487,9 +1551,11 @@ bool atomic_compare_exchange_strong_explicit(
 template<typename T, typename Order>
 bool atomic_compare_exchange_weak_explicit(
     shared_ptr<T>* value, shared_ptr<T>* expected, shared_ptr<T> desired,
-    Order, Order) noexcept {
-    return atomic_compare_exchange_weak(value, expected,
-                                        std::move(desired));
+    Order success, Order failure) noexcept {
+    return detail::shared_ptr_atomic_compare_exchange_impl(
+        value, expected, std::move(desired),
+        detail::shared_ptr_atomic_is_seq_cst(success),
+        detail::shared_ptr_atomic_is_seq_cst(failure));
 }
 
 template<typename T, typename Order>
