@@ -18,10 +18,97 @@ namespace std {
 
 namespace detail {
 
-inline void shared_timed_mutex_yield() noexcept
-{
-    rin_cxx_scheduler_yield();
+template<class Clock, class Duration>
+inline int shared_timed_lock_wait(pthread_rwlock_t* rwlock, bool writer,
+    const chrono::time_point<Clock, Duration>& timeout_time) {
+    constexpr long long recheck_nanoseconds = 10000000LL;
+    for (;;) {
+        const auto now = Clock::now();
+        if (!(now < timeout_time)) return ETIMEDOUT;
+        long long remaining_nanoseconds = 0;
+        if (!mutex_duration_to_nanoseconds(timeout_time - now,
+                                           remaining_nanoseconds))
+            return ETIMEDOUT;
+        if (remaining_nanoseconds > recheck_nanoseconds)
+            remaining_nanoseconds = recheck_nanoseconds;
+        struct timespec deadline = {};
+        if (!mutex_realtime_deadline(remaining_nanoseconds, deadline))
+            return ETIMEDOUT;
+        const int result = writer
+            ? pthread_rwlock_timedwrlock(rwlock, &deadline)
+            : pthread_rwlock_timedrdlock(rwlock, &deadline);
+        if (result != ETIMEDOUT) return result;
+    }
 }
+
+template<class Clock>
+struct shared_timed_lock_strategy {
+    template<class Duration>
+    static int write(pthread_rwlock_t* rwlock,
+                     const chrono::time_point<Clock, Duration>& timeout_time) {
+        return shared_timed_lock_wait(rwlock, true, timeout_time);
+    }
+
+    template<class Duration>
+    static int read(pthread_rwlock_t* rwlock,
+                    const chrono::time_point<Clock, Duration>& timeout_time) {
+        return shared_timed_lock_wait(rwlock, false, timeout_time);
+    }
+};
+
+template<>
+struct shared_timed_lock_strategy<chrono::steady_clock> {
+    template<class Duration>
+    static int write(pthread_rwlock_t* rwlock,
+                     const chrono::time_point<chrono::steady_clock, Duration>& timeout_time) {
+#if defined(RIN_LIBC_PTHREAD_HEADER)
+        struct timespec deadline = {};
+        if (!mutex_epoch_timespec_deadline(timeout_time.time_since_epoch(),
+                                           deadline))
+            return ETIMEDOUT;
+        return pthread_rwlock_clockwrlock(rwlock, CLOCK_MONOTONIC, &deadline);
+#else
+        return shared_timed_lock_wait(rwlock, true, timeout_time);
+#endif
+    }
+
+    template<class Duration>
+    static int read(pthread_rwlock_t* rwlock,
+                    const chrono::time_point<chrono::steady_clock, Duration>& timeout_time) {
+#if defined(RIN_LIBC_PTHREAD_HEADER)
+        struct timespec deadline = {};
+        if (!mutex_epoch_timespec_deadline(timeout_time.time_since_epoch(),
+                                           deadline))
+            return ETIMEDOUT;
+        return pthread_rwlock_clockrdlock(rwlock, CLOCK_MONOTONIC, &deadline);
+#else
+        return shared_timed_lock_wait(rwlock, false, timeout_time);
+#endif
+    }
+};
+
+template<>
+struct shared_timed_lock_strategy<chrono::system_clock> {
+    template<class Duration>
+    static int write(pthread_rwlock_t* rwlock,
+                     const chrono::time_point<chrono::system_clock, Duration>& timeout_time) {
+        struct timespec deadline = {};
+        if (!mutex_epoch_timespec_deadline(timeout_time.time_since_epoch(),
+                                           deadline))
+            return ETIMEDOUT;
+        return pthread_rwlock_timedwrlock(rwlock, &deadline);
+    }
+
+    template<class Duration>
+    static int read(pthread_rwlock_t* rwlock,
+                    const chrono::time_point<chrono::system_clock, Duration>& timeout_time) {
+        struct timespec deadline = {};
+        if (!mutex_epoch_timespec_deadline(timeout_time.time_since_epoch(),
+                                           deadline))
+            return ETIMEDOUT;
+        return pthread_rwlock_timedrdlock(rwlock, &deadline);
+    }
+};
 
 } /* namespace detail */
 
@@ -120,23 +207,25 @@ public:
 
     template<typename Rep, typename Period>
     bool try_lock_for(const chrono::duration<Rep, Period>& rel_time) {
-        return try_lock_until(chrono::steady_clock::now() + rel_time);
+        long long relative_nanoseconds = 0;
+        if (!detail::mutex_duration_to_nanoseconds(
+                rel_time, relative_nanoseconds))
+            return try_lock();
+        const long long now = chrono::steady_clock::now()
+                                 .time_since_epoch().count();
+        return try_lock_until(detail::mutex_steady_deadline_from_now(
+            now, relative_nanoseconds));
     }
 
     template<typename Clock, typename Duration>
     bool try_lock_until(const chrono::time_point<Clock, Duration>& timeout_time) {
-        for (;;) {
-            if (try_lock()) {
-                return true;
-            }
-            if (!(Clock::now() < timeout_time)) {
-                return false;
-            }
-            /* A failed try-lock must hand the CPU back to the scheduler.  A
-             * pause instruction only reduces pipeline pressure and can still
-             * monopolize a logical CPU while the owner is descheduled. */
-            detail::shared_timed_mutex_yield();
-        }
+        if (try_lock()) return true;
+        const int result = detail::shared_timed_lock_strategy<Clock>::write(
+            mutex_.native_handle(), timeout_time);
+        if (result == 0) return true;
+        if (result == ETIMEDOUT) return false;
+        detail::mutex_operation_failed(result,
+                                       "shared_timed_mutex try_lock_until");
     }
 
     void unlock() noexcept {
@@ -154,20 +243,25 @@ public:
 
     template<typename Rep, typename Period>
     bool try_lock_shared_for(const chrono::duration<Rep, Period>& rel_time) {
-        return try_lock_shared_until(chrono::steady_clock::now() + rel_time);
+        long long relative_nanoseconds = 0;
+        if (!detail::mutex_duration_to_nanoseconds(
+                rel_time, relative_nanoseconds))
+            return try_lock_shared();
+        const long long now = chrono::steady_clock::now()
+                                 .time_since_epoch().count();
+        return try_lock_shared_until(detail::mutex_steady_deadline_from_now(
+            now, relative_nanoseconds));
     }
 
     template<typename Clock, typename Duration>
     bool try_lock_shared_until(const chrono::time_point<Clock, Duration>& timeout_time) {
-        for (;;) {
-            if (try_lock_shared()) {
-                return true;
-            }
-            if (!(Clock::now() < timeout_time)) {
-                return false;
-            }
-            detail::shared_timed_mutex_yield();
-        }
+        if (try_lock_shared()) return true;
+        const int result = detail::shared_timed_lock_strategy<Clock>::read(
+            mutex_.native_handle(), timeout_time);
+        if (result == 0) return true;
+        if (result == ETIMEDOUT) return false;
+        detail::mutex_operation_failed(
+            result, "shared_timed_mutex try_lock_shared_until");
     }
 
     void unlock_shared() noexcept {
