@@ -276,6 +276,82 @@ private:
         return path(result);
     }
 
+    static bool next_compare_component(const char* value, size_t length,
+                                       size_t& position,
+                                       bool& trailing_empty,
+                                       size_t& component_start,
+                                       size_t& component_length) noexcept {
+        while (position < length && value[position] == '/') ++position;
+        if (position < length) {
+            component_start = position;
+            while (position < length && value[position] != '/') ++position;
+            component_length = position - component_start;
+            return true;
+        }
+        if (!trailing_empty) return false;
+        trailing_empty = false;
+        component_start = length;
+        component_length = 0u;
+        return true;
+    }
+
+    static int compare_pathnames(const char* left, size_t left_length,
+                                 const char* right, size_t right_length) noexcept {
+        const bool left_absolute = left_length != 0u && left[0] == '/';
+        const bool right_absolute = right_length != 0u && right[0] == '/';
+        if (left_absolute != right_absolute) return left_absolute ? 1 : -1;
+
+        size_t left_position = left_absolute ? 1u : 0u;
+        size_t right_position = right_absolute ? 1u : 0u;
+        bool left_trailing_empty = left_length != 0u &&
+            left[left_length - 1u] == '/' &&
+            left_length > left_position;
+        bool right_trailing_empty = right_length != 0u &&
+            right[right_length - 1u] == '/' &&
+            right_length > right_position;
+        if (left_trailing_empty) {
+            size_t cursor = left_position;
+            while (cursor < left_length && left[cursor] == '/') ++cursor;
+            left_trailing_empty = cursor < left_length;
+        }
+        if (right_trailing_empty) {
+            size_t cursor = right_position;
+            while (cursor < right_length && right[cursor] == '/') ++cursor;
+            right_trailing_empty = cursor < right_length;
+        }
+
+        for (;;) {
+            size_t left_start = 0u;
+            size_t left_component_length = 0u;
+            size_t right_start = 0u;
+            size_t right_component_length = 0u;
+            const bool has_left = next_compare_component(
+                left, left_length, left_position, left_trailing_empty,
+                left_start, left_component_length);
+            const bool has_right = next_compare_component(
+                right, right_length, right_position, right_trailing_empty,
+                right_start, right_component_length);
+            if (!has_left || !has_right) {
+                if (has_left == has_right) return 0;
+                return has_left ? 1 : -1;
+            }
+
+            const size_t common_length = left_component_length <
+                right_component_length ? left_component_length
+                                       : right_component_length;
+            for (size_t index = 0u; index < common_length; ++index) {
+                const unsigned char left_byte = static_cast<unsigned char>(
+                    left[left_start + index]);
+                const unsigned char right_byte = static_cast<unsigned char>(
+                    right[right_start + index]);
+                if (left_byte != right_byte)
+                    return left_byte < right_byte ? -1 : 1;
+            }
+            if (left_component_length != right_component_length)
+                return left_component_length < right_component_length ? -1 : 1;
+        }
+    }
+
 public:
     /* コンストラクタ */
     path() noexcept = default;
@@ -406,7 +482,8 @@ public:
 
     /* compare */
     int compare(const path& p) const noexcept {
-        return pathname_.compare(p.pathname_);
+        return compare_pathnames(pathname_.data(), pathname_.size(),
+                                 p.pathname_.data(), p.pathname_.size());
     }
 
     /* The source overloads compare the path's native byte sequence directly;
@@ -414,11 +491,15 @@ public:
      * would make the pointer form ambiguous with the path conversion
      * constructor for generic callers. */
     int compare(const string_type& source) const noexcept {
-        return pathname_.compare(source);
+        return compare_pathnames(pathname_.data(), pathname_.size(),
+                                 source.data(), source.size());
     }
 
     int compare(const value_type* source) const noexcept {
-        return pathname_.compare(source);
+        size_t length = 0u;
+        while (source[length] != '\0') ++length;
+        return compare_pathnames(pathname_.data(), pathname_.size(),
+                                 source, length);
     }
 
     /* decomposition */
