@@ -40,7 +40,6 @@ extern "C" {
     /* ファイル情報 */
     int rin_stat(const char* path, void* buf);
     int rin_lstat(const char* path, void* buf);
-    int rin_fstat(int fd, void* buf);
     int rin_access(const char* path, int mode);
 
     /* ディレクトリ操作 */
