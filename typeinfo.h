@@ -82,12 +82,9 @@ public:
     }
 };
 
-/* `any::type()` and `function::target_type()` remain part of the standard
- * surface even for Rin builds compiled with `-fno-rtti`.  Compiler RTTI
- * objects cannot be named in that mode, so provide a small type_info carrier
- * whose name is the compiler's stable template signature.  Equality still
- * uses type_info's canonical string comparison, which keeps equivalent types
- * comparable across translation units without image-local token addresses. */
+/* `any::type()` and `function::target_type()` remain available when dynamic
+ * RTTI is disabled on compilers that do not emit static typeid descriptors.
+ * RinCompiler and RTTI-enabled targets use their ODR type_info object instead. */
 namespace detail {
 
 class rin_named_type_info final : public type_info {

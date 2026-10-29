@@ -16,10 +16,10 @@
 #include "utility.h"
 
 #if __cplusplus >= 201703L
-#if defined(__GXX_RTTI) || defined(_CPPRTTI)
-#define RIN_CXX_ANY_HAS_RTTI 1
+#if defined(__RCC__) || defined(__GXX_RTTI) || defined(_CPPRTTI)
+#define RIN_CXX_ANY_HAS_STATIC_TYPEINFO 1
 #else
-#define RIN_CXX_ANY_HAS_RTTI 0
+#define RIN_CXX_ANY_HAS_STATIC_TYPEINFO 0
 #endif
 
 namespace std {
@@ -35,11 +35,9 @@ public:
 
 namespace detail {
 
-/* A token's address is not a type identity across a shared-library boundary:
- * each image gets a distinct instantiation of the inline variable.  Keep the
- * no-RTTI path numeric and deterministic instead.  The compiler-generated
- * signature contains the complete template argument and is identical in
- * every image built with the same ABI. */
+/* GCC/Clang builds without RTTI use their stable type-signature spelling.
+ * RinCompiler instead emits the same ODR type_info descriptor for static
+ * typeid(T), including when dynamic RTTI is disabled. */
 inline unsigned long long any_type_key_hash(const char* text) noexcept {
     unsigned long long value = 1469598103934665603ull;
     if (!text) return value;
@@ -50,11 +48,6 @@ inline unsigned long long any_type_key_hash(const char* text) noexcept {
     return value;
 }
 
-/* FNV-1a is a compact dispatch key, not a proof of type identity.  Keep the
- * compiler's complete template signature beside it so two distinct types
- * that happen to hash to the same 64-bit value cannot be cast as one another.
- * `__PRETTY_FUNCTION__`/`__FUNCSIG__` has static storage and is identical for
- * the same T across translation units built with one ABI. */
 template<class T>
 inline const char* any_type_signature() noexcept {
 #if defined(_MSC_VER)
@@ -82,9 +75,6 @@ inline unsigned long long any_type_key() noexcept {
 #elif defined(__clang__) || defined(__GNUC__)
     return any_type_key_hash(__PRETTY_FUNCTION__);
 #else
-    /* Rin's supported compilers expose one of the signatures above.  Keep a
-     * deterministic fallback for syntax-only ports rather than reintroducing
-     * image-local addresses. */
     return 0xcbf29ce484222325ull;
 #endif
 }
@@ -122,8 +112,8 @@ class any {
     struct holder_base {
         virtual ~holder_base() = default;
         virtual holder_base* clone() const = 0;
+#if !RIN_CXX_ANY_HAS_STATIC_TYPEINFO
         virtual unsigned long long type_key() const noexcept = 0;
-#if !RIN_CXX_ANY_HAS_RTTI
         virtual const char* type_signature() const noexcept = 0;
 #endif
         virtual const type_info& type() const noexcept = 0;
@@ -144,18 +134,18 @@ class any {
             return result;
         }
         
+#if !RIN_CXX_ANY_HAS_STATIC_TYPEINFO
         unsigned long long type_key() const noexcept override {
             return get_type_key<T>();
         }
 
-#if !RIN_CXX_ANY_HAS_RTTI
         const char* type_signature() const noexcept override {
             return detail::any_type_signature<
                 typename remove_cv<T>::type>();
         }
 #endif
 
-#if RIN_CXX_ANY_HAS_RTTI
+#if RIN_CXX_ANY_HAS_STATIC_TYPEINFO
         const type_info& type() const noexcept override {
             return typeid(T);
         }
@@ -165,12 +155,14 @@ class any {
         }
 #endif
     };
-    
+
+#if !RIN_CXX_ANY_HAS_STATIC_TYPEINFO
     template<class T>
     static unsigned long long get_type_key() noexcept {
         using RawT = typename remove_cv<T>::type;
         return detail::any_type_key<RawT>();
     }
+#endif
 
     template<class T, class... Args>
     static holder<T>* make_holder(Args&&... args) {
@@ -321,7 +313,7 @@ public:
     }
 
     const type_info& type() const noexcept {
-#if RIN_CXX_ANY_HAS_RTTI
+#if RIN_CXX_ANY_HAS_STATIC_TYPEINFO
         return ptr_ ? ptr_->type() : typeid(void);
 #else
         return ptr_ ? ptr_->type() : detail::rin_no_rtti_type_info<void>();
@@ -348,7 +340,7 @@ T* any_cast_impl(any* operand) noexcept {
     if (!operand || !operand->ptr_) return nullptr;
     
     using DecayT = typename decay<T>::type;
-#if RIN_CXX_ANY_HAS_RTTI
+#if RIN_CXX_ANY_HAS_STATIC_TYPEINFO
     if (operand->ptr_->type() != typeid(DecayT)) {
         return nullptr;
     }
@@ -458,7 +450,7 @@ inline void swap(any& lhs, any& rhs) noexcept {
 
 } /* namespace std */
 
-#undef RIN_CXX_ANY_HAS_RTTI
+#undef RIN_CXX_ANY_HAS_STATIC_TYPEINFO
 
 #endif /* __cplusplus >= 201703L */
 

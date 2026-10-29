@@ -17,10 +17,10 @@
 #include "iterator.h"
 #include "utility.h"  /* pair for C++17 searcher results */
 
-#if defined(__GXX_RTTI) || defined(_CPPRTTI)
-#define RIN_CXX_FUNCTION_HAS_RTTI 1
+#if defined(__RCC__) || defined(__GXX_RTTI) || defined(_CPPRTTI)
+#define RIN_CXX_FUNCTION_HAS_STATIC_TYPEINFO 1
 #else
-#define RIN_CXX_FUNCTION_HAS_RTTI 0
+#define RIN_CXX_FUNCTION_HAS_STATIC_TYPEINFO 0
 #endif
 
 #ifdef __cplusplus
@@ -89,14 +89,10 @@ inline unsigned long long functional_type_token() noexcept {
 #elif defined(__clang__) || defined(__GNUC__)
     return functional_type_key_hash(__PRETTY_FUNCTION__);
 #else
-    /* Supported Rin compilers expose one of the signatures above. */
     return 0xcbf29ce484222325ull;
 #endif
 }
 
-/* The numeric token is only a fast filter. Keep the complete compiler
- * signature beside it so a theoretical FNV collision cannot make target<T>
- * return storage for a different callable type. */
 template<typename T>
 inline const char* functional_type_signature() noexcept {
 #if defined(_MSC_VER)
@@ -320,8 +316,8 @@ private:
         virtual void destroy(bool local) noexcept = 0;
         virtual void* target_address() noexcept = 0;
         virtual const void* target_address() const noexcept = 0;
+#if !RIN_CXX_FUNCTION_HAS_STATIC_TYPEINFO
         virtual unsigned long long target_token() const noexcept = 0;
-#if !RIN_CXX_FUNCTION_HAS_RTTI
         virtual const char* target_signature() const noexcept = 0;
 #endif
         virtual const type_info& target_type() const noexcept = 0;
@@ -364,15 +360,15 @@ template<typename F>
         }
         void* target_address() noexcept override { return &func; }
         const void* target_address() const noexcept override { return &func; }
+#if !RIN_CXX_FUNCTION_HAS_STATIC_TYPEINFO
         unsigned long long target_token() const noexcept override {
             return detail::functional_type_token<remove_cv_t<F>>();
         }
-#if !RIN_CXX_FUNCTION_HAS_RTTI
         const char* target_signature() const noexcept override {
             return detail::functional_type_signature<remove_cv_t<F>>();
         }
 #endif
-#if RIN_CXX_FUNCTION_HAS_RTTI
+#if RIN_CXX_FUNCTION_HAS_STATIC_TYPEINFO
         const type_info& target_type() const noexcept override {
             return typeid(F);
         }
@@ -473,15 +469,15 @@ template<typename F>
 
         void* target_address() noexcept override { return &func; }
         const void* target_address() const noexcept override { return &func; }
+#if !RIN_CXX_FUNCTION_HAS_STATIC_TYPEINFO
         unsigned long long target_token() const noexcept override {
             return detail::functional_type_token<remove_cv_t<F>>();
         }
-#if !RIN_CXX_FUNCTION_HAS_RTTI
         const char* target_signature() const noexcept override {
             return detail::functional_type_signature<remove_cv_t<F>>();
         }
 #endif
-#if RIN_CXX_FUNCTION_HAS_RTTI
+#if RIN_CXX_FUNCTION_HAS_STATIC_TYPEINFO
         const type_info& target_type() const noexcept override {
             return typeid(F);
         }
@@ -585,22 +581,12 @@ template<typename F>
     template<typename T>
     enable_if_t<is_object<T>::value, T*> target_impl() noexcept {
         if (!m_callable) return nullptr;
-#if RIN_CXX_FUNCTION_HAS_RTTI
+#if RIN_CXX_FUNCTION_HAS_STATIC_TYPEINFO
         if (m_callable->target_type() != typeid(T)) return nullptr;
-        /* RTTI identity is necessary but not sufficient at a DSO boundary:
-         * implementations may expose distinct type_info storage for the same
-         * ABI spelling.  Keep the deterministic compiler-signature token as a
-         * second discriminator before exposing erased storage. */
-        if (m_callable->target_token() !=
-            detail::functional_type_token<remove_cv_t<T>>()) {
-            return nullptr;
-        }
 #else
         if (m_callable->target_token() !=
-            detail::functional_type_token<remove_cv_t<T>>()) {
-            return nullptr;
-        }
-        if (!detail::functional_type_signature_equal(
+            detail::functional_type_token<remove_cv_t<T>>() ||
+            !detail::functional_type_signature_equal(
                 m_callable->target_signature(),
                 detail::functional_type_signature<remove_cv_t<T>>())) {
             return nullptr;
@@ -617,18 +603,12 @@ template<typename F>
     template<typename T>
     enable_if_t<is_object<T>::value, const T*> target_impl() const noexcept {
         if (!m_callable) return nullptr;
-#if RIN_CXX_FUNCTION_HAS_RTTI
+#if RIN_CXX_FUNCTION_HAS_STATIC_TYPEINFO
         if (m_callable->target_type() != typeid(T)) return nullptr;
-        if (m_callable->target_token() !=
-            detail::functional_type_token<remove_cv_t<T>>()) {
-            return nullptr;
-        }
 #else
         if (m_callable->target_token() !=
-            detail::functional_type_token<remove_cv_t<T>>()) {
-            return nullptr;
-        }
-        if (!detail::functional_type_signature_equal(
+            detail::functional_type_token<remove_cv_t<T>>() ||
+            !detail::functional_type_signature_equal(
                 m_callable->target_signature(),
                 detail::functional_type_signature<remove_cv_t<T>>())) {
             return nullptr;
@@ -733,7 +713,7 @@ public:
     }
 
     const type_info& target_type() const noexcept {
-#if RIN_CXX_FUNCTION_HAS_RTTI
+#if RIN_CXX_FUNCTION_HAS_STATIC_TYPEINFO
         return m_callable ? m_callable->target_type() : typeid(void);
 #else
         return m_callable ? m_callable->target_type()
@@ -2854,7 +2834,7 @@ struct hash<shared_ptr<T>> {
 
 } /* namespace std */
 
-#undef RIN_CXX_FUNCTION_HAS_RTTI
-
 #endif /* __cplusplus */
+
+#undef RIN_CXX_FUNCTION_HAS_STATIC_TYPEINFO
 #endif /* RINCXX_FUNCTIONAL_H */
