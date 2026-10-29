@@ -4463,9 +4463,19 @@ inline file_status status(const path& p) {
 }
 
 /* absolute */
-inline path absolute(const path& p) {
+inline path absolute(const path& p, error_code& ec) {
+    ec.clear();
     if (p.is_absolute()) return p;
-    return current_path() / p;
+    const path current = current_path(ec);
+    if (ec) return path();
+    return current / p;
+}
+
+inline path absolute(const path& p) {
+    error_code ec;
+    const path result = absolute(p, ec);
+    if (ec) detail::filesystem_failure("absolute", p, ec);
+    return result;
 }
 
 /* hash_value for path (Abseil compatibility) */
