@@ -538,6 +538,9 @@ inline int fpclassify(long double x) {
                                 FP_SUBNORMAL, FP_ZERO, x);
 }
 
+using ::issubnormal;
+using ::iszero;
+
 /* nextafter - 次の表現可能な浮動小数点値 */
 inline float nextafter(float from, float to) {
     if (from == to) return to;
