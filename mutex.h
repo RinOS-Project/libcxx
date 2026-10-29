@@ -130,6 +130,93 @@ inline bool mutex_timepoint_realtime_deadline(
     return mutex_realtime_deadline(relative_nanoseconds, deadline);
 }
 
+template<class Duration>
+inline bool mutex_epoch_timespec_deadline(
+    const Duration& since_epoch, struct timespec& deadline) noexcept {
+    const long double count = static_cast<long double>(since_epoch.count());
+    if (!(count > 0.0L)) return false;
+    const long double seconds = count *
+        static_cast<long double>(Duration::period::num) /
+        static_cast<long double>(Duration::period::den);
+    if (!(seconds > 0.0L)) return false;
+
+    using seconds_type = decltype(deadline.tv_sec);
+    const long double maximum_seconds = static_cast<long double>(
+        numeric_limits<seconds_type>::max());
+    if (seconds >= maximum_seconds) {
+        deadline.tv_sec = numeric_limits<seconds_type>::max();
+        deadline.tv_nsec = 999999999L;
+        return true;
+    }
+
+    const long long whole_seconds = static_cast<long long>(seconds);
+    long long nanoseconds = static_cast<long long>(
+        (seconds - static_cast<long double>(whole_seconds)) *
+        1000000000.0L);
+    if (nanoseconds < 0) nanoseconds = 0;
+    if (nanoseconds >= 1000000000LL) {
+        if (whole_seconds >= static_cast<long long>(
+                numeric_limits<seconds_type>::max())) {
+            deadline.tv_sec = numeric_limits<seconds_type>::max();
+            deadline.tv_nsec = 999999999L;
+            return true;
+        }
+        deadline.tv_sec = static_cast<seconds_type>(whole_seconds + 1LL);
+        nanoseconds -= 1000000000LL;
+    } else {
+        deadline.tv_sec = static_cast<seconds_type>(whole_seconds);
+    }
+    deadline.tv_nsec = static_cast<long>(nanoseconds);
+    return true;
+}
+
+template<class Clock>
+struct mutex_timed_lock_strategy {
+    template<class Duration>
+    static int wait(pthread_mutex_t* mutex,
+                    const chrono::time_point<Clock, Duration>& timeout_time) {
+        struct timespec deadline = {};
+        if (!mutex_timepoint_realtime_deadline(timeout_time, deadline))
+            return ETIMEDOUT;
+        return pthread_mutex_timedlock(mutex, &deadline);
+    }
+};
+
+template<>
+struct mutex_timed_lock_strategy<chrono::steady_clock> {
+    template<class Duration>
+    static int wait(
+        pthread_mutex_t* mutex,
+        const chrono::time_point<chrono::steady_clock, Duration>& timeout_time) {
+#if defined(RIN_LIBC_PTHREAD_HEADER)
+        struct timespec deadline = {};
+        if (!mutex_epoch_timespec_deadline(timeout_time.time_since_epoch(),
+                                           deadline))
+            return ETIMEDOUT;
+        return pthread_mutex_clocklock(mutex, CLOCK_MONOTONIC, &deadline);
+#else
+        struct timespec deadline = {};
+        if (!mutex_timepoint_realtime_deadline(timeout_time, deadline))
+            return ETIMEDOUT;
+        return pthread_mutex_timedlock(mutex, &deadline);
+#endif
+    }
+};
+
+template<>
+struct mutex_timed_lock_strategy<chrono::system_clock> {
+    template<class Duration>
+    static int wait(
+        pthread_mutex_t* mutex,
+        const chrono::time_point<chrono::system_clock, Duration>& timeout_time) {
+        struct timespec deadline = {};
+        if (!mutex_epoch_timespec_deadline(timeout_time.time_since_epoch(),
+                                           deadline))
+            return ETIMEDOUT;
+        return pthread_mutex_timedlock(mutex, &deadline);
+    }
+};
+
 } /* namespace detail */
 
 /* ═══════════════════════════════════════════════════════════════
@@ -317,11 +404,8 @@ public:
     bool try_lock_until(
         const chrono::time_point<Clock, Duration>& timeout_time) {
         if (try_lock()) return true;
-        struct timespec deadline = {};
-        if (!detail::mutex_timepoint_realtime_deadline(timeout_time,
-                                                        deadline))
-            return false;
-        const int result = pthread_mutex_timedlock(&mtx_, &deadline);
+        const int result = detail::mutex_timed_lock_strategy<Clock>::wait(
+            &mtx_, timeout_time);
         if (result == 0) return true;
         if (result == ETIMEDOUT) return false;
         detail::mutex_operation_failed(result, "timed_mutex timed lock");
@@ -393,11 +477,8 @@ public:
     bool try_lock_until(
         const chrono::time_point<Clock, Duration>& timeout_time) {
         if (try_lock()) return true;
-        struct timespec deadline = {};
-        if (!detail::mutex_timepoint_realtime_deadline(timeout_time,
-                                                        deadline))
-            return false;
-        const int result = pthread_mutex_timedlock(&mtx_, &deadline);
+        const int result = detail::mutex_timed_lock_strategy<Clock>::wait(
+            &mtx_, timeout_time);
         if (result == 0) return true;
         if (result == ETIMEDOUT) return false;
         detail::mutex_operation_failed(result,
