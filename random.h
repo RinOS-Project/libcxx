@@ -45,7 +45,7 @@
 extern "C" {
     unsigned long long rin_get_ticks(void);
     /* エントロピープールからの真の乱数 (RDRAND/RDSEED + TSC) */
-#if defined(__GNUC__) || defined(__clang__)
+#if defined(__GNUC__) || defined(__clang__) || defined(__RCC__)
     unsigned int platform_random32(void) __attribute__((weak));
     unsigned long long platform_random64(void) __attribute__((weak));
     int platform_has_rdrand(void) __attribute__((weak));
