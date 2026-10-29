@@ -3215,6 +3215,23 @@ inline bool copy_file(const path& from, const path& to, copy_options options,
         return false;
     }
 
+    /* Publish source metadata with the staged bytes. Applying attributes
+     * before rename keeps an existing destination intact if either update
+     * fails and makes the copied mtime agree with update_existing's check. */
+    if (rin_chmod(staging,
+                  static_cast<unsigned int>(source_view->st_mode & 07777u)) != 0) {
+        ec = make_error_code(detail::filesystem_error_from_errno());
+        detail::copy_discard_staging_path(staging, ec);
+        return false;
+    }
+    if (rin_set_times(staging,
+                      static_cast<long long>(source_view->st_atime),
+                      static_cast<long long>(source_view->st_mtime)) != 0) {
+        ec = make_error_code(detail::filesystem_error_from_errno());
+        detail::copy_discard_staging_path(staging, ec);
+        return false;
+    }
+
     if (replacement == 0u ||
         replacement == static_cast<unsigned>(copy_options::skip_existing)) {
         if (rin_link(staging, destination_text) != 0) {
