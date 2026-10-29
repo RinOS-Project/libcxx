@@ -34,6 +34,7 @@
 #endif
 #endif
 #include "../libc/linux/futex.h"
+#include "__futex_wait_queue.h"
 
 namespace std {
 
@@ -140,16 +141,6 @@ struct semaphore_deadline_strategy {
     }
 };
 
-inline void semaphore_wait_after_generation_saturation(
-    unsigned int* address, unsigned int generation) noexcept {
-    /* The generation intentionally cannot wrap.  A bounded relative sleep
-     * prevents a release racing the wait from being lost indefinitely. */
-    struct timespec retry = {};
-    retry.tv_nsec = 1000000L;
-    syscall(SYS_futex, address, FUTEX_WAIT_PRIVATE, generation,
-            &retry, NULL, 0);
-}
-
 template<>
 struct semaphore_deadline_strategy<chrono::steady_clock> {
     template<typename Duration>
@@ -189,24 +180,7 @@ class counting_semaphore {
                   "RinOS futex words must be 32 bits");
 
     atomic_ptrdiff_t counter_;
-    alignas(int) mutable unsigned int wake_word_;
-
-    unsigned int* wake_address() const noexcept {
-        return const_cast<unsigned int*>(&wake_word_);
-    }
-
-    void publish_wake() noexcept {
-        unsigned int generation =
-            __atomic_load_n(&wake_word_, __ATOMIC_RELAXED);
-        while (generation != ~0U &&
-               !__atomic_compare_exchange_n(&wake_word_, &generation,
-                                            generation + 1U, false,
-                                            __ATOMIC_RELEASE,
-                                            __ATOMIC_RELAXED)) {
-        }
-        syscall(SYS_futex, wake_address(), FUTEX_WAKE_PRIVATE,
-                0x7fffffff, NULL, NULL, 0);
-    }
+    mutable detail::__futex_wait_queue waiters_;
 
 public:
     static constexpr ptrdiff_t max() noexcept {
@@ -215,7 +189,7 @@ public:
 
     /* コンストラクタ */
     constexpr explicit counting_semaphore(ptrdiff_t desired) noexcept
-        : counter_(desired), wake_word_(0) {}
+        : counter_(desired), waiters_() {}
 
     /* コピー・ムーブ禁止 */
     counting_semaphore(const counting_semaphore&) = delete;
@@ -224,32 +198,39 @@ public:
     /* release (V操作) — futex WAKE */
     void release(ptrdiff_t update = 1) noexcept {
         counter_.fetch_add(update, memory_order_release);
-        publish_wake();
+        if (update > 0) {
+            waiters_.lock();
+            waiters_.notify_n_locked(update);
+            waiters_.unlock();
+        }
     }
 
     /* acquire (P操作) — futexブロッキング */
     void acquire() noexcept {
-        while (true) {
-            ptrdiff_t old = counter_.load(memory_order_acquire);
-            if (old > 0) {
-                if (counter_.compare_exchange_weak(old, old - 1,
-                                                   memory_order_acq_rel,
-                                                   memory_order_relaxed)) {
+        if (try_acquire()) return;
+        detail::__futex_waiter waiter;
+        for (;;) {
+            waiters_.lock();
+            if (try_acquire()) {
+                waiters_.remove_locked(waiter);
+                waiters_.unlock();
+                return;
+            }
+            waiters_.enqueue_locked(waiter);
+            waiters_.unlock();
+
+            (void)syscall(SYS_futex, &waiter.notified, FUTEX_WAIT_PRIVATE,
+                          0, nullptr, nullptr, 0);
+
+            waiters_.lock();
+            if (__atomic_load_n(&waiter.notified, __ATOMIC_ACQUIRE) != 0) {
+                if (try_acquire()) {
+                    waiters_.unlock();
                     return;
                 }
-            } else {
-                const unsigned int generation =
-                    __atomic_load_n(&wake_word_, __ATOMIC_ACQUIRE);
-                if (counter_.load(memory_order_acquire) == 0) {
-                    if (generation == ~0U) {
-                        detail::semaphore_wait_after_generation_saturation(
-                            wake_address(), generation);
-                    } else {
-                        syscall(SYS_futex, wake_address(), FUTEX_WAIT_PRIVATE,
-                                generation, NULL, NULL, 0);
-                    }
-                }
+                waiters_.enqueue_locked(waiter);
             }
+            waiters_.unlock();
         }
     }
 
@@ -283,26 +264,41 @@ public:
     template<typename Clock, typename Duration>
     bool try_acquire_until(const chrono::time_point<Clock, Duration>& abs_time) {
         if (try_acquire()) return true;
+        detail::__futex_wait_registration registration(waiters_);
+        detail::__futex_waiter& waiter = registration.waiter();
         for (;;) {
-            if (!(Clock::now() < abs_time)) return try_acquire();
-            const unsigned int generation =
-                __atomic_load_n(&wake_word_, __ATOMIC_ACQUIRE);
-            if (counter_.load(memory_order_acquire) != 0) continue;
-
-            if (generation == ~0U) {
-                detail::semaphore_wait_after_generation_saturation(
-                    wake_address(), generation);
-                continue;
+            const bool before_deadline = Clock::now() < abs_time;
+            waiters_.lock();
+            if (try_acquire()) {
+                waiters_.remove_locked(waiter);
+                waiters_.unlock();
+                return true;
             }
+            if (!before_deadline) {
+                waiters_.remove_locked(waiter);
+                waiters_.unlock();
+                return try_acquire();
+            }
+            waiters_.enqueue_locked(waiter);
+            waiters_.unlock();
 
             struct timespec deadline = {};
             int operation = FUTEX_WAIT_BITSET_PRIVATE;
             if (!detail::semaphore_deadline_strategy<Clock>::make(
-                    abs_time, deadline, operation))
+                    abs_time, deadline, operation)) {
+                waiters_.lock();
+                if (try_acquire()) {
+                    waiters_.remove_locked(waiter);
+                    waiters_.unlock();
+                    return true;
+                }
+                waiters_.remove_locked(waiter);
+                waiters_.unlock();
                 return try_acquire();
-            if (counter_.load(memory_order_acquire) != 0) continue;
-            syscall(SYS_futex, wake_address(), operation, generation,
-                    &deadline, NULL, FUTEX_BITSET_MATCH_ANY);
+            }
+
+            (void)syscall(SYS_futex, &waiter.notified, operation,
+                          0, &deadline, nullptr, FUTEX_BITSET_MATCH_ANY);
         }
     }
 };

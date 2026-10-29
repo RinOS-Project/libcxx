@@ -33,6 +33,7 @@
 #endif
 #endif
 #include "../libc/linux/futex.h"
+#include "__futex_wait_queue.h"
 
 namespace std {
 
@@ -56,32 +57,17 @@ class barrier {
     atomic<ptrdiff_t> expected_;
     atomic<ptrdiff_t> remaining_;
     atomic<unsigned long long> phase_;
-    alignas(int) mutable unsigned int wake_word_;
+    mutable detail::__futex_wait_queue waiters_;
     CompletionFunction completion_;
-
-    unsigned int* wake_address() const noexcept {
-        return const_cast<unsigned int*>(&wake_word_);
-    }
-
-    void publish_wake() noexcept {
-        unsigned int generation =
-            __atomic_load_n(&wake_word_, __ATOMIC_RELAXED);
-        while (generation != ~0U &&
-               !__atomic_compare_exchange_n(&wake_word_, &generation,
-                                            generation + 1U, false,
-                                            __ATOMIC_RELEASE,
-                                            __ATOMIC_RELAXED)) {
-        }
-        syscall(SYS_futex, wake_address(), FUTEX_WAKE_PRIVATE,
-                0x7fffffff, NULL, NULL, 0);
-    }
 
     void complete_phase() noexcept {
         completion_();
         remaining_.store(expected_.load(memory_order_acquire),
                          memory_order_relaxed);
         phase_.fetch_add(1, memory_order_release);
-        publish_wake();
+        waiters_.lock();
+        waiters_.notify_all_locked();
+        waiters_.unlock();
     }
 
 public:
@@ -107,7 +93,7 @@ public:
 
     /* コンストラクタ */
     explicit barrier(ptrdiff_t expected, CompletionFunction f = CompletionFunction())
-        : expected_(expected), remaining_(expected), phase_(0), wake_word_(0),
+        : expected_(expected), remaining_(expected), phase_(0), waiters_(),
           completion_(std::move(f)) {}
 
     /* デストラクタ */
@@ -133,17 +119,30 @@ public:
 
     /* wait - 指定フェーズが完了するまで待機 (futexブロッキング) */
     void wait(arrival_token&& token) const noexcept {
-        while (phase_.load(memory_order_acquire) == token.phase_) {
-            const unsigned int generation =
-                __atomic_load_n(&wake_word_, __ATOMIC_ACQUIRE);
-            if (phase_.load(memory_order_acquire) == token.phase_) {
-                if (generation == ~0U) {
-                    (void)syscall(SYS_sched_yield);
-                } else {
-                    syscall(SYS_futex, wake_address(), FUTEX_WAIT_PRIVATE,
-                            generation, NULL, NULL, 0);
-                }
+        detail::__futex_waiter waiter;
+        waiters_.lock();
+        if (phase_.load(memory_order_acquire) != token.phase_) {
+            waiters_.unlock();
+            return;
+        }
+        waiters_.enqueue_locked(waiter);
+        waiters_.unlock();
+
+        for (;;) {
+            (void)syscall(SYS_futex, &waiter.notified, FUTEX_WAIT_PRIVATE,
+                          0, nullptr, nullptr, 0);
+
+            waiters_.lock();
+            if (phase_.load(memory_order_acquire) != token.phase_) {
+                waiters_.remove_locked(waiter);
+                waiters_.unlock();
+                return;
             }
+
+            /* A phase may complete just before its wake pass. If this waiter
+             * belongs to the new phase, re-register after that stale wake. */
+            waiters_.enqueue_locked(waiter);
+            waiters_.unlock();
         }
     }
 
