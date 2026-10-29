@@ -351,6 +351,101 @@ void swap(unique_lock<Mutex>& lhs, unique_lock<Mutex>& rhs) noexcept {
     lhs.swap(rhs);
 }
 
+namespace detail {
+
+/* std::try_lock's recursive form rolls back every mutex acquired before a
+ * failed try_lock.  The index is relative to the remaining argument pack. */
+template<class Mutex>
+int try_lock_one(Mutex& mutex) {
+    return mutex.try_lock() ? -1 : 0;
+}
+
+template<class Mutex>
+int try_lock_many(Mutex& mutex) {
+    return try_lock_one(mutex);
+}
+
+template<class First, class Second, class... Rest>
+int try_lock_many(First& first, Second& second, Rest&... rest) {
+    if (!first.try_lock()) return 0;
+
+    int result;
+#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
+    try {
+        result = try_lock_many(second, rest...);
+    } catch (...) {
+        first.unlock();
+        throw;
+    }
+#else
+    result = try_lock_many(second, rest...);
+#endif
+
+    if (result >= 0) {
+        first.unlock();
+        return result + 1;
+    }
+    return -1;
+}
+
+inline void mutex_lock_backoff() noexcept {
+    /* Yield the execution pipeline after a failed all-or-nothing attempt. */
+#if (defined(__i386__) || defined(__x86_64__)) && \
+    (defined(__GNUC__) || defined(__clang__))
+    __asm__ volatile("pause" ::: "memory");
+#elif defined(__GNUC__) || defined(__clang__)
+    __asm__ volatile("" ::: "memory");
+#else
+    /* The lock/unlock retry remains correct without an architecture hint. */
+#endif
+}
+
+template<class First, class Second, class... Rest>
+class scoped_lock_acquire {
+public:
+    scoped_lock_acquire() noexcept = default;
+
+    explicit scoped_lock_acquire(First& first, Second& second,
+                                 Rest&... rest) {
+        std::lock(first, second, rest...);
+    }
+};
+
+} /* namespace detail */
+
+/* Return the zero-based index of the first mutex which could not be acquired,
+ * or -1 after acquiring every mutex.  The recursive helper releases its
+ * prefix on both ordinary failure and exception unwinding. */
+template<class First, class Second, class... Rest>
+int try_lock(First& first, Second& second, Rest&... rest) {
+    return detail::try_lock_many(first, second, rest...);
+}
+
+/* Acquire the first mutex blocking, then try the remainder as a transaction.
+ * On failure all locks are released before retrying.  A caller never blocks
+ * on one mutex while retaining another, which breaks circular wait between
+ * invocations that pass the same mutexes in different orders. */
+template<class First, class Second, class... Rest>
+void lock(First& first, Second& second, Rest&... rest) {
+    for (;;) {
+        first.lock();
+        int result;
+#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
+        try {
+            result = detail::try_lock_many(second, rest...);
+        } catch (...) {
+            first.unlock();
+            throw;
+        }
+#else
+        result = detail::try_lock_many(second, rest...);
+#endif
+        if (result < 0) return;
+        first.unlock();
+        detail::mutex_lock_backoff();
+    }
+}
+
 /* ═══════════════════════════════════════════════════════════════
  * scoped_lock - 複数ミューテックスのロック (C++17)
  * ═══════════════════════════════════════════════════════════════*/
@@ -395,13 +490,19 @@ public:
 /* 複数ミューテックス */
 template<class Mutex1, class Mutex2, class... Mutexes>
 class scoped_lock<Mutex1, Mutex2, Mutexes...> {
+    detail::scoped_lock_acquire<Mutex1, Mutex2, Mutexes...> acquire_;
     Mutex1& mutex1_;
     scoped_lock<Mutex2, Mutexes...> rest_;
 
 public:
     explicit scoped_lock(Mutex1& m1, Mutex2& m2, Mutexes&... rest)
-        : mutex1_(m1), rest_(m2, rest...) {
-        mutex1_.lock();
+        : acquire_(m1, m2, rest...), mutex1_(m1),
+          rest_(adopt_lock, m2, rest...) {
+    }
+
+    explicit scoped_lock(adopt_lock_t, Mutex1& m1, Mutex2& m2,
+                         Mutexes&... rest) noexcept
+        : acquire_(), mutex1_(m1), rest_(adopt_lock, m2, rest...) {
     }
 
     ~scoped_lock() {
