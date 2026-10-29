@@ -318,7 +318,7 @@ public:
             pathname_ = p.pathname_;
             return *this;
         }
-        if (!pathname_.empty() && pathname_.back() != '/' && !p.empty())
+        if (!pathname_.empty() && pathname_.back() != '/')
             pathname_ += '/';
         pathname_ += p.pathname_;
         return *this;
