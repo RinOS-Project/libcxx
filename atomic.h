@@ -1421,8 +1421,21 @@ public:
  * ═══════════════════════════════════════════════════════════════*/
 
 #if __cplusplus >= 202002L
+namespace __detail {
+
+template<typename T, bool = is_pointer<T>::value &&
+    is_object<typename remove_pointer<T>::type>::value>
+struct __atomic_ref_pointer_traits {};
+
+template<typename T>
+struct __atomic_ref_pointer_traits<T, true> {
+    using difference_type = ptrdiff_t;
+};
+
+} /* namespace __detail */
+
 template<class T>
-class atomic_ref {
+class atomic_ref : public __detail::__atomic_ref_pointer_traits<T> {
     static_assert(is_trivially_copyable<T>::value,
                   "atomic_ref requires trivially copyable type");
 
@@ -1558,6 +1571,90 @@ public:
     bool compare_exchange_strong(T& expected, T desired,
                                  memory_order order = memory_order_seq_cst) const noexcept {
         return compare_exchange_strong(expected, desired, order, order);
+    }
+
+    /* Object-pointer operations use the same compare-exchange transaction
+     * for native atomics and the address-hashed lock fallback.  The type
+     * constraint deliberately excludes void* and function pointers. */
+    template<typename U = T>
+    typename enable_if<is_same<U, T>::value && is_pointer<U>::value &&
+                       is_object<typename remove_pointer<U>::type>::value,
+                       T>::type
+    fetch_add(ptrdiff_t arg,
+              memory_order order = memory_order_seq_cst) const noexcept {
+        T old_value;
+        T new_value;
+        do {
+            old_value = load(memory_order_relaxed);
+            new_value = old_value + arg;
+        } while (!compare_exchange_weak(old_value, new_value, order,
+                                        memory_order_relaxed));
+        return old_value;
+    }
+
+    template<typename U = T>
+    typename enable_if<is_same<U, T>::value && is_pointer<U>::value &&
+                       is_object<typename remove_pointer<U>::type>::value,
+                       T>::type
+    fetch_sub(ptrdiff_t arg,
+              memory_order order = memory_order_seq_cst) const noexcept {
+        T old_value;
+        T new_value;
+        do {
+            old_value = load(memory_order_relaxed);
+            /* Subtract directly so PTRDIFF_MIN is never negated. */
+            new_value = old_value - arg;
+        } while (!compare_exchange_weak(old_value, new_value, order,
+                                        memory_order_relaxed));
+        return old_value;
+    }
+
+    template<typename U = T>
+    typename enable_if<is_same<U, T>::value && is_pointer<U>::value &&
+                       is_object<typename remove_pointer<U>::type>::value,
+                       T>::type
+    operator++() const noexcept {
+        return fetch_add(1) + 1;
+    }
+
+    template<typename U = T>
+    typename enable_if<is_same<U, T>::value && is_pointer<U>::value &&
+                       is_object<typename remove_pointer<U>::type>::value,
+                       T>::type
+    operator++(int) const noexcept {
+        return fetch_add(1);
+    }
+
+    template<typename U = T>
+    typename enable_if<is_same<U, T>::value && is_pointer<U>::value &&
+                       is_object<typename remove_pointer<U>::type>::value,
+                       T>::type
+    operator--() const noexcept {
+        return fetch_sub(1) - 1;
+    }
+
+    template<typename U = T>
+    typename enable_if<is_same<U, T>::value && is_pointer<U>::value &&
+                       is_object<typename remove_pointer<U>::type>::value,
+                       T>::type
+    operator--(int) const noexcept {
+        return fetch_sub(1);
+    }
+
+    template<typename U = T>
+    typename enable_if<is_same<U, T>::value && is_pointer<U>::value &&
+                       is_object<typename remove_pointer<U>::type>::value,
+                       T>::type
+    operator+=(ptrdiff_t arg) const noexcept {
+        return fetch_add(arg) + arg;
+    }
+
+    template<typename U = T>
+    typename enable_if<is_same<U, T>::value && is_pointer<U>::value &&
+                       is_object<typename remove_pointer<U>::type>::value,
+                       T>::type
+    operator-=(ptrdiff_t arg) const noexcept {
+        return fetch_sub(arg) - arg;
     }
 
     /* Integral operations */
