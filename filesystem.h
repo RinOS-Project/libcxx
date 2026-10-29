@@ -2854,6 +2854,36 @@ inline bool copy_publish_staged_path(const char* staging, const path& to,
                                      long source_mtime, error_code& ec,
                                      bool* skipped_out = nullptr) noexcept;
 
+struct copy_path_resolution_workspace {
+    char* storage;
+    copy_path_resolution_workspace() noexcept
+        : storage(static_cast<char*>(rin_malloc(
+              copy_file_path_capacity * 3u))) {}
+    ~copy_path_resolution_workspace() noexcept {
+        if (storage) rin_free(storage);
+    }
+};
+
+struct copy_file_workspace {
+    char* storage;
+    copy_file_workspace() noexcept
+        : storage(static_cast<char*>(rin_malloc(
+              copy_file_path_capacity * 3u))) {}
+    ~copy_file_workspace() noexcept {
+        if (storage) rin_free(storage);
+    }
+    char* destination() noexcept { return storage; }
+    char* staging() noexcept {
+        return storage ? storage + copy_file_path_capacity : nullptr;
+    }
+    unsigned char* buffer() noexcept {
+        return storage
+            ? reinterpret_cast<unsigned char*>(
+                  storage + copy_file_path_capacity * 2u)
+            : nullptr;
+    }
+};
+
 /* Follow only the destination's final-component symlink chain. Intermediate
  * components keep the kernel's normal path-resolution behavior. Returning a
  * missing final target is intentional: copy_file creates that target through
@@ -2861,7 +2891,14 @@ inline bool copy_publish_staged_path(const char* staging, const path& to,
 inline bool copy_resolve_destination_path(const char* input, char* output,
                                           size_t capacity,
                                           error_code& ec) noexcept {
-    char current[copy_file_path_capacity];
+    copy_path_resolution_workspace workspace;
+    if (!workspace.storage) {
+        ec = make_error_code(errc::not_enough_memory);
+        return false;
+    }
+    char* current = workspace.storage;
+    char* cwd = current + copy_file_path_capacity;
+    char* target = cwd + copy_file_path_capacity;
     size_t input_length = 0u;
     unsigned int links_followed = 0u;
     if (!input || !output || capacity == 0u) {
@@ -2874,7 +2911,7 @@ inline bool copy_resolve_destination_path(const char* input, char* output,
     }
     if (input[0] == '/') {
         while (input[input_length] != '\0') {
-            if (input_length + 1u >= sizeof(current) ||
+            if (input_length + 1u >= copy_file_path_capacity ||
                 input_length + 1u >= capacity) {
                 ec = make_error_code(errc::filename_too_long);
                 return false;
@@ -2883,15 +2920,15 @@ inline bool copy_resolve_destination_path(const char* input, char* output,
             ++input_length;
         }
     } else {
-        char cwd[copy_file_path_capacity];
         size_t cwd_length = 0u;
-        if (!rin_getcwd(cwd, static_cast<unsigned long>(sizeof(cwd)))) {
+        if (!rin_getcwd(
+                cwd, static_cast<unsigned long>(copy_file_path_capacity))) {
             ec = make_error_code(filesystem_error_from_errno());
             return false;
         }
         while (cwd[cwd_length] != '\0') ++cwd_length;
         while (input[input_length] != '\0') {
-            if (input_length + 1u >= sizeof(current) ||
+            if (input_length + 1u >= copy_file_path_capacity ||
                 input_length + 1u >= capacity) {
                 ec = make_error_code(errc::filename_too_long);
                 return false;
@@ -2902,7 +2939,8 @@ inline bool copy_resolve_destination_path(const char* input, char* output,
                                cwd[cwd_length - 1u] != '/';
         const size_t combined = cwd_length + (separator ? 1u : 0u) +
                                 input_length;
-        if (combined + 1u > sizeof(current) || combined + 1u > capacity) {
+        if (combined + 1u > copy_file_path_capacity ||
+            combined + 1u > capacity) {
             ec = make_error_code(errc::filename_too_long);
             return false;
         }
@@ -2939,14 +2977,15 @@ inline bool copy_resolve_destination_path(const char* input, char* output,
             return false;
         }
 
-        char target[copy_file_path_capacity];
         const int target_length = rin_readlink(
-            current, target, static_cast<unsigned long>(sizeof(target) - 1u));
+            current, target,
+            static_cast<unsigned long>(copy_file_path_capacity - 1u));
         if (target_length < 0) {
             ec = make_error_code(filesystem_error_from_errno());
             return false;
         }
-        if (static_cast<size_t>(target_length) >= sizeof(target) - 1u) {
+        if (static_cast<size_t>(target_length) >=
+            copy_file_path_capacity - 1u) {
             ec = make_error_code(errc::filename_too_long);
             return false;
         }
@@ -2958,7 +2997,7 @@ inline bool copy_resolve_destination_path(const char* input, char* output,
 
         if (target[0] == '/') {
             input_length = static_cast<size_t>(target_length);
-            if (input_length + 1u > sizeof(current) ||
+            if (input_length + 1u > copy_file_path_capacity ||
                 input_length + 1u > capacity) {
                 ec = make_error_code(errc::filename_too_long);
                 return false;
@@ -2980,7 +3019,8 @@ inline bool copy_resolve_destination_path(const char* input, char* output,
                 current[parent_length - 1u] != '/';
             const size_t combined = parent_length + (separator ? 1u : 0u) +
                                     static_cast<size_t>(target_length);
-            if (combined + 1u > sizeof(current) || combined + 1u > capacity) {
+            if (combined + 1u > copy_file_path_capacity ||
+                combined + 1u > capacity) {
                 ec = make_error_code(errc::filename_too_long);
                 return false;
             }
@@ -3022,6 +3062,15 @@ inline bool copy_file(const path& from, const path& to, copy_options options,
         return false;
     }
 
+    detail::copy_file_workspace workspace;
+    if (!workspace.storage) {
+        ec = make_error_code(errc::not_enough_memory);
+        return false;
+    }
+    char* destination_text = workspace.destination();
+    char* staging = workspace.staging();
+    unsigned char* buffer = workspace.buffer();
+
     detail::stat_record source = {};
     volatile detail::stat_record* source_view = &source;
     if (rin_stat(from.c_str(), &source) != 0) {
@@ -3042,9 +3091,9 @@ inline bool copy_file(const path& from, const path& to, copy_options options,
         return false;
     }
 
-    char destination_text[detail::copy_file_path_capacity];
     if (!detail::copy_resolve_destination_path(
-            to.c_str(), destination_text, sizeof(destination_text), ec)) {
+            to.c_str(), destination_text,
+            detail::copy_file_path_capacity, ec)) {
         (void)rin_close(source_fd);
         return false;
     }
@@ -3090,11 +3139,11 @@ inline bool copy_file(const path& from, const path& to, copy_options options,
         }
     }
 
-    char staging[detail::copy_file_path_capacity];
     int staging_fd = -1;
     for (unsigned int attempt = 0u; attempt < 8u; ++attempt) {
         if (!detail::copy_staging_path(
-                destination_text, staging, sizeof(staging), ec)) {
+                destination_text, staging,
+                detail::copy_file_path_capacity, ec)) {
             (void)rin_close(source_fd);
             return false;
         }
@@ -3114,15 +3163,16 @@ inline bool copy_file(const path& from, const path& to, copy_options options,
     }
 
     bool okay = true;
-    unsigned char buffer[4096];
     while (okay) {
-        const long read_count = rin_read(source_fd, buffer, sizeof(buffer));
+        const long read_count = rin_read(
+            source_fd, buffer,
+            static_cast<unsigned long>(detail::copy_file_path_capacity));
         if (read_count < 0) {
             ec = make_error_code(detail::filesystem_error_from_errno());
             okay = false;
             break;
         }
-        if (read_count > static_cast<long>(sizeof(buffer))) {
+        if (read_count > static_cast<long>(detail::copy_file_path_capacity)) {
             ec = make_error_code(errc::io_error);
             okay = false;
             break;
