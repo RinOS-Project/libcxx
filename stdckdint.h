@@ -15,7 +15,7 @@
  * the C++26 C-compatibility header before its final language mode unless a
  * caller explicitly opts in to this RinOS preview. */
 #if (__cplusplus > 202302L || defined(RIN_ENABLE_CXX26_NUMERIC)) && \
-    (defined(__GNUC__) || defined(__clang__))
+    (defined(__GNUC__) || defined(__clang__) || defined(__RCC__))
 
 #define __STDC_VERSION_STDCKDINT_H__ 202311L
 
@@ -104,7 +104,7 @@ using std::ckd_mul;
  * explicit on older C frontends so an ordinary C11 include does not advertise
  * a facility that the selected language mode does not provide. */
 #if (__STDC_VERSION__ >= 202311L || defined(RIN_ENABLE_CXX26_NUMERIC)) && \
-    (defined(__GNUC__) || defined(__clang__))
+    (defined(__GNUC__) || defined(__clang__) || defined(__RCC__))
 #define __STDC_VERSION_STDCKDINT_H__ 202311L
 #define ckd_add(result, a, b) __builtin_add_overflow((a), (b), (result))
 #define ckd_sub(result, a, b) __builtin_sub_overflow((a), (b), (result))
