@@ -613,6 +613,12 @@ public:
             return skip_separators(value, position, limit);
         }
 
+        static bool has_trailing_empty_element(const path* value,
+                                               size_t limit) noexcept {
+            return value && limit != 0 && value->pathname_[limit - 1u] == '/' &&
+                   value->pathname_.find_first_not_of('/') != string_type::npos;
+        }
+
     public:
         using iterator_category = bidirectional_iterator_tag;
         using value_type = path;
@@ -632,12 +638,21 @@ public:
         }
 
         iterator& operator++() {
-            if (!p_ || pos_ >= end_) return *this;
+            if (!p_) return *this;
+            if (pos_ == end_ + 1u) {
+                pos_ = end_;
+                return *this;
+            }
+            if (pos_ >= end_) return *this;
             size_t next = p_->pathname_.find('/', pos_);
             if (next == string_type::npos) {
                 pos_ = end_;
             } else {
                 pos_ = skip_separators(p_, next, end_);
+                if (pos_ == end_ &&
+                    has_trailing_empty_element(p_, end_)) {
+                    ++pos_;
+                }
             }
             return *this;
         }
@@ -650,6 +665,11 @@ public:
 
         iterator& operator--() {
             if (!p_ || pos_ == 0) return *this;
+
+            if (pos_ == end_ && has_trailing_empty_element(p_, end_)) {
+                ++pos_;
+                return *this;
+            }
 
             /* --end() starts at the last non-separator component. */
             size_t cursor = pos_ >= end_ ? end_ : pos_;
