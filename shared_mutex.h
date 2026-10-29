@@ -125,16 +125,18 @@ public:
 
     template<typename Clock, typename Duration>
     bool try_lock_until(const chrono::time_point<Clock, Duration>& timeout_time) {
-        while (Clock::now() < timeout_time) {
+        for (;;) {
             if (try_lock()) {
                 return true;
+            }
+            if (!(Clock::now() < timeout_time)) {
+                return false;
             }
             /* A failed try-lock must hand the CPU back to the scheduler.  A
              * pause instruction only reduces pipeline pressure and can still
              * monopolize a logical CPU while the owner is descheduled. */
             detail::shared_timed_mutex_yield();
         }
-        return false;
     }
 
     void unlock() noexcept {
@@ -157,13 +159,15 @@ public:
 
     template<typename Clock, typename Duration>
     bool try_lock_shared_until(const chrono::time_point<Clock, Duration>& timeout_time) {
-        while (Clock::now() < timeout_time) {
+        for (;;) {
             if (try_lock_shared()) {
                 return true;
             }
+            if (!(Clock::now() < timeout_time)) {
+                return false;
+            }
             detail::shared_timed_mutex_yield();
         }
-        return false;
     }
 
     void unlock_shared() noexcept {
