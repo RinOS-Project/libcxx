@@ -448,7 +448,7 @@ inline void shared_ptr_destroy_unique_holder(void* state) noexcept {
  * release.  The fallback is retained for non-GNU freestanding compilers that
  * do not expose the __atomic builtins. */
 inline size_t shared_ptr_count_load(const size_t* count) noexcept {
-#if defined(__GNUC__) || defined(__clang__)
+#if defined(__GNUC__) || defined(__clang__) || defined(__RCC__)
     return __atomic_load_n(count, __ATOMIC_ACQUIRE);
 #else
     return *count;
@@ -456,7 +456,7 @@ inline size_t shared_ptr_count_load(const size_t* count) noexcept {
 }
 
 inline void shared_ptr_count_increment(size_t* count) noexcept {
-#if defined(__GNUC__) || defined(__clang__)
+#if defined(__GNUC__) || defined(__clang__) || defined(__RCC__)
     size_t observed = __atomic_load_n(count, __ATOMIC_RELAXED);
     for (;;) {
         if (observed == static_cast<size_t>(-1))
@@ -474,7 +474,7 @@ inline void shared_ptr_count_increment(size_t* count) noexcept {
 }
 
 inline bool shared_ptr_count_decrement(size_t* count) noexcept {
-#if defined(__GNUC__) || defined(__clang__)
+#if defined(__GNUC__) || defined(__clang__) || defined(__RCC__)
     return __atomic_sub_fetch(count, static_cast<size_t>(1),
                               __ATOMIC_ACQ_REL) == 0;
 #else
@@ -483,7 +483,7 @@ inline bool shared_ptr_count_decrement(size_t* count) noexcept {
 }
 
 inline bool shared_ptr_count_try_increment(size_t* count) noexcept {
-#if defined(__GNUC__) || defined(__clang__)
+#if defined(__GNUC__) || defined(__clang__) || defined(__RCC__)
     size_t observed = __atomic_load_n(count, __ATOMIC_ACQUIRE);
     for (;;) {
         if (observed == 0) return false;
@@ -559,7 +559,7 @@ inline volatile unsigned int& shared_ptr_atomic_gate() noexcept {
 }
 
 inline void shared_ptr_atomic_lock() noexcept {
-#if defined(__GNUC__) || defined(__clang__)
+#if defined(__GNUC__) || defined(__clang__) || defined(__RCC__)
     while (__sync_lock_test_and_set(&shared_ptr_atomic_gate(), 1u) != 0u)
         __asm__ volatile("pause" ::: "memory");
 #else
@@ -569,7 +569,7 @@ inline void shared_ptr_atomic_lock() noexcept {
 }
 
 inline void shared_ptr_atomic_unlock() noexcept {
-#if defined(__GNUC__) || defined(__clang__)
+#if defined(__GNUC__) || defined(__clang__) || defined(__RCC__)
     __sync_lock_release(&shared_ptr_atomic_gate());
 #else
     shared_ptr_atomic_gate() = 0u;
