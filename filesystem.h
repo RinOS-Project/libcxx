@@ -2880,10 +2880,10 @@ inline bool copy_file(const path& from, const path& to, copy_options options,
 
     detail::stat_record destination = {};
     volatile detail::stat_record* destination_view = &destination;
-    /* A destination symlink must be treated as the destination node itself.
-     * Following it here would let overwrite_existing mutate an unrelated
-     * target outside the requested tree. */
-    const int destination_status = rin_lstat(to.c_str(), &destination);
+    /* copy_file writes to the destination path as resolved.  Match the later
+     * open() behavior here so a symlink to a regular file is classified by
+     * its target and is not rejected before the copy. */
+    const int destination_status = rin_stat(to.c_str(), &destination);
     if (destination_status != 0) {
         const errc destination_error = detail::filesystem_error_from_errno();
         if (destination_error != errc::no_such_file_or_directory) {
