@@ -209,12 +209,6 @@ public:
         }
     }
 
-    template<typename Callable, typename... Args>
-    bool try_start(Callable&& f, Args&&... args) {
-        return detail::try_start_thread(
-            *this, std::forward<Callable>(f), std::forward<Args>(args)...) == 0;
-    }
-
     /* コピー禁止 */
     thread(const thread&) = delete;
     thread& operator=(const thread&) = delete;

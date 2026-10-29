@@ -2149,6 +2149,23 @@ struct algorithm_worker_depth_guard {
     ~algorithm_worker_depth_guard() { --algorithm_worker_depth(); }
 };
 
+template<typename Callable, typename... Args>
+inline bool try_start_algorithm_worker(thread& worker, Callable&& function,
+                                      Args&&... args) {
+    return std::detail::try_start_thread(
+        worker, std::forward<Callable>(function),
+        std::forward<Args>(args)...) == 0;
+}
+
+template<typename Worker, typename Callable, typename... Args>
+inline auto try_start_algorithm_worker(Worker& worker, Callable&& function,
+                                      Args&&... args)
+    -> decltype(worker.try_start(std::forward<Callable>(function),
+                                 std::forward<Args>(args)...)) {
+    return worker.try_start(std::forward<Callable>(function),
+                            std::forward<Args>(args)...);
+}
+
 template<typename Policy, typename Function>
 inline auto invoke_algorithm_policy(Policy&&, Function&& function)
     -> decltype(std::forward<Function>(function)()) {
@@ -2188,6 +2205,7 @@ template<typename RandomIt, typename Difference, typename Function,
          typename Vectorize, typename Thread = thread>
 inline void parallel_for_index(RandomIt first, Difference count,
                                Function function, true_type, Vectorize) {
+    (void)first;
     if (count <= 0) return;
 
     constexpr Difference minimum_parallel_range =
@@ -2274,7 +2292,8 @@ inline void parallel_for_index(RandomIt first, Difference count,
             (worker_index < extra_items ? worker_index : extra_items);
         const Difference end = begin + base_chunk +
             (worker_index < extra_items ? 1 : 0);
-        if (workers[started].try_start(run_chunk, begin, end))
+        if (try_start_algorithm_worker(workers[started], run_chunk,
+                                       begin, end))
             ++started;
         else
             run_chunk(begin, end);
@@ -2295,19 +2314,25 @@ inline void parallel_for_tasks(unsigned int task_count, Function function) {
         return;
     }
 
+    const unsigned int dispatched_task_count =
+        task_count > 8u ? 8u : task_count;
+
     auto run_task = [function](unsigned int task) mutable {
         algorithm_worker_depth_guard depth_guard;
         function(task);
     };
     Thread workers[7];
     unsigned int started = 0u;
-    for (unsigned int task = 1u; task < task_count; ++task) {
-        if (workers[started].try_start(run_task, task))
+    for (unsigned int task = 1u; task < dispatched_task_count; ++task) {
+        if (try_start_algorithm_worker(workers[started], run_task, task))
             ++started;
         else
             run_task(task);
     }
     run_task(0u);
+    for (unsigned int task = dispatched_task_count;
+         task < task_count; ++task)
+        run_task(task);
     for (unsigned int worker = 0u; worker < started; ++worker)
         workers[worker].join();
 }
@@ -2343,6 +2368,7 @@ inline void policy_for_each(Policy&& policy, RandomIt first, RandomIt last,
 template<typename Policy, typename InputIt, typename Function>
 inline void policy_for_each(Policy&& policy, InputIt first, InputIt last,
                             Function function, false_type) {
+    (void)policy;
     using policy_type = remove_cv_t<remove_reference_t<Policy>>;
     if constexpr (is_unsequenced_algorithm_policy<policy_type>::value) {
 #if defined(__clang__)
@@ -2377,6 +2403,7 @@ template<typename Policy, typename RandomIt, typename Compare,
          typename Thread = thread>
 inline void policy_sort(Policy&& policy, RandomIt first, RandomIt last,
                        Compare compare, bool stable) {
+    (void)policy;
     using policy_type = remove_cv_t<remove_reference_t<Policy>>;
     using difference_type = typename iterator_traits<RandomIt>::difference_type;
     const difference_type count = last - first;
@@ -2411,9 +2438,8 @@ inline void policy_sort(Policy&& policy, RandomIt first, RandomIt last,
         static_cast<difference_type>(worker_count);
     const difference_type base_chunk = count / worker_divisor;
     const difference_type extra_items = count % worker_divisor;
-    parallel_for_tasks(worker_count,
-        [first, count, base_chunk, extra_items, compare, stable]
-        (unsigned int task) mutable {
+    auto sort_task = [first, base_chunk, extra_items, compare, stable]
+                     (unsigned int task) mutable {
             const difference_type task_index =
                 static_cast<difference_type>(task);
             const difference_type begin = task_index * base_chunk +
@@ -2422,7 +2448,9 @@ inline void policy_sort(Policy&& policy, RandomIt first, RandomIt last,
                 (task_index < extra_items ? 1 : 0);
             if (stable) std::stable_sort(first + begin, first + end, compare);
             else std::sort(first + begin, first + end, compare);
-        });
+        };
+    parallel_for_tasks<decltype(sort_task), Thread>(
+        worker_count, std::move(sort_task));
 
     difference_type run_size = base_chunk + (extra_items != 0 ? 1 : 0);
     while (run_size < count) {
