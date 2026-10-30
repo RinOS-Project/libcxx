@@ -4784,6 +4784,204 @@ inline path absolute(const path& p) {
     return result;
 }
 
+namespace detail {
+
+static constexpr unsigned int canonical_max_symlinks = 40u;
+static constexpr size_t canonical_path_buffer_size = 4096u;
+
+inline bool canonical_directory_exists(const path& value, error_code& ec) {
+    stat_record status = {};
+    if (rin_stat(value.c_str(), &status) != 0) {
+        ec = make_error_code(filesystem_error_from_errno());
+        return false;
+    }
+    if ((status.st_mode & 0170000u) != 0040000u) {
+        ec = make_error_code(errc::not_a_directory);
+        return false;
+    }
+    return true;
+}
+
+inline bool canonical_resolve_existing(const path& input, path& output,
+                                       error_code& ec) {
+    if (input.empty()) {
+        ec = make_error_code(errc::no_such_file_or_directory);
+        return false;
+    }
+
+    path absolute_input = absolute(input, ec);
+    if (ec) return false;
+    ::std::string pending = absolute_input.native();
+    bool require_directory = !pending.empty() && pending.back() == '/';
+    path resolved("/");
+    size_t cursor = 1u;
+    unsigned int symlink_count = 0u;
+
+    while (cursor < pending.size()) {
+        while (cursor < pending.size() && pending[cursor] == '/') ++cursor;
+        if (cursor == pending.size()) break;
+
+        const size_t component_start = cursor;
+        while (cursor < pending.size() && pending[cursor] != '/') ++cursor;
+        const ::std::string component(
+            pending.data() + component_start, cursor - component_start);
+        size_t remainder_start = cursor;
+        while (remainder_start < pending.size() &&
+               pending[remainder_start] == '/')
+            ++remainder_start;
+        const bool has_remaining_component = remainder_start < pending.size();
+
+        if (component == ".") {
+            if (!canonical_directory_exists(resolved, ec)) return false;
+            continue;
+        }
+        if (component == "..") {
+            if (!canonical_directory_exists(resolved, ec)) return false;
+            const path parent = resolved.parent_path();
+            resolved = parent.empty() ? path("/") : parent;
+            continue;
+        }
+
+        const path candidate = resolved / path(component);
+        stat_record link_status = {};
+        if (rin_lstat(candidate.c_str(), &link_status) != 0) {
+            ec = make_error_code(filesystem_error_from_errno());
+            return false;
+        }
+
+        if ((link_status.st_mode & 0170000u) == 0120000u) {
+            char target_buffer[canonical_path_buffer_size];
+            const int target_length = rin_readlink(
+                candidate.c_str(), target_buffer, sizeof(target_buffer));
+            if (target_length < 0) {
+                ec = make_error_code(filesystem_error_from_errno());
+                return false;
+            }
+            if (target_length == 0) {
+                ec = make_error_code(errc::no_such_file_or_directory);
+                return false;
+            }
+            if ((size_t)target_length >= sizeof(target_buffer)) {
+                ec = make_error_code(errc::filename_too_long);
+                return false;
+            }
+
+            ::std::string target(target_buffer, (size_t)target_length);
+            if (!path_utf8_valid(target)) {
+                ec = make_error_code(errc::illegal_byte_sequence);
+                return false;
+            }
+            if (++symlink_count > canonical_max_symlinks) {
+                ec = make_error_code(errc::too_many_symbolic_link_levels);
+                return false;
+            }
+
+            ::std::string next_pending = target;
+            if (remainder_start < pending.size()) {
+                if (next_pending.empty() || next_pending.back() != '/')
+                    next_pending.push_back('/');
+                next_pending.append(pending.data() + remainder_start,
+                                    pending.size() - remainder_start);
+            } else if (target.back() == '/') {
+                require_directory = true;
+            }
+            if (target[0] == '/') resolved = path("/");
+            pending.swap(next_pending);
+            cursor = 0u;
+            continue;
+        }
+
+        resolved = candidate;
+        if (has_remaining_component || require_directory) {
+            if (!canonical_directory_exists(resolved, ec)) return false;
+        }
+    }
+
+    if (require_directory && !canonical_directory_exists(resolved, ec))
+        return false;
+    output = resolved;
+    ec.clear();
+    return true;
+}
+
+inline bool canonical_missing_prefix_error(const error_code& ec) {
+    return ec == make_error_code(errc::no_such_file_or_directory) ||
+           ec == make_error_code(errc::not_a_directory);
+}
+
+} /* namespace detail */
+
+inline path canonical(const path& p, error_code& ec) {
+    path result;
+    if (!detail::canonical_resolve_existing(p, result, ec)) return path();
+    ec.clear();
+    return result;
+}
+
+inline path canonical(const path& p) {
+    error_code ec;
+    const path result = canonical(p, ec);
+    if (ec) detail::filesystem_failure("canonical", p, ec);
+    return result;
+}
+
+inline path weakly_canonical(const path& p, error_code& ec) {
+    ec.clear();
+    const path absolute_input = absolute(p, ec);
+    if (ec) return path();
+
+    const ::std::string source = absolute_input.native();
+    const bool trailing_separator = source.size() > 1u && source.back() == '/';
+    vector<::std::string> components;
+    size_t cursor = 1u;
+    while (cursor < source.size()) {
+        while (cursor < source.size() && source[cursor] == '/') ++cursor;
+        if (cursor == source.size()) break;
+        const size_t start = cursor;
+        while (cursor < source.size() && source[cursor] != '/') ++cursor;
+        components.push_back(source.substr(start, cursor - start));
+    }
+
+    path prefix("/");
+    for (size_t index = 0u; index < components.size(); ++index) {
+        const path candidate = prefix / path(components[index]);
+        error_code component_error;
+        const path resolved = canonical(candidate, component_error);
+        if (!component_error) {
+            prefix = resolved;
+            continue;
+        }
+        if (!detail::canonical_missing_prefix_error(component_error)) {
+            ec = component_error;
+            return path();
+        }
+
+        ::std::string suffix;
+        for (size_t remaining = index; remaining < components.size();
+             ++remaining) {
+            if (!suffix.empty()) suffix.push_back('/');
+            suffix += components[remaining];
+        }
+        if (trailing_separator && !suffix.empty()) suffix.push_back('/');
+        path result = (prefix / path(suffix)).lexically_normal();
+        ec.clear();
+        return result;
+    }
+
+    if (trailing_separator &&
+        !detail::canonical_directory_exists(prefix, ec))
+        return path();
+    ec.clear();
+    return prefix;
+}
+
+inline path weakly_canonical(const path& p) {
+    error_code ec;
+    const path result = weakly_canonical(p, ec);
+    if (ec) detail::filesystem_failure("weakly_canonical", p, ec);
+    return result;
+}
+
 /* hash_value for path (Abseil compatibility) */
 inline size_t hash_value(const path& p) noexcept {
     size_t hash = 0;
