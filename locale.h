@@ -2735,9 +2735,18 @@ protected:
 
     string_type do_curr_symbol() const override {
         string_type symbol;
+        if (!Intl && profile_ != __num_punct_detail::profile_pt_br) {
+            if (is_same<CharT, char>::value) {
+                symbol += static_cast<CharT>(0xe2);
+                symbol += static_cast<CharT>(0x82);
+                symbol += static_cast<CharT>(0xac);
+            } else {
+                symbol += static_cast<CharT>(0x20ac);
+            }
+            return symbol;
+        }
         const char* currency = profile_ == __num_punct_detail::profile_pt_br
-            ? (Intl ? "BRL " : "R$")
-            : (Intl ? "EUR " : "EUR");
+            ? (Intl ? "BRL " : "R$") : "EUR ";
         for (const char* current = currency; *current != '\0'; ++current)
             symbol += static_cast<CharT>(*current);
         return symbol;
