@@ -3233,7 +3233,7 @@ inline double stod(const string& str, size_t* pos = nullptr) {
 #if defined(RIN_FREESTANDING) && RIN_FREESTANDING
     const double value = rin_stdlib_strtod(begin, &end);
 #else
-    const double value = std::strtod(begin, &end);
+    const double value = ::strtod(begin, &end);
 #endif
     if (end == begin) {
         __detail::string_numeric_invalid("invalid floating-point value");
@@ -3252,7 +3252,7 @@ inline float stof(const string& str, size_t* pos = nullptr) {
 #if defined(RIN_FREESTANDING) && RIN_FREESTANDING
     const float value = rin_stdlib_strtof(begin, &end);
 #else
-    const float value = std::strtof(begin, &end);
+    const float value = ::strtof(begin, &end);
 #endif
     if (end == begin) {
         __detail::string_numeric_invalid("invalid floating-point value");
