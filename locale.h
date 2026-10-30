@@ -65,6 +65,12 @@ extern "C" int rin_cxx_tm_timezone_get(const void* value, long* offset,
 extern "C" int rin_cxx_tm_timezone_set(const void* value, unsigned flags,
                                         long offset, const char* zone)
     RINCXX_TM_TIMEZONE_WEAK;
+/* hosted struct tm の拡張情報は構造体に格納されない。値の寿命終了時は
+ * release を呼び、struct tm をコピーした場合は copy で対応付けを複製する。 */
+extern "C" int rin_cxx_tm_timezone_release(const void* value)
+    RINCXX_TM_TIMEZONE_WEAK;
+extern "C" int rin_cxx_tm_timezone_copy(void* destination, const void* source)
+    RINCXX_TM_TIMEZONE_WEAK;
 /* Optional product owner for the immutable C timezone catalog.  When linked,
  * `%Z` can publish a named zone only after this complete token is resolved;
  * header-only consumers retain the historical bounded sidecar behavior. */
@@ -137,6 +143,63 @@ extern "C" {
 #endif
 
 namespace std {
+
+/* hosted struct tm のsidecar寿命をスコープに結び付けるガード。
+ * 同じtmにはガードを一つだけ付け、format/parse後に破棄すること。
+ * 値コピーにはcopy_valueを使い、コピー先にも専用のガードを付ける。 */
+class tm_timezone_lifetime {
+    struct ::tm* value_;
+
+public:
+    explicit tm_timezone_lifetime(struct ::tm& value) noexcept
+        : value_(&value) {}
+
+    ~tm_timezone_lifetime() { reset(); }
+
+    tm_timezone_lifetime(const tm_timezone_lifetime&) = delete;
+    tm_timezone_lifetime& operator=(const tm_timezone_lifetime&) = delete;
+    tm_timezone_lifetime& operator=(tm_timezone_lifetime&&) = delete;
+
+    tm_timezone_lifetime(tm_timezone_lifetime&& other) noexcept
+        : value_(other.value_) {
+        other.value_ = nullptr;
+    }
+
+    struct ::tm& get() const noexcept { return *value_; }
+
+    void reset() noexcept {
+        if (value_ != nullptr && rin_cxx_tm_timezone_release)
+            (void)rin_cxx_tm_timezone_release(value_);
+        value_ = nullptr;
+    }
+
+    static bool copy_value(struct ::tm& destination,
+                           const struct ::tm& source) noexcept {
+        if (&destination == &source) return true;
+        struct ::tm candidate = source;
+        if (rin_cxx_tm_timezone_copy) {
+            if (!rin_cxx_tm_timezone_copy(&destination, &source))
+                return false;
+        } else {
+            unsigned source_flags = 0u;
+            unsigned destination_flags = 0u;
+            bool source_has_metadata = rin_cxx_tm_timezone_get &&
+                rin_cxx_tm_timezone_get(&source, nullptr, nullptr, 0u,
+                                        &source_flags) && source_flags != 0u;
+            bool destination_has_metadata = rin_cxx_tm_timezone_get &&
+                rin_cxx_tm_timezone_get(&destination, nullptr, nullptr, 0u,
+                                        &destination_flags) &&
+                destination_flags != 0u;
+            if (source_has_metadata ||
+                (destination_has_metadata &&
+                 (!rin_cxx_tm_timezone_release ||
+                  !rin_cxx_tm_timezone_release(&destination))))
+                return false;
+        }
+        destination = candidate;
+        return true;
+    }
+};
 
 #if __cplusplus >= 201703L
 #define RIN_LOCALE_SPECIALIZATION_DEFINITION inline
