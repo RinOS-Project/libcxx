@@ -1048,7 +1048,8 @@ enum {
     profile_classic = 0,
     profile_de = 1,
     profile_fr = 2,
-    profile_dot_decimal = 3
+    profile_dot_decimal = 3,
+    profile_pt_br = 4
 };
 
 inline bool name_prefix(const char* name, const char* prefix) noexcept {
@@ -1068,9 +1069,9 @@ inline int profile_for_name(const char* name) noexcept {
         return profile_classic;
     if (name_prefix(name, "de_DE")) return profile_de;
     if (name_prefix(name, "fr_FR")) return profile_fr;
-    if (name_prefix(name, "es_ES") || name_prefix(name, "it_IT") ||
-        name_prefix(name, "pt_BR"))
+    if (name_prefix(name, "es_ES") || name_prefix(name, "it_IT"))
         return profile_dot_decimal;
+    if (name_prefix(name, "pt_BR")) return profile_pt_br;
     return -1;
 }
 
@@ -1109,7 +1110,8 @@ protected:
 
     char_type do_thousands_sep() const override {
         if (profile_ == __num_punct_detail::profile_de ||
-            profile_ == __num_punct_detail::profile_dot_decimal)
+            profile_ == __num_punct_detail::profile_dot_decimal ||
+            profile_ == __num_punct_detail::profile_pt_br)
             return static_cast<CharT>('.');
         if (profile_ == __num_punct_detail::profile_fr)
             return static_cast<CharT>(' ');
@@ -2733,9 +2735,11 @@ protected:
 
     string_type do_curr_symbol() const override {
         string_type symbol;
-        symbol += static_cast<CharT>('E');
-        symbol += static_cast<CharT>('U');
-        symbol += static_cast<CharT>('R');
+        const char* currency = profile_ == __num_punct_detail::profile_pt_br
+            ? (Intl ? "BRL " : "R$")
+            : (Intl ? "EUR " : "EUR");
+        for (const char* current = currency; *current != '\0'; ++current)
+            symbol += static_cast<CharT>(*current);
         return symbol;
     }
 
