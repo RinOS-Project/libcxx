@@ -80,7 +80,9 @@
 
 #if defined(__cplusplus) && __cplusplus >= 202002L
 #define __cpp_lib_destroying_delete          201806L
-#define __cpp_lib_chrono                    201907L
+/* Keep the advertised chrono revision below the C++20 time-zone API: this
+ * implementation has calendar support but no tzdb/time_zone surface yet. */
+#define __cpp_lib_chrono                    201611L
 #define __cpp_lib_constexpr_char_traits     201811L
 #define __cpp_lib_interpolate               201902L
 #define __cpp_lib_constexpr_tuple           201811L
