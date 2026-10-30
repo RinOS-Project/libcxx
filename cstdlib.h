@@ -80,9 +80,7 @@ extern "C" void* realloc(void* ptr, size_t size);
 extern "C" size_t malloc_usable_size(void* ptr);
 extern "C" int at_quick_exit(void (*func)(void));
 extern "C" void quick_exit(int status) __attribute__((noreturn));
-#if !defined(environ)
-extern "C" char** environ;
-#endif
+extern "C" char* getenv(const char* name);
 #if !defined(RIN_FREESTANDING) || !RIN_FREESTANDING
 extern "C" void exit(int status) __attribute__((noreturn));
 extern "C" void _Exit(int status) __attribute__((noreturn));
@@ -102,10 +100,6 @@ __attribute__((noreturn)) static inline void abort(void) {
 }
 #endif
 #endif
-#if defined(__MINGW32__)
-extern "C" char*** __p__environ(void);
-#endif
-
 /* Exit codes as macros to avoid conflict with stdlib.h */
 #ifndef EXIT_SUCCESS
 #define EXIT_SUCCESS 0
@@ -116,21 +110,6 @@ extern "C" char*** __p__environ(void);
 
 namespace std {
     using ::size_t;
-
-    namespace __detail {
-        /* Some hosted C libraries expose environ as a macro expanding to an
-         * accessor expression.  Do not redeclare that macro as a C object;
-         * normalize both forms to the table pointer used by std::getenv. */
-        inline char** environment_table() {
-#if defined(__MINGW32__)
-            return *__p__environ();
-#elif defined(environ)
-            return environ;
-#else
-            return ::environ;
-#endif
-        }
-    }
 
     /* ═══════════════════════════════════════════════════════════════
      * Program control - direct syscall implementation
@@ -591,69 +570,11 @@ namespace std {
      * Environment
      * ═══════════════════════════════════════════════════════════════*/
 
-    namespace __detail {
-        constexpr size_t environment_count_max = 128u;
-        constexpr size_t environment_string_max = 4096u;
-        constexpr size_t environment_bytes_max = 256u * 1024u;
-
-        inline size_t environment_bounded_length(const char* string) {
-            if (!string) return SIZE_MAX;
-            for (size_t index = 0u; index < environment_string_max;
-                 ++index) {
-                if (string[index] == '\0') return index;
-            }
-            return SIZE_MAX;
-        }
-    }
-
     inline char* getenv(const char* name) {
 #if defined(RIN_FREESTANDING) && RIN_FREESTANDING && defined(RIN_USERSPACE)
         return rin_stdlib_getenv(name);
 #else
-        size_t name_length = __detail::environment_bounded_length(name);
-        size_t total_bytes = 0u;
-        char* result = nullptr;
-        char** table = __detail::environment_table();
-
-        if (name_length == 0u || name_length == SIZE_MAX || !table) {
-            return nullptr;
-        }
-        for (size_t index = 0u; index < name_length; ++index) {
-            if (name[index] == '=') return nullptr;
-        }
-
-        for (size_t entry_index = 0u;
-             entry_index < __detail::environment_count_max; ++entry_index) {
-            char* entry = table[entry_index];
-            size_t entry_length;
-            size_t separator = 0u;
-            if (!entry) return result;
-
-            entry_length = __detail::environment_bounded_length(entry);
-            if (entry_length == 0u || entry_length == SIZE_MAX ||
-                total_bytes > __detail::environment_bytes_max -
-                                  (entry_length + 1u)) {
-                return nullptr;
-            }
-            total_bytes += entry_length + 1u;
-            while (separator < entry_length && entry[separator] != '=') {
-                ++separator;
-            }
-            if (separator == 0u || separator == entry_length) return nullptr;
-            if (separator == name_length) {
-                size_t index = 0u;
-                while (index < name_length && entry[index] == name[index]) {
-                    ++index;
-                }
-                if (index == name_length) {
-                    if (result) return nullptr;
-                    result = entry + separator + 1u;
-                }
-            }
-        }
-        return table[__detail::environment_count_max] == nullptr
-                   ? result
-                   : nullptr;
+        return ::getenv(name);
 #endif
     }
 
