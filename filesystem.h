@@ -12,6 +12,7 @@
 #if defined(__cplusplus) && __cplusplus >= 201703L
 
 #include "string.h"
+#include "string_view.h"
 #include "vector.h"
 #include "memory.h"
 #include "chrono.h"
@@ -19,6 +20,8 @@
 #include "stdexcept.h"
 #include "system_error.h"
 #include "iomanip.h"
+#include "iterator.h"
+#include "type_traits.h"
 #if __cplusplus >= 202002L
 #include "compare.h"
 #endif
@@ -236,6 +239,23 @@ constexpr directory_options& operator&=(directory_options& a,
 class path;
 path operator/(const path& lhs, const path& rhs);
 
+namespace detail {
+template<typename CharT, typename Traits, typename Allocator>
+inline bool path_stream_to_utf8(
+    const basic_string<CharT, Traits, Allocator>& input,
+    ::std::string& native);
+template<typename CharT>
+inline bool path_utf8_to_stream(const ::std::string& native,
+                                basic_string<CharT>& output);
+template<typename InputIt>
+inline bool path_range_to_utf8(InputIt first, InputIt last,
+                               ::std::string& native);
+template<typename CharT>
+inline bool path_pointer_to_utf8(const CharT* source,
+                                 ::std::string& native);
+[[noreturn]] inline void path_encoding_failure();
+} /* namespace detail */
+
 class path {
 public:
     using value_type = char;
@@ -244,6 +264,31 @@ public:
 
 private:
     string_type pathname_;
+
+    template<typename SourceCharT, typename Traits, typename Allocator>
+    static string_type from_source(
+        const basic_string<SourceCharT, Traits, Allocator>& source) {
+        string_type converted;
+        if (!detail::path_stream_to_utf8(source, converted))
+            detail::path_encoding_failure();
+        return converted;
+    }
+
+    template<typename SourceCharT>
+    static string_type from_pointer(const SourceCharT* source) {
+        string_type converted;
+        if (!detail::path_pointer_to_utf8(source, converted))
+            detail::path_encoding_failure();
+        return converted;
+    }
+
+    template<typename InputIt>
+    static string_type from_range(InputIt first, InputIt last) {
+        string_type converted;
+        if (!detail::path_range_to_utf8(first, last, converted))
+            detail::path_encoding_failure();
+        return converted;
+    }
 
     static void split_raw_components(const string_type& value,
                                      vector<string_type>& components,
@@ -358,29 +403,96 @@ public:
     path(const path&) = default;
     path(path&&) noexcept = default;
 
-    path(const string_type& source) : pathname_(source) {}
-    path(const value_type* source) : pathname_(source) {}
+    path(const string_type& source) : pathname_(from_source(source)) {}
+    path(const value_type* source) : pathname_(from_pointer(source)) {}
+
+    template<typename SourceCharT, typename Traits, typename Allocator>
+    path(const basic_string<SourceCharT, Traits, Allocator>& source)
+        : pathname_(from_source(source)) {}
+
+    template<typename SourceCharT, typename Traits>
+    path(basic_string_view<SourceCharT, Traits> source)
+        : pathname_(from_range(source.begin(), source.end())) {}
+
+    template<typename SourceCharT>
+    path(const SourceCharT* source) : pathname_(from_pointer(source)) {}
 
     template<typename InputIt>
-    path(InputIt first, InputIt last) : pathname_(first, last) {}
+    path(InputIt first, InputIt last) : pathname_(from_range(first, last)) {}
 
     /* 代入 */
     path& operator=(const path&) = default;
     path& operator=(path&&) noexcept = default;
-    path& operator=(const string_type& source) { pathname_ = source; return *this; }
-    path& operator=(const value_type* source) { pathname_ = source; return *this; }
+    path& operator=(const string_type& source) {
+        string_type converted = from_source(source);
+        pathname_.swap(converted);
+        return *this;
+    }
+    path& operator=(const value_type* source) {
+        string_type converted = from_pointer(source);
+        pathname_.swap(converted);
+        return *this;
+    }
+
+    template<typename SourceCharT, typename Traits, typename Allocator>
+    path& operator=(const basic_string<SourceCharT, Traits, Allocator>& source) {
+        string_type converted = from_source(source);
+        pathname_.swap(converted);
+        return *this;
+    }
+
+    template<typename SourceCharT, typename Traits>
+    path& operator=(basic_string_view<SourceCharT, Traits> source) {
+        string_type converted = from_range(source.begin(), source.end());
+        pathname_.swap(converted);
+        return *this;
+    }
+
+    template<typename SourceCharT>
+    path& operator=(const SourceCharT* source) {
+        string_type converted = from_pointer(source);
+        pathname_.swap(converted);
+        return *this;
+    }
 
     /* assign */
-    path& assign(const string_type& source) { pathname_ = source; return *this; }
+    path& assign(const string_type& source) {
+        string_type converted = from_source(source);
+        pathname_.swap(converted);
+        return *this;
+    }
 
     path& assign(const value_type* source) {
-        pathname_ = source;
+        string_type converted = from_pointer(source);
+        pathname_.swap(converted);
+        return *this;
+    }
+
+    template<typename SourceCharT, typename Traits, typename Allocator>
+    path& assign(const basic_string<SourceCharT, Traits, Allocator>& source) {
+        string_type converted = from_source(source);
+        pathname_.swap(converted);
+        return *this;
+    }
+
+    template<typename SourceCharT, typename Traits>
+    path& assign(basic_string_view<SourceCharT, Traits> source) {
+        string_type converted = from_range(source.begin(), source.end());
+        pathname_.swap(converted);
+        return *this;
+    }
+
+    template<typename SourceCharT>
+    path& assign(const SourceCharT* source) {
+        string_type converted = from_pointer(source);
+        pathname_.swap(converted);
         return *this;
     }
 
     template<typename InputIt>
     path& assign(InputIt first, InputIt last) {
-        pathname_.assign(first, last);
+        string_type converted = from_range(first, last);
+        pathname_.swap(converted);
         return *this;
     }
 
@@ -408,6 +520,21 @@ public:
         return operator/=(path(source));
     }
 
+    template<typename SourceCharT, typename Traits, typename Allocator>
+    path& operator/=(const basic_string<SourceCharT, Traits, Allocator>& source) {
+        return operator/=(path(source));
+    }
+
+    template<typename SourceCharT, typename Traits>
+    path& operator/=(basic_string_view<SourceCharT, Traits> source) {
+        return operator/=(path(source));
+    }
+
+    template<typename SourceCharT>
+    path& operator/=(const SourceCharT* source) {
+        return operator/=(path(source));
+    }
+
     path& operator/=(value_type component) {
         return operator/=(path(string_type(1u, component)));
     }
@@ -419,6 +546,21 @@ public:
     }
 
     path& append(const value_type* source) {
+        return operator/=(path(source));
+    }
+
+    template<typename SourceCharT, typename Traits, typename Allocator>
+    path& append(const basic_string<SourceCharT, Traits, Allocator>& source) {
+        return operator/=(path(source));
+    }
+
+    template<typename SourceCharT, typename Traits>
+    path& append(basic_string_view<SourceCharT, Traits> source) {
+        return operator/=(path(source));
+    }
+
+    template<typename SourceCharT>
+    path& append(const SourceCharT* source) {
         return operator/=(path(source));
     }
 
@@ -437,9 +579,43 @@ public:
 
     /* concat */
     path& operator+=(const path& p) { pathname_ += p.pathname_; return *this; }
-    path& operator+=(const string_type& s) { pathname_ += s; return *this; }
-    path& operator+=(const value_type* s) { pathname_ += s; return *this; }
-    path& operator+=(value_type c) { pathname_ += c; return *this; }
+    path& operator+=(const string_type& source) {
+        string_type converted = from_source(source);
+        pathname_ += converted;
+        return *this;
+    }
+    path& operator+=(const value_type* source) {
+        string_type converted = from_pointer(source);
+        pathname_ += converted;
+        return *this;
+    }
+
+    template<typename SourceCharT, typename Traits, typename Allocator>
+    path& operator+=(const basic_string<SourceCharT, Traits, Allocator>& source) {
+        string_type converted = from_source(source);
+        pathname_ += converted;
+        return *this;
+    }
+
+    template<typename SourceCharT, typename Traits>
+    path& operator+=(basic_string_view<SourceCharT, Traits> source) {
+        string_type converted = from_range(source.begin(), source.end());
+        pathname_ += converted;
+        return *this;
+    }
+
+    template<typename SourceCharT>
+    path& operator+=(const SourceCharT* source) {
+        string_type converted = from_pointer(source);
+        pathname_ += converted;
+        return *this;
+    }
+    path& operator+=(value_type c) {
+        string_type source(1u, c);
+        string_type converted = from_source(source);
+        pathname_ += converted;
+        return *this;
+    }
 
     path& concat(const path& p) { return operator+=(p); }
 
@@ -447,9 +623,25 @@ public:
     path& concat(const value_type* source) { return operator+=(source); }
     path& concat(value_type component) { return operator+=(component); }
 
+    template<typename SourceCharT, typename Traits, typename Allocator>
+    path& concat(const basic_string<SourceCharT, Traits, Allocator>& source) {
+        return operator+=(source);
+    }
+
+    template<typename SourceCharT, typename Traits>
+    path& concat(basic_string_view<SourceCharT, Traits> source) {
+        return operator+=(source);
+    }
+
+    template<typename SourceCharT>
+    path& concat(const SourceCharT* source) {
+        return operator+=(source);
+    }
+
     template<typename InputIt>
     path& concat(InputIt first, InputIt last) {
-        pathname_.append(first, last);
+        string_type converted = from_range(first, last);
+        pathname_ += converted;
         return *this;
     }
 
@@ -479,6 +671,37 @@ public:
 
     ::std::string string() const { return pathname_; }
     ::std::string generic_string() const { return pathname_; }
+
+    template<typename CharT>
+    basic_string<CharT> string() const {
+        basic_string<CharT> converted;
+        if (!detail::path_utf8_to_stream(pathname_, converted))
+            detail::path_encoding_failure();
+        return converted;
+    }
+
+    ::std::wstring wstring() const { return string<wchar_t>(); }
+    ::std::u16string u16string() const { return string<char16_t>(); }
+    ::std::u32string u32string() const { return string<char32_t>(); }
+#if defined(__cpp_char8_t)
+    ::std::u8string u8string() const { return string<char8_t>(); }
+#else
+    string_type u8string() const { return pathname_; }
+#endif
+
+    template<typename CharT>
+    basic_string<CharT> generic_string() const {
+        return string<CharT>();
+    }
+
+    ::std::wstring generic_wstring() const { return wstring(); }
+    ::std::u16string generic_u16string() const { return u16string(); }
+    ::std::u32string generic_u32string() const { return u32string(); }
+#if defined(__cpp_char8_t)
+    ::std::u8string generic_u8string() const { return u8string(); }
+#else
+    string_type generic_u8string() const { return u8string(); }
+#endif
 
     /* compare */
     int compare(const path& p) const noexcept {
@@ -863,12 +1086,50 @@ inline bool path_utf8_continuation(unsigned char value) noexcept {
     return (value & 0xc0u) == 0x80u;
 }
 
+inline bool path_utf8_valid(const ::std::string& value) noexcept {
+    size_t index = 0u;
+    while (index < value.size()) {
+        const unsigned char first = static_cast<unsigned char>(value[index++]);
+        unsigned long code_point = 0u;
+        size_t continuation_count = 0u;
+        unsigned long minimum = 0u;
+        if (first == 0u) return false;
+        if (first <= 0x7fu) {
+            code_point = first;
+        } else if (first >= 0xc2u && first <= 0xdfu) {
+            code_point = first & 0x1fu;
+            continuation_count = 1u;
+            minimum = 0x80u;
+        } else if (first >= 0xe0u && first <= 0xefu) {
+            code_point = first & 0x0fu;
+            continuation_count = 2u;
+            minimum = 0x800u;
+        } else if (first >= 0xf0u && first <= 0xf4u) {
+            code_point = first & 0x07u;
+            continuation_count = 3u;
+            minimum = 0x10000u;
+        } else {
+            return false;
+        }
+        if (index + continuation_count > value.size()) return false;
+        for (size_t count = 0u; count < continuation_count; ++count) {
+            const unsigned char next = static_cast<unsigned char>(value[index++]);
+            if (!path_utf8_continuation(next)) return false;
+            code_point = (code_point << 6u) | (next & 0x3fu);
+        }
+        if (code_point < minimum || code_point > 0x10ffffu ||
+            (code_point >= 0xd800u && code_point <= 0xdfffu)) return false;
+    }
+    return true;
+}
+
 template<typename CharT>
 inline bool path_utf8_to_stream(const ::std::string& native,
                                basic_string<CharT>& output) {
     output.clear();
     if (sizeof(CharT) == 1u) {
-        if (native.size() > path_stream_max_units) return false;
+        if (native.size() > path_stream_max_units || !path_utf8_valid(native))
+            return false;
         for (size_t index = 0u; index < native.size(); ++index)
             output.push_back(static_cast<CharT>(
                 static_cast<unsigned char>(native[index])));
@@ -905,7 +1166,8 @@ inline bool path_utf8_to_stream(const ::std::string& native,
             code_point = (code_point << 6u) | (next & 0x3fu);
         }
         if (code_point < minimum || code_point > 0x10ffffu ||
-            (code_point >= 0xd800u && code_point <= 0xdfffu)) return false;
+            (code_point >= 0xd800u && code_point <= 0xdfffu) ||
+            code_point == 0u) return false;
 
         if (sizeof(CharT) == 2u && code_point > 0xffffu) {
             if (output.size() + 2u > path_stream_max_units) return false;
@@ -920,11 +1182,22 @@ inline bool path_utf8_to_stream(const ::std::string& native,
     return true;
 }
 
-template<typename CharT>
-inline bool path_stream_to_utf8(const basic_string<CharT>& input,
-                               ::std::string& native) {
+template<typename CharT, typename Traits, typename Allocator>
+inline bool path_stream_to_utf8(
+    const basic_string<CharT, Traits, Allocator>& input,
+    ::std::string& native) {
     native.clear();
     if (input.size() > path_stream_max_units) return false;
+    if (sizeof(CharT) == 1u) {
+        for (size_t index = 0u; index < input.size(); ++index)
+            native.push_back(static_cast<char>(
+                static_cast<unsigned char>(input[index])));
+        if (!path_utf8_valid(native)) {
+            native.clear();
+            return false;
+        }
+        return true;
+    }
     size_t index = 0u;
     while (index < input.size()) {
         unsigned long code_point = static_cast<unsigned long>(
@@ -944,6 +1217,7 @@ inline bool path_stream_to_utf8(const basic_string<CharT>& input,
         if (sizeof(CharT) >= 4u &&
             (code_point > 0x10ffffu ||
              (code_point >= 0xd800u && code_point <= 0xdfffu))) return false;
+        if (code_point == 0u) return false;
         if (code_point <= 0x7fu) {
             native.push_back(static_cast<char>(code_point));
         } else if (code_point <= 0x7ffu) {
@@ -962,6 +1236,33 @@ inline bool path_stream_to_utf8(const basic_string<CharT>& input,
         if (native.size() > path_stream_max_units) return false;
     }
     return true;
+}
+
+template<typename InputIt>
+inline bool path_range_to_utf8(InputIt first, InputIt last,
+                               ::std::string& native) {
+    using source_type = typename ::std::iterator_traits<InputIt>::value_type;
+    using character_type = ::std::remove_cv_t<source_type>;
+    basic_string<character_type> source;
+    for (; first != last; ++first) {
+        if (source.size() == path_stream_max_units) return false;
+        source.push_back(static_cast<character_type>(*first));
+    }
+    return path_stream_to_utf8(source, native);
+}
+
+template<typename CharT>
+inline bool path_pointer_to_utf8(const CharT* source,
+                                 ::std::string& native) {
+    if (!source) return false;
+    using character_type = ::std::remove_cv_t<CharT>;
+    basic_string<character_type> value;
+    while (*source != static_cast<CharT>(0)) {
+        if (value.size() == path_stream_max_units) return false;
+        value.push_back(static_cast<character_type>(*source));
+        ++source;
+    }
+    return path_stream_to_utf8(value, native);
 }
 
 } /* namespace detail */
@@ -1133,6 +1434,11 @@ inline errc filesystem_error_from_errno() noexcept {
     (void)ec;
     __builtin_trap();
 #endif
+}
+
+[[noreturn]] inline void path_encoding_failure() {
+    filesystem_failure(
+        "path encoding", make_error_code(errc::illegal_byte_sequence));
 }
 
 } /* namespace detail */
