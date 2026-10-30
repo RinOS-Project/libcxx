@@ -1171,14 +1171,15 @@ struct __named_facet_provider<numpunct<CharT>> {
 };
 
 /* ═══════════════════════════════════════════════════════════════
- * num_get - bounded integral input facet
+ * num_get - bounded numeric input facet
  * ═══════════════════════════════════════════════════════════════
  *
  * The stream extractors have their own streambuf transaction owner, but a
- * locale consumer also needs the standard num_get facet surface.  Keep this
- * first slice allocation-free and bounded: it accepts ASCII integer fields,
- * the active numpunct separator/grouping policy, and boolalpha names.  The
- * floating-point and arbitrary external-locale paths remain separate TODOs.
+ * locale consumer also needs the standard num_get facet surface. It handles
+ * bounded integral and floating-point fields using the active numpunct
+ * separator/grouping policy and boolalpha names. Named-locale facet data is
+ * still a small built-in profile set; catalog-backed providers for arbitrary
+ * installed locales remain a separate TODO.
  */
 
 namespace __num_get_detail {
