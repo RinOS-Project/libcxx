@@ -20,8 +20,12 @@
 #include "stdexcept.h"
 #include "system_error.h"
 #include "iomanip.h"
+#include "cstdlib.h"
+#include "limits.h"
 #include "iterator.h"
 #include "type_traits.h"
+#include <sys/statvfs.h>
+#include <unistd.h>
 #if __cplusplus >= 202002L
 #include "compare.h"
 #endif
@@ -4979,6 +4983,181 @@ inline path weakly_canonical(const path& p) {
     error_code ec;
     const path result = weakly_canonical(p, ec);
     if (ec) detail::filesystem_failure("weakly_canonical", p, ec);
+    return result;
+}
+
+struct space_info {
+    uintmax_t capacity;
+    uintmax_t free;
+    uintmax_t available;
+};
+
+inline void copy_symlink(const path& existing_symlink,
+                         const path& new_symlink, error_code& ec) {
+    ec.clear();
+    const path target = read_symlink(existing_symlink, ec);
+    if (ec) return;
+    create_symlink(target, new_symlink, ec);
+}
+
+inline void copy_symlink(const path& existing_symlink,
+                         const path& new_symlink) {
+    error_code ec;
+    copy_symlink(existing_symlink, new_symlink, ec);
+    if (ec)
+        detail::filesystem_failure("copy_symlink", existing_symlink,
+                                   new_symlink, ec);
+}
+
+inline void resize_file(const path& p, uintmax_t new_size, error_code& ec) {
+    ec.clear();
+    if (new_size > static_cast<uintmax_t>(
+                       ::std::numeric_limits<off_t>::max())) {
+        ec = make_error_code(errc::value_too_large);
+        return;
+    }
+    if (::truncate(p.c_str(), static_cast<off_t>(new_size)) != 0)
+        ec = make_error_code(detail::filesystem_error_from_errno());
+}
+
+inline void resize_file(const path& p, uintmax_t new_size) {
+    error_code ec;
+    resize_file(p, new_size, ec);
+    if (ec) detail::filesystem_failure("resize_file", p, ec);
+}
+
+inline space_info space(const path& p, error_code& ec) {
+    ec.clear();
+    struct statvfs statistics = {};
+    if (::statvfs(p.c_str(), &statistics) != 0) {
+        ec = make_error_code(detail::filesystem_error_from_errno());
+        const uintmax_t invalid = static_cast<uintmax_t>(-1);
+        return {invalid, invalid, invalid};
+    }
+
+    const uintmax_t block_size =
+        static_cast<uintmax_t>(statistics.f_frsize);
+    if (block_size == 0u) {
+        ec = make_error_code(errc::io_error);
+        const uintmax_t invalid = static_cast<uintmax_t>(-1);
+        return {invalid, invalid, invalid};
+    }
+
+    const uintmax_t maximum = static_cast<uintmax_t>(-1);
+    const uintmax_t block_counts[] = {
+        static_cast<uintmax_t>(statistics.f_blocks),
+        static_cast<uintmax_t>(statistics.f_bfree),
+        static_cast<uintmax_t>(statistics.f_bavail)};
+    for (size_t index = 0u; index < sizeof(block_counts) /
+                                     sizeof(block_counts[0]); ++index) {
+        if (block_counts[index] > maximum / block_size) {
+            ec = make_error_code(errc::value_too_large);
+            const uintmax_t invalid = static_cast<uintmax_t>(-1);
+            return {invalid, invalid, invalid};
+        }
+    }
+
+    return {block_counts[0] * block_size,
+            block_counts[1] * block_size,
+            block_counts[2] * block_size};
+}
+
+inline space_info space(const path& p) {
+    error_code ec;
+    const space_info result = space(p, ec);
+    if (ec) detail::filesystem_failure("space", p, ec);
+    return result;
+}
+
+namespace detail {
+
+inline bool temp_directory_candidate(const char* value, path& result,
+                                     error_code& failure) {
+    if (!value || value[0] == '\0') return false;
+    const ::std::string source(value);
+    if (source.size() > path_stream_max_units) {
+        failure = make_error_code(errc::filename_too_long);
+        return false;
+    }
+    if (!path_utf8_valid(source)) {
+        failure = make_error_code(errc::illegal_byte_sequence);
+        return false;
+    }
+    const path candidate(source);
+    stat_record status = {};
+    if (rin_stat(candidate.c_str(), &status) != 0) {
+        failure = make_error_code(filesystem_error_from_errno());
+        return false;
+    }
+    if ((status.st_mode & 0170000u) != 0040000u) {
+        failure = make_error_code(errc::not_a_directory);
+        return false;
+    }
+    result = candidate;
+    return true;
+}
+
+} /* namespace detail */
+
+inline path temp_directory_path(error_code& ec) {
+    ec.clear();
+    static const char* const environment_names[] = {
+        "TMPDIR", "TMP", "TEMP", "TEMPDIR"};
+    path result;
+    error_code last_error =
+        make_error_code(errc::no_such_file_or_directory);
+    for (size_t index = 0u; index < sizeof(environment_names) /
+                                     sizeof(environment_names[0]); ++index) {
+        if (detail::temp_directory_candidate(
+                ::std::getenv(environment_names[index]), result, last_error)) {
+            ec.clear();
+            return result;
+        }
+    }
+    if (detail::temp_directory_candidate("/tmp", result, last_error)) {
+        ec.clear();
+        return result;
+    }
+    ec = last_error;
+    return path();
+}
+
+inline path temp_directory_path() {
+    error_code ec;
+    const path result = temp_directory_path(ec);
+    if (ec) detail::filesystem_failure("temp_directory_path", ec);
+    return result;
+}
+
+inline path relative(const path& p, const path& base, error_code& ec) {
+    const path canonical_path = weakly_canonical(p, ec);
+    if (ec) return path();
+    const path canonical_base = weakly_canonical(base, ec);
+    if (ec) return path();
+    ec.clear();
+    return canonical_path.lexically_relative(canonical_base);
+}
+
+inline path relative(const path& p, const path& base = current_path()) {
+    error_code ec;
+    const path result = relative(p, base, ec);
+    if (ec) detail::filesystem_failure("relative", p, ec);
+    return result;
+}
+
+inline path proximate(const path& p, const path& base, error_code& ec) {
+    const path canonical_path = weakly_canonical(p, ec);
+    if (ec) return path();
+    const path canonical_base = weakly_canonical(base, ec);
+    if (ec) return path();
+    ec.clear();
+    return canonical_path.lexically_proximate(canonical_base);
+}
+
+inline path proximate(const path& p, const path& base = current_path()) {
+    error_code ec;
+    const path result = proximate(p, base, ec);
+    if (ec) detail::filesystem_failure("proximate", p, ec);
     return result;
 }
 
