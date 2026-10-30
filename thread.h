@@ -280,7 +280,7 @@ public:
     static unsigned int hardware_concurrency() noexcept {
 #if defined(RIN_FREESTANDING) || defined(RIN_USERSPACE)
         const intptr_t count = __rin_syscall_posixize(
-            _syscall0((uintptr_t)SYS_GETCPU_COUNT));
+            _syscall0((uintptr_t)SYS_GETCPU_ONLINE_COUNT));
         if (count <= 0 ||
             static_cast<uintptr_t>(count) >
                 static_cast<uintptr_t>(UINT_MAX)) {
