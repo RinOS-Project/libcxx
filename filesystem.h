@@ -23,6 +23,7 @@
 #include "cstdlib.h"
 #include "limits.h"
 #include "iterator.h"
+#include "mutex.h"
 #include "type_traits.h"
 #include <sys/statvfs.h>
 #include <unistd.h>
@@ -1687,7 +1688,7 @@ public:
 
 class directory_iterator {
     struct state {
-        volatile int lock;
+        mutex lock;
         RinDir dir;
         path directory;
         directory_entry entry;
@@ -1698,7 +1699,7 @@ class directory_iterator {
 
         state(RinDir opened_dir, const path& source,
               directory_options selected_options)
-            : lock(0), dir(opened_dir), directory(source),
+            : lock(), dir(opened_dir), directory(source),
               options(selected_options), at_end(false),
               owners(1), generation(0) {}
 
@@ -1726,12 +1727,11 @@ class directory_iterator {
     mutable bool view_valid_;
 
     static void state_lock(state* current) noexcept {
-        while (__sync_lock_test_and_set(&current->lock, 1) != 0) {
-        }
+        current->lock.lock();
     }
 
     static void state_unlock(state* current) noexcept {
-        __sync_lock_release(&current->lock);
+        current->lock.unlock();
     }
 
     void retain() noexcept {
