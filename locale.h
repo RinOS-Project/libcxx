@@ -1049,7 +1049,9 @@ enum {
     profile_de = 1,
     profile_fr = 2,
     profile_dot_decimal = 3,
-    profile_pt_br = 4
+    profile_pt_br = 4,
+    profile_en_us = 5,
+    profile_ja_jp = 6
 };
 
 inline bool name_prefix(const char* name, const char* prefix) noexcept {
@@ -1067,6 +1069,8 @@ inline int profile_for_name(const char* name) noexcept {
                   name[2] == 'S' && name[3] == 'I' && name[4] == 'X' &&
                   (name[5] == '\0' || name[5] == '.'))))
         return profile_classic;
+    if (name_prefix(name, "en_US")) return profile_en_us;
+    if (name_prefix(name, "ja_JP")) return profile_ja_jp;
     if (name_prefix(name, "de_DE")) return profile_de;
     if (name_prefix(name, "fr_FR")) return profile_fr;
     if (name_prefix(name, "es_ES") || name_prefix(name, "it_IT"))
@@ -1103,6 +1107,8 @@ protected:
     char_type do_decimal_point() const override {
         return static_cast<CharT>(
             profile_ == __num_punct_detail::profile_classic ||
+            profile_ == __num_punct_detail::profile_en_us ||
+            profile_ == __num_punct_detail::profile_ja_jp ||
             profile_ == __num_punct_detail::profile_fr
                 ? (profile_ == __num_punct_detail::profile_fr ? ',' : '.')
                 : ',');
@@ -1148,6 +1154,14 @@ struct __named_facet_provider<numpunct<CharT>> {
         if (!__classic_locale_character<CharT>::value ||
             !name || name[0] == '\0' || name[0] == '*')
             return nullptr;
+        if (__num_punct_detail::name_prefix(name, "en_US")) {
+            static __named_numpunct_holder<CharT> facet("en_US.UTF-8");
+            return &facet;
+        }
+        if (__num_punct_detail::name_prefix(name, "ja_JP")) {
+            static __named_numpunct_holder<CharT> facet("ja_JP.UTF-8");
+            return &facet;
+        }
         if (__num_punct_detail::name_prefix(name, "de_DE")) {
             static __named_numpunct_holder<CharT> facet("de_DE.UTF-8");
             return &facet;
@@ -2715,13 +2729,17 @@ protected:
 
     char_type do_decimal_point() const override {
         return static_cast<CharT>(
-            profile_ == __num_punct_detail::profile_classic ? '.' : ',');
+            profile_ == __num_punct_detail::profile_classic ||
+            profile_ == __num_punct_detail::profile_en_us ||
+            profile_ == __num_punct_detail::profile_ja_jp ? '.' : ',');
     }
 
     char_type do_thousands_sep() const override {
         if (profile_ == __num_punct_detail::profile_fr)
             return static_cast<CharT>(' ');
-        if (profile_ == __num_punct_detail::profile_classic)
+        if (profile_ == __num_punct_detail::profile_classic ||
+            profile_ == __num_punct_detail::profile_en_us ||
+            profile_ == __num_punct_detail::profile_ja_jp)
             return static_cast<CharT>(',');
         return static_cast<CharT>('.');
     }
@@ -2735,6 +2753,25 @@ protected:
 
     string_type do_curr_symbol() const override {
         string_type symbol;
+        if (profile_ == __num_punct_detail::profile_en_us) {
+            const char* currency = Intl ? "USD " : "$";
+            for (const char* current = currency; *current != '\0'; ++current)
+                symbol += static_cast<CharT>(*current);
+            return symbol;
+        }
+        if (profile_ == __num_punct_detail::profile_ja_jp) {
+            if (Intl) {
+                const char* currency = "JPY ";
+                for (const char* current = currency; *current != '\0'; ++current)
+                    symbol += static_cast<CharT>(*current);
+            } else if (is_same<CharT, char>::value) {
+                symbol += static_cast<CharT>(0xc2);
+                symbol += static_cast<CharT>(0xa5);
+            } else {
+                symbol += static_cast<CharT>(0x00a5);
+            }
+            return symbol;
+        }
         if (!Intl && profile_ != __num_punct_detail::profile_pt_br) {
             if (is_same<CharT, char>::value) {
                 symbol += static_cast<CharT>(0xe2);
@@ -2762,7 +2799,9 @@ protected:
         return sign;
     }
 
-    int do_frac_digits() const override { return 2; }
+    int do_frac_digits() const override {
+        return profile_ == __num_punct_detail::profile_ja_jp ? 0 : 2;
+    }
 
     pattern do_pos_format() const override {
         pattern value = {{moneypunct<CharT, Intl>::symbol,
@@ -2798,6 +2837,16 @@ struct __named_facet_provider<moneypunct<CharT, Intl>> {
         if (!__classic_locale_character<CharT>::value ||
             !name || name[0] == '\0' || name[0] == '*')
             return nullptr;
+        if (__num_punct_detail::name_prefix(name, "en_US")) {
+            static __named_moneypunct_holder<CharT, Intl> facet(
+                "en_US.UTF-8");
+            return &facet;
+        }
+        if (__num_punct_detail::name_prefix(name, "ja_JP")) {
+            static __named_moneypunct_holder<CharT, Intl> facet(
+                "ja_JP.UTF-8");
+            return &facet;
+        }
         if (__num_punct_detail::name_prefix(name, "de_DE")) {
             static __named_moneypunct_holder<CharT, Intl> facet(
                 "de_DE.UTF-8");
