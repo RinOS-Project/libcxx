@@ -142,7 +142,7 @@ extern "C" {
 #define LC_MESSAGES 6
 #endif
 
-namespace std {
+namespace rincxx {
 
 /* hosted struct tm のsidecar寿命をスコープに結び付けるガード。
  * 同じtmにはガードを一つだけ付け、format/parse後に破棄すること。
@@ -200,6 +200,10 @@ public:
         return true;
     }
 };
+
+} /* namespace rincxx */
+
+namespace std {
 
 #if __cplusplus >= 201703L
 #define RIN_LOCALE_SPECIALIZATION_DEFINITION inline
