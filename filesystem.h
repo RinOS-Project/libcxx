@@ -3002,10 +3002,12 @@ inline bool is_empty(const path& p) {
     return result;
 }
 
-/* create_directory */
-inline bool create_directory(const path& p, error_code& ec) noexcept {
+namespace detail {
+
+inline bool create_directory_with_mode(const path& p, unsigned int mode,
+                                       error_code& ec) noexcept {
     ec.clear();
-    if (rin_mkdir(p.c_str(), 0755) != 0) {
+    if (rin_mkdir(p.c_str(), mode) != 0) {
         /* POSIX mkdir reports EEXIST for both an already-created directory
          * and a conflicting non-directory.  The standard create_directory
          * contract treats the former as a clean "already present" result,
@@ -3028,10 +3030,47 @@ inline bool create_directory(const path& p, error_code& ec) noexcept {
     return true;
 }
 
+} /* namespace detail */
+
+/* create_directory */
+inline bool create_directory(const path& p, error_code& ec) noexcept {
+    return detail::create_directory_with_mode(p, 0755u, ec);
+}
+
 inline bool create_directory(const path& p) {
     error_code ec;
     const bool created = create_directory(p, ec);
     if (ec) detail::filesystem_failure("create_directory", p, ec);
+    return created;
+}
+
+inline bool create_directory(const path& p, const path& existing_p,
+                             error_code& ec) noexcept {
+    ec.clear();
+    detail::stat_record source = {};
+    volatile detail::stat_record* source_view = &source;
+    if (rin_stat(existing_p.c_str(), &source) != 0) {
+        ec = make_error_code(detail::filesystem_error_from_errno());
+        return false;
+    }
+    if ((source_view->st_mode & 0170000u) != 0040000u) {
+        ec = make_error_code(errc::not_a_directory);
+        return false;
+    }
+
+    /* This provider exposes mode bits through stat/mkdir but has no
+     * owner- or ACL-copy operation.  Copy the directory permission/special
+     * bits and let the destination provider apply its normal umask. */
+    const unsigned int mode =
+        static_cast<unsigned int>(source_view->st_mode) & 07777u;
+    return detail::create_directory_with_mode(p, mode, ec);
+}
+
+inline bool create_directory(const path& p, const path& existing_p) {
+    error_code ec;
+    const bool created = create_directory(p, existing_p, ec);
+    if (ec)
+        detail::filesystem_failure("create_directory", p, existing_p, ec);
     return created;
 }
 
