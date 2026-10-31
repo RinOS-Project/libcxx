@@ -7,6 +7,7 @@
 #define RINCXX_MEMORY_H
 
 #include "rincxx.h"
+#include "cstdint.h"
 #include "type_traits.h"
 #include "iterator.h"
 #include "utility.h"
@@ -30,6 +31,23 @@ namespace std {
 #else
 #define RIN_MEMORY_NODISCARD
 #endif
+
+inline void* align(size_t alignment, size_t size, void*& pointer,
+                   size_t& space) {
+    if (alignment == 0u || size > space) return nullptr;
+
+    const uintptr_t address = reinterpret_cast<uintptr_t>(pointer);
+    const size_t remainder = static_cast<size_t>(address % alignment);
+    const size_t padding = remainder == 0u ? 0u : alignment - remainder;
+    if (padding > space || size > space - padding) return nullptr;
+
+    const uintptr_t maximum = static_cast<uintptr_t>(-1);
+    if (padding > maximum - address) return nullptr;
+
+    pointer = reinterpret_cast<void*>(address + padding);
+    space -= padding;
+    return pointer;
+}
 
 #if __cplusplus >= 202002L
 #ifndef __cpp_lib_assume_aligned
