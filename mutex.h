@@ -9,7 +9,6 @@
 #include "rincxx.h"
 #include "__pthread.h"
 #include "system_error.h"
-#include "chrono.h"
 #if defined(RIN_FREESTANDING)
 #include "../libc/sys/syscall.h"
 #include "../libc/linux/futex.h"
@@ -38,184 +37,6 @@ namespace detail {
     terminate();
 #endif
 }
-
-template<class Rep, class Period>
-inline bool mutex_duration_to_nanoseconds(
-    const chrono::duration<Rep, Period>& value,
-    long long& nanoseconds) noexcept {
-    const Rep count = value.count();
-    if (!(count > Rep(0))) {
-        nanoseconds = 0;
-        return false;
-    }
-    const long double scaled =
-        static_cast<long double>(count) *
-        static_cast<long double>(Period::num) * 1000000000.0L /
-        static_cast<long double>(Period::den);
-    if (!(scaled > 0.0L)) {
-        nanoseconds = 0;
-        return false;
-    }
-    const long double maximum = static_cast<long double>(
-        numeric_limits<long long>::max());
-    nanoseconds = scaled >= maximum
-        ? numeric_limits<long long>::max()
-        : static_cast<long long>(scaled);
-    return nanoseconds > 0;
-}
-
-inline chrono::steady_clock::time_point mutex_steady_deadline_from_now(
-    long long now, long long relative_nanoseconds) noexcept {
-    const long long maximum = numeric_limits<long long>::max();
-    if (relative_nanoseconds <= 0)
-        return chrono::steady_clock::time_point(chrono::nanoseconds(now));
-    if (now > maximum - relative_nanoseconds)
-        return chrono::steady_clock::time_point(chrono::nanoseconds(maximum));
-    return chrono::steady_clock::time_point(
-        chrono::nanoseconds(now + relative_nanoseconds));
-}
-
-inline bool mutex_realtime_deadline(long long relative_nanoseconds,
-                                    struct timespec& deadline) {
-    constexpr long long billion = 1000000000LL;
-    if (relative_nanoseconds <= 0) return false;
-    struct timespec now = {};
-    if (::clock_gettime(CLOCK_REALTIME, &now) != 0) {
-        const int error = errno != 0 ? errno : EIO;
-        mutex_operation_failed(error, "timed mutex realtime clock");
-    }
-    if (now.tv_nsec < 0 || now.tv_nsec >= billion) {
-        mutex_operation_failed(EIO, "timed mutex invalid realtime clock");
-    }
-
-    using seconds_type = decltype(now.tv_sec);
-    const long long maximum_seconds = static_cast<long long>(
-        numeric_limits<seconds_type>::max());
-    const long long delta_seconds = relative_nanoseconds / billion;
-    const long long delta_nanoseconds = relative_nanoseconds % billion;
-    const long long current_seconds = static_cast<long long>(now.tv_sec);
-    if (delta_seconds > maximum_seconds ||
-        current_seconds > maximum_seconds - delta_seconds) {
-        deadline.tv_sec = numeric_limits<seconds_type>::max();
-        deadline.tv_nsec = static_cast<long>(billion - 1);
-        return true;
-    }
-
-    deadline.tv_sec = static_cast<seconds_type>(
-        current_seconds + delta_seconds);
-    long long nanoseconds = static_cast<long long>(now.tv_nsec) +
-                            delta_nanoseconds;
-    if (nanoseconds >= billion) {
-        if (deadline.tv_sec == numeric_limits<seconds_type>::max()) {
-            deadline.tv_nsec = static_cast<long>(billion - 1);
-            return true;
-        }
-        ++deadline.tv_sec;
-        nanoseconds -= billion;
-    }
-    deadline.tv_nsec = static_cast<long>(nanoseconds);
-    return true;
-}
-
-template<class Clock, class Duration>
-inline bool mutex_timepoint_realtime_deadline(
-    const chrono::time_point<Clock, Duration>& timeout_time,
-    struct timespec& deadline) {
-    const auto now = Clock::now();
-    if (!(now < timeout_time)) return false;
-    long long relative_nanoseconds = 0;
-    if (!mutex_duration_to_nanoseconds(timeout_time - now,
-                                       relative_nanoseconds))
-        return false;
-    return mutex_realtime_deadline(relative_nanoseconds, deadline);
-}
-
-template<class Duration>
-inline bool mutex_epoch_timespec_deadline(
-    const Duration& since_epoch, struct timespec& deadline) noexcept {
-    const long double count = static_cast<long double>(since_epoch.count());
-    if (!(count > 0.0L)) return false;
-    const long double seconds = count *
-        static_cast<long double>(Duration::period::num) /
-        static_cast<long double>(Duration::period::den);
-    if (!(seconds > 0.0L)) return false;
-
-    using seconds_type = decltype(deadline.tv_sec);
-    const long double maximum_seconds = static_cast<long double>(
-        numeric_limits<seconds_type>::max());
-    if (seconds >= maximum_seconds) {
-        deadline.tv_sec = numeric_limits<seconds_type>::max();
-        deadline.tv_nsec = 999999999L;
-        return true;
-    }
-
-    const long long whole_seconds = static_cast<long long>(seconds);
-    long long nanoseconds = static_cast<long long>(
-        (seconds - static_cast<long double>(whole_seconds)) *
-        1000000000.0L);
-    if (nanoseconds < 0) nanoseconds = 0;
-    if (nanoseconds >= 1000000000LL) {
-        if (whole_seconds >= static_cast<long long>(
-                numeric_limits<seconds_type>::max())) {
-            deadline.tv_sec = numeric_limits<seconds_type>::max();
-            deadline.tv_nsec = 999999999L;
-            return true;
-        }
-        deadline.tv_sec = static_cast<seconds_type>(whole_seconds + 1LL);
-        nanoseconds -= 1000000000LL;
-    } else {
-        deadline.tv_sec = static_cast<seconds_type>(whole_seconds);
-    }
-    deadline.tv_nsec = static_cast<long>(nanoseconds);
-    return true;
-}
-
-template<class Clock>
-struct mutex_timed_lock_strategy {
-    template<class Duration>
-    static int wait(pthread_mutex_t* mutex,
-                    const chrono::time_point<Clock, Duration>& timeout_time) {
-        struct timespec deadline = {};
-        if (!mutex_timepoint_realtime_deadline(timeout_time, deadline))
-            return ETIMEDOUT;
-        return pthread_mutex_timedlock(mutex, &deadline);
-    }
-};
-
-template<>
-struct mutex_timed_lock_strategy<chrono::steady_clock> {
-    template<class Duration>
-    static int wait(
-        pthread_mutex_t* mutex,
-        const chrono::time_point<chrono::steady_clock, Duration>& timeout_time) {
-#if defined(RIN_LIBC_PTHREAD_HEADER)
-        struct timespec deadline = {};
-        if (!mutex_epoch_timespec_deadline(timeout_time.time_since_epoch(),
-                                           deadline))
-            return ETIMEDOUT;
-        return pthread_mutex_clocklock(mutex, CLOCK_MONOTONIC, &deadline);
-#else
-        struct timespec deadline = {};
-        if (!mutex_timepoint_realtime_deadline(timeout_time, deadline))
-            return ETIMEDOUT;
-        return pthread_mutex_timedlock(mutex, &deadline);
-#endif
-    }
-};
-
-template<>
-struct mutex_timed_lock_strategy<chrono::system_clock> {
-    template<class Duration>
-    static int wait(
-        pthread_mutex_t* mutex,
-        const chrono::time_point<chrono::system_clock, Duration>& timeout_time) {
-        struct timespec deadline = {};
-        if (!mutex_epoch_timespec_deadline(timeout_time.time_since_epoch(),
-                                           deadline))
-            return ETIMEDOUT;
-        return pthread_mutex_timedlock(mutex, &deadline);
-    }
-};
 
 } /* namespace detail */
 
@@ -378,131 +199,6 @@ public:
 };
 
 /* ═══════════════════════════════════════════════════════════════
- * timed_mutex - deadline waits backed by the sleepable pthread mutex owner
- * ═══════════════════════════════════════════════════════════════*/
-
-class timed_mutex {
-    pthread_mutex_t mtx_;
-
-public:
-    timed_mutex() noexcept : mtx_(PTHREAD_MUTEX_INITIALIZER) {}
-
-    timed_mutex(const timed_mutex&) = delete;
-    timed_mutex& operator=(const timed_mutex&) = delete;
-
-    void lock() {
-        const int result = pthread_mutex_lock(&mtx_);
-        if (result != 0)
-            detail::mutex_operation_failed(result, "timed_mutex lock");
-    }
-
-    bool try_lock() noexcept {
-        return pthread_mutex_trylock(&mtx_) == 0;
-    }
-
-    template<class Clock, class Duration>
-    bool try_lock_until(
-        const chrono::time_point<Clock, Duration>& timeout_time) {
-        if (try_lock()) return true;
-        const int result = detail::mutex_timed_lock_strategy<Clock>::wait(
-            &mtx_, timeout_time);
-        if (result == 0) return true;
-        if (result == ETIMEDOUT) return false;
-        detail::mutex_operation_failed(result, "timed_mutex timed lock");
-    }
-
-    template<class Rep, class Period>
-    bool try_lock_for(const chrono::duration<Rep, Period>& relative_time) {
-        long long relative_nanoseconds = 0;
-        if (!detail::mutex_duration_to_nanoseconds(
-                relative_time, relative_nanoseconds))
-            return try_lock();
-        const long long now = chrono::steady_clock::now()
-                                  .time_since_epoch().count();
-        return try_lock_until(detail::mutex_steady_deadline_from_now(
-            now, relative_nanoseconds));
-    }
-
-    void unlock() noexcept {
-        (void)pthread_mutex_unlock(&mtx_);
-    }
-
-    using native_handle_type = pthread_mutex_t*;
-    native_handle_type native_handle() noexcept { return &mtx_; }
-};
-
-class recursive_timed_mutex {
-    pthread_mutex_t mtx_;
-
-public:
-    recursive_timed_mutex() {
-        pthread_mutexattr_t attr;
-        int result = pthread_mutexattr_init(&attr);
-        if (result != 0)
-            detail::mutex_operation_failed(result,
-                                           "recursive_timed_mutex attributes");
-        result = pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
-        if (result != 0) {
-            pthread_mutexattr_destroy(&attr);
-            detail::mutex_operation_failed(result,
-                                           "recursive_timed_mutex attributes");
-        }
-        result = pthread_mutex_init(&mtx_, &attr);
-        pthread_mutexattr_destroy(&attr);
-        if (result != 0)
-            detail::mutex_operation_failed(result,
-                                           "recursive_timed_mutex construction");
-    }
-
-    ~recursive_timed_mutex() { (void)pthread_mutex_destroy(&mtx_); }
-
-    recursive_timed_mutex(const recursive_timed_mutex&) = delete;
-    recursive_timed_mutex& operator=(const recursive_timed_mutex&) = delete;
-
-    using native_handle_type = pthread_mutex_t*;
-    native_handle_type native_handle() noexcept { return &mtx_; }
-
-    void lock() {
-        const int result = pthread_mutex_lock(&mtx_);
-        if (result != 0)
-            detail::mutex_operation_failed(result,
-                                           "recursive_timed_mutex lock");
-    }
-
-    bool try_lock() noexcept {
-        return pthread_mutex_trylock(&mtx_) == 0;
-    }
-
-    template<class Clock, class Duration>
-    bool try_lock_until(
-        const chrono::time_point<Clock, Duration>& timeout_time) {
-        if (try_lock()) return true;
-        const int result = detail::mutex_timed_lock_strategy<Clock>::wait(
-            &mtx_, timeout_time);
-        if (result == 0) return true;
-        if (result == ETIMEDOUT) return false;
-        detail::mutex_operation_failed(result,
-                                       "recursive_timed_mutex timed lock");
-    }
-
-    template<class Rep, class Period>
-    bool try_lock_for(const chrono::duration<Rep, Period>& relative_time) {
-        long long relative_nanoseconds = 0;
-        if (!detail::mutex_duration_to_nanoseconds(
-                relative_time, relative_nanoseconds))
-            return try_lock();
-        const long long now = chrono::steady_clock::now()
-                                  .time_since_epoch().count();
-        return try_lock_until(detail::mutex_steady_deadline_from_now(
-            now, relative_nanoseconds));
-    }
-
-    void unlock() noexcept {
-        (void)pthread_mutex_unlock(&mtx_);
-    }
-};
-
-/* ═══════════════════════════════════════════════════════════════
  * ロックタグ (must be before lock_guard)
  * ═══════════════════════════════════════════════════════════════*/
 
@@ -621,35 +317,6 @@ public:
         return owns_;
     }
 
-    template<class Rep, class Period>
-    bool try_lock_for(const chrono::duration<Rep, Period>& relative_time) {
-        if (!mutex_) {
-            detail::mutex_operation_failed(EINVAL,
-                                           "unique_lock has no mutex");
-        }
-        if (owns_) {
-            detail::mutex_operation_failed(EDEADLK,
-                                           "unique_lock already owns mutex");
-        }
-        owns_ = mutex_->try_lock_for(relative_time);
-        return owns_;
-    }
-
-    template<class Clock, class Duration>
-    bool try_lock_until(
-        const chrono::time_point<Clock, Duration>& timeout_time) {
-        if (!mutex_) {
-            detail::mutex_operation_failed(EINVAL,
-                                           "unique_lock has no mutex");
-        }
-        if (owns_) {
-            detail::mutex_operation_failed(EDEADLK,
-                                           "unique_lock already owns mutex");
-        }
-        owns_ = mutex_->try_lock_until(timeout_time);
-        return owns_;
-    }
-
     void unlock() {
         if (!mutex_ || !owns_) {
             detail::mutex_operation_failed(EPERM,
@@ -682,101 +349,6 @@ public:
 template<class Mutex>
 void swap(unique_lock<Mutex>& lhs, unique_lock<Mutex>& rhs) noexcept {
     lhs.swap(rhs);
-}
-
-namespace detail {
-
-/* std::try_lock's recursive form rolls back every mutex acquired before a
- * failed try_lock.  The index is relative to the remaining argument pack. */
-template<class Mutex>
-int try_lock_one(Mutex& mutex) {
-    return mutex.try_lock() ? -1 : 0;
-}
-
-template<class Mutex>
-int try_lock_many(Mutex& mutex) {
-    return try_lock_one(mutex);
-}
-
-template<class First, class Second, class... Rest>
-int try_lock_many(First& first, Second& second, Rest&... rest) {
-    if (!first.try_lock()) return 0;
-
-    int result;
-#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
-    try {
-        result = try_lock_many(second, rest...);
-    } catch (...) {
-        first.unlock();
-        throw;
-    }
-#else
-    result = try_lock_many(second, rest...);
-#endif
-
-    if (result >= 0) {
-        first.unlock();
-        return result + 1;
-    }
-    return -1;
-}
-
-inline void mutex_lock_backoff() noexcept {
-    /* Yield the execution pipeline after a failed all-or-nothing attempt. */
-#if (defined(__i386__) || defined(__x86_64__)) && \
-    (defined(__GNUC__) || defined(__clang__))
-    __asm__ volatile("pause" ::: "memory");
-#elif defined(__GNUC__) || defined(__clang__)
-    __asm__ volatile("" ::: "memory");
-#else
-    /* The lock/unlock retry remains correct without an architecture hint. */
-#endif
-}
-
-template<class First, class Second, class... Rest>
-class scoped_lock_acquire {
-public:
-    scoped_lock_acquire() noexcept = default;
-
-    explicit scoped_lock_acquire(First& first, Second& second,
-                                 Rest&... rest) {
-        std::lock(first, second, rest...);
-    }
-};
-
-} /* namespace detail */
-
-/* Return the zero-based index of the first mutex which could not be acquired,
- * or -1 after acquiring every mutex.  The recursive helper releases its
- * prefix on both ordinary failure and exception unwinding. */
-template<class First, class Second, class... Rest>
-int try_lock(First& first, Second& second, Rest&... rest) {
-    return detail::try_lock_many(first, second, rest...);
-}
-
-/* Acquire the first mutex blocking, then try the remainder as a transaction.
- * On failure all locks are released before retrying.  A caller never blocks
- * on one mutex while retaining another, which breaks circular wait between
- * invocations that pass the same mutexes in different orders. */
-template<class First, class Second, class... Rest>
-void lock(First& first, Second& second, Rest&... rest) {
-    for (;;) {
-        first.lock();
-        int result;
-#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
-        try {
-            result = detail::try_lock_many(second, rest...);
-        } catch (...) {
-            first.unlock();
-            throw;
-        }
-#else
-        result = detail::try_lock_many(second, rest...);
-#endif
-        if (result < 0) return;
-        first.unlock();
-        detail::mutex_lock_backoff();
-    }
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -823,19 +395,13 @@ public:
 /* 複数ミューテックス */
 template<class Mutex1, class Mutex2, class... Mutexes>
 class scoped_lock<Mutex1, Mutex2, Mutexes...> {
-    detail::scoped_lock_acquire<Mutex1, Mutex2, Mutexes...> acquire_;
     Mutex1& mutex1_;
     scoped_lock<Mutex2, Mutexes...> rest_;
 
 public:
     explicit scoped_lock(Mutex1& m1, Mutex2& m2, Mutexes&... rest)
-        : acquire_(m1, m2, rest...), mutex1_(m1),
-          rest_(adopt_lock, m2, rest...) {
-    }
-
-    explicit scoped_lock(adopt_lock_t, Mutex1& m1, Mutex2& m2,
-                         Mutexes&... rest) noexcept
-        : acquire_(), mutex1_(m1), rest_(adopt_lock, m2, rest...) {
+        : mutex1_(m1), rest_(m2, rest...) {
+        mutex1_.lock();
     }
 
     ~scoped_lock() {

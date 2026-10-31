@@ -48,7 +48,6 @@ extern "C" {
     /* ファイル情報 */
     int rin_stat(const char* path, void* buf);
     int rin_lstat(const char* path, void* buf);
-    int rin_fstat(int fd, void* buf);
     int rin_access(const char* path, int mode);
 
     /* ディレクトリ操作 */
@@ -1634,8 +1633,7 @@ public:
     bool is_fifo() const { return status_.type() == file_type::fifo; }
     bool is_socket() const { return status_.type() == file_type::socket; }
     bool is_other() const {
-        return exists() && !is_regular_file() && !is_directory() &&
-               !is_symlink();
+        return exists() && !is_regular_file() && !is_directory();
     }
 
     uintmax_t file_size() const { return file_size_; }
