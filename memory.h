@@ -2531,6 +2531,9 @@ shared_ptr<T> allocate_shared_for_overwrite(const Alloc& alloc) {
  * ═══════════════════════════════════════════════════════════════*/
 
 template<typename T>
+#if __cplusplus >= 201703L
+constexpr
+#endif
 T* addressof(T& arg) noexcept {
     return __builtin_addressof(arg);
 }
@@ -2543,6 +2546,9 @@ const T* addressof(const T&& arg) = delete;
  * ═══════════════════════════════════════════════════════════════*/
 
 template<typename T>
+#if __cplusplus >= 202002L
+constexpr
+#endif
 void destroy_at(T* p) noexcept {
     p->~T();
 }
