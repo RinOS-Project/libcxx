@@ -181,8 +181,12 @@ template<class Allocator = allocator<stacktrace_entry>>
 class basic_stacktrace {
 public:
     using value_type = stacktrace_entry;
+    using reference = value_type&;
     using const_reference = const value_type&;
     using const_iterator = const value_type*;
+    using iterator = const_iterator;
+    using reverse_iterator = std::reverse_iterator<iterator>;
+    using const_reverse_iterator = std::reverse_iterator<const_iterator>;
     using size_type = size_t;
     using difference_type = ptrdiff_t;
     using allocator_type = Allocator;
@@ -268,6 +272,16 @@ public:
     constexpr size_type max_size() const noexcept { return capacity; }
     constexpr const_iterator begin() const noexcept { return entries_; }
     constexpr const_iterator end() const noexcept { return entries_ + size_; }
+    constexpr const_iterator cbegin() const noexcept { return begin(); }
+    constexpr const_iterator cend() const noexcept { return end(); }
+    constexpr const_reverse_iterator rbegin() const noexcept {
+        return const_reverse_iterator(cend());
+    }
+    constexpr const_reverse_iterator rend() const noexcept {
+        return const_reverse_iterator(cbegin());
+    }
+    constexpr const_reverse_iterator crbegin() const noexcept { return rbegin(); }
+    constexpr const_reverse_iterator crend() const noexcept { return rend(); }
 
     constexpr const_reference front() const noexcept { return entries_[0]; }
     constexpr const_reference back() const noexcept { return entries_[size_ - 1]; }
@@ -305,28 +319,39 @@ public:
         }
     }
 
-    friend constexpr bool operator==(const basic_stacktrace& left,
-                                     const basic_stacktrace& right) noexcept {
-        if (left.size_ != right.size_) return false;
-        for (size_type index = 0; index < left.size_; ++index) {
-            if (left.entries_[index] != right.entries_[index]) return false;
+    template<class Allocator2>
+    friend constexpr bool operator==(
+        const basic_stacktrace& left,
+        const basic_stacktrace<Allocator2>& right) noexcept {
+        if (left.size() != right.size()) return false;
+        const_iterator left_entry = left.begin();
+        typename basic_stacktrace<Allocator2>::const_iterator right_entry =
+            right.begin();
+        for (size_type index = 0; index < left.size(); ++index) {
+            if (left_entry[index] != right_entry[index]) return false;
         }
         return true;
     }
 
-    friend constexpr bool operator!=(const basic_stacktrace& left,
-                                     const basic_stacktrace& right) noexcept {
+    template<class Allocator2>
+    friend constexpr bool operator!=(
+        const basic_stacktrace& left,
+        const basic_stacktrace<Allocator2>& right) noexcept {
         return !(left == right);
     }
 
+    template<class Allocator2>
     friend constexpr strong_ordering operator<=>
         (const basic_stacktrace& left,
-         const basic_stacktrace& right) noexcept {
-        if (left.size_ < right.size_) return strong_ordering::less;
-        if (left.size_ > right.size_) return strong_ordering::greater;
-        for (size_type index = 0; index < left.size_; ++index) {
-            const strong_ordering order = left.entries_[index] <=>
-                                          right.entries_[index];
+         const basic_stacktrace<Allocator2>& right) noexcept {
+        if (left.size() < right.size()) return strong_ordering::less;
+        if (left.size() > right.size()) return strong_ordering::greater;
+        const_iterator left_entry = left.begin();
+        typename basic_stacktrace<Allocator2>::const_iterator right_entry =
+            right.begin();
+        for (size_type index = 0; index < left.size(); ++index) {
+            const strong_ordering order = left_entry[index] <=>
+                                          right_entry[index];
             if (order != strong_ordering::equal) return order;
         }
         return strong_ordering::equal;
