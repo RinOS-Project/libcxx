@@ -192,6 +192,7 @@
 #define __cpp_lib_associative_heterogeneous_erasure 202110L
 #define __cpp_lib_optional                    202110L
 #define __cpp_lib_expected                    202211L
+#define __cpp_lib_print                       202207L
 #define __cpp_lib_is_scoped_enum              202011L
 #if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RATIO)
 #define __cpp_lib_ratio                       202306L
