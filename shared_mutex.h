@@ -61,13 +61,29 @@ struct shared_timed_lock_strategy<chrono::steady_clock> {
     template<class Duration>
     static int write(pthread_rwlock_t* rwlock,
                      const chrono::time_point<chrono::steady_clock, Duration>& timeout_time) {
-return shared_timed_lock_wait(rwlock, true, timeout_time);
+#if defined(RIN_LIBC_PTHREAD_HEADER)
+        struct timespec deadline = {};
+        if (!mutex_epoch_timespec_deadline(timeout_time.time_since_epoch(),
+                                           deadline))
+            return ETIMEDOUT;
+        return pthread_rwlock_clockwrlock(rwlock, CLOCK_MONOTONIC, &deadline);
+#else
+        return shared_timed_lock_wait(rwlock, true, timeout_time);
+#endif
     }
 
     template<class Duration>
     static int read(pthread_rwlock_t* rwlock,
                     const chrono::time_point<chrono::steady_clock, Duration>& timeout_time) {
-return shared_timed_lock_wait(rwlock, false, timeout_time);
+#if defined(RIN_LIBC_PTHREAD_HEADER)
+        struct timespec deadline = {};
+        if (!mutex_epoch_timespec_deadline(timeout_time.time_since_epoch(),
+                                           deadline))
+            return ETIMEDOUT;
+        return pthread_rwlock_clockrdlock(rwlock, CLOCK_MONOTONIC, &deadline);
+#else
+        return shared_timed_lock_wait(rwlock, false, timeout_time);
+#endif
     }
 };
 
