@@ -1636,7 +1636,13 @@ public:
         return exists() && !is_regular_file() && !is_directory();
     }
 
-    uintmax_t file_size() const { return file_size_; }
+    uintmax_t file_size() const {
+        error_code ec;
+        const uintmax_t result = file_size(ec);
+        if (ec) detail::filesystem_failure("directory_entry::file_size",
+                                           path_, ec);
+        return result;
+    }
     uintmax_t file_size(error_code& ec) const noexcept {
         ec.clear();
         if (!is_regular_file()) {
