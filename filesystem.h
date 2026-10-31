@@ -5134,8 +5134,24 @@ inline bool canonical_directory_exists(const path& value, error_code& ec) {
     return true;
 }
 
+inline bool canonical_missing_prefix_error(const error_code& ec) {
+    return ec == make_error_code(errc::no_such_file_or_directory) ||
+           ec == make_error_code(errc::not_a_directory);
+}
+
+inline bool canonical_weak_suffix(const path& prefix,
+                                  const ::std::string& pending,
+                                  size_t suffix_start, path& output,
+                                  error_code& ec) {
+    const ::std::string suffix = pending.substr(suffix_start);
+    output = (prefix / path(suffix)).lexically_normal();
+    ec.clear();
+    return true;
+}
+
 inline bool canonical_resolve_existing(const path& input, path& output,
-                                       error_code& ec) {
+                                       error_code& ec,
+                                       bool allow_missing_suffix = false) {
     if (input.empty()) {
         ec = make_error_code(errc::no_such_file_or_directory);
         return false;
@@ -5164,11 +5180,25 @@ inline bool canonical_resolve_existing(const path& input, path& output,
         const bool has_remaining_component = remainder_start < pending.size();
 
         if (component == ".") {
-            if (!canonical_directory_exists(resolved, ec)) return false;
+            if (!canonical_directory_exists(resolved, ec)) {
+                if (allow_missing_suffix &&
+                    canonical_missing_prefix_error(ec)) {
+                    return canonical_weak_suffix(
+                        resolved, pending, component_start, output, ec);
+                }
+                return false;
+            }
             continue;
         }
         if (component == "..") {
-            if (!canonical_directory_exists(resolved, ec)) return false;
+            if (!canonical_directory_exists(resolved, ec)) {
+                if (allow_missing_suffix &&
+                    canonical_missing_prefix_error(ec)) {
+                    return canonical_weak_suffix(
+                        resolved, pending, component_start, output, ec);
+                }
+                return false;
+            }
             const path parent = resolved.parent_path();
             resolved = parent.empty() ? path("/") : parent;
             continue;
@@ -5178,6 +5208,11 @@ inline bool canonical_resolve_existing(const path& input, path& output,
         stat_record link_status = {};
         if (rin_lstat(candidate.c_str(), &link_status) != 0) {
             ec = make_error_code(filesystem_error_from_errno());
+            if (allow_missing_suffix &&
+                canonical_missing_prefix_error(ec)) {
+                return canonical_weak_suffix(
+                    resolved, pending, component_start, output, ec);
+            }
             return false;
         }
 
@@ -5225,7 +5260,14 @@ inline bool canonical_resolve_existing(const path& input, path& output,
 
         resolved = candidate;
         if (has_remaining_component || require_directory) {
-            if (!canonical_directory_exists(resolved, ec)) return false;
+            if (!canonical_directory_exists(resolved, ec)) {
+                if (allow_missing_suffix && has_remaining_component &&
+                    canonical_missing_prefix_error(ec)) {
+                    return canonical_weak_suffix(
+                        resolved, pending, remainder_start, output, ec);
+                }
+                return false;
+            }
         }
     }
 
@@ -5234,11 +5276,6 @@ inline bool canonical_resolve_existing(const path& input, path& output,
     output = resolved;
     ec.clear();
     return true;
-}
-
-inline bool canonical_missing_prefix_error(const error_code& ec) {
-    return ec == make_error_code(errc::no_such_file_or_directory) ||
-           ec == make_error_code(errc::not_a_directory);
 }
 
 } /* namespace detail */
@@ -5261,50 +5298,13 @@ inline path weakly_canonical(const path& p, error_code& ec) {
     ec.clear();
     const path absolute_input = absolute(p, ec);
     if (ec) return path();
-
-    const ::std::string source = absolute_input.native();
-    const bool trailing_separator = source.size() > 1u && source.back() == '/';
-    vector<::std::string> components;
-    size_t cursor = 1u;
-    while (cursor < source.size()) {
-        while (cursor < source.size() && source[cursor] == '/') ++cursor;
-        if (cursor == source.size()) break;
-        const size_t start = cursor;
-        while (cursor < source.size() && source[cursor] != '/') ++cursor;
-        components.push_back(source.substr(start, cursor - start));
-    }
-
-    path prefix("/");
-    for (size_t index = 0u; index < components.size(); ++index) {
-        const path candidate = prefix / path(components[index]);
-        error_code component_error;
-        const path resolved = canonical(candidate, component_error);
-        if (!component_error) {
-            prefix = resolved;
-            continue;
-        }
-        if (!detail::canonical_missing_prefix_error(component_error)) {
-            ec = component_error;
-            return path();
-        }
-
-        ::std::string suffix;
-        for (size_t remaining = index; remaining < components.size();
-             ++remaining) {
-            if (!suffix.empty()) suffix.push_back('/');
-            suffix += components[remaining];
-        }
-        if (trailing_separator && !suffix.empty()) suffix.push_back('/');
-        path result = (prefix / path(suffix)).lexically_normal();
-        ec.clear();
-        return result;
-    }
-
-    if (trailing_separator &&
-        !detail::canonical_directory_exists(prefix, ec))
+    path result;
+    if (!detail::canonical_resolve_existing(
+            absolute_input, result, ec, true)) {
         return path();
+    }
     ec.clear();
-    return prefix;
+    return result;
 }
 
 inline path weakly_canonical(const path& p) {
