@@ -219,8 +219,6 @@
  * ===================================================================*/
 
 #if defined(__cplusplus) && __cplusplus >= 201703L
-#define __cpp_lib_tuples_by_type             201304L
-#define __cpp_lib_tuple_element_t           201402L
 #define __cpp_lib_aligned_new                201606L
 #define __cpp_lib_hardware_interference_size 201703L
 #define __cpp_lib_launder                   201606L
