@@ -1357,6 +1357,7 @@ static constexpr int copy_open_write = 0x02;
 static constexpr int copy_open_create = 0x04;
 static constexpr int copy_open_exclusive = 0x08;
 static constexpr int copy_open_trunc = 0x10;
+static constexpr int copy_open_nonblock = 0x0040;
 
 struct stat_record {
     unsigned long st_dev;
@@ -3752,23 +3753,50 @@ inline bool copy_file(const path& from, const path& to, copy_options options,
 
     detail::stat_record source = {};
     volatile detail::stat_record* source_view = &source;
-    if (rin_stat(from.c_str(), &source) != 0) {
-        ec = make_error_code(detail::filesystem_error_from_errno());
-        return false;
-    }
-    if (source_view->st_size < 0 ||
-        (source_view->st_mode & 0170000u) != 0100000u) {
-        ec = make_error_code((source_view->st_mode & 0170000u) == 0040000u
-                                 ? errc::is_a_directory
-                                 : errc::io_error);
-        return false;
-    }
-
-    const int source_fd = rin_open(from.c_str(), detail::copy_open_read);
+    const int source_fd = rin_open(
+        from.c_str(), detail::copy_open_read | detail::copy_open_nonblock);
     if (source_fd < 0) {
         ec = make_error_code(detail::filesystem_error_from_errno());
         return false;
     }
+
+    struct stat opened_source = {};
+    if (fstat(source_fd, &opened_source) != 0) {
+        ec = make_error_code(detail::filesystem_error_from_errno());
+        (void)rin_close(source_fd);
+        return false;
+    }
+    if (opened_source.st_size < 0 ||
+        opened_source.st_size > static_cast<decltype(opened_source.st_size)>(
+                                    LONG_MAX)) {
+        ec = make_error_code(errc::file_too_large);
+        (void)rin_close(source_fd);
+        return false;
+    }
+    if ((opened_source.st_mode & 0170000u) != 0100000u) {
+        ec = make_error_code((opened_source.st_mode & 0170000u) == 0040000u
+                                 ? errc::is_a_directory
+                                 : errc::io_error);
+        (void)rin_close(source_fd);
+        return false;
+    }
+
+    /* Use metadata from the opened object for validation, identity checks,
+     * copied permissions, and timestamps.  A path replacement after open no
+     * longer separates those checks from the bytes read below. */
+    source.st_dev = static_cast<unsigned long>(opened_source.st_dev);
+    source.st_ino = static_cast<unsigned long>(opened_source.st_ino);
+    source.st_mode = static_cast<unsigned int>(opened_source.st_mode);
+    source.st_nlink = static_cast<unsigned int>(opened_source.st_nlink);
+    source.st_uid = static_cast<unsigned int>(opened_source.st_uid);
+    source.st_gid = static_cast<unsigned int>(opened_source.st_gid);
+    source.st_rdev = static_cast<unsigned long>(opened_source.st_rdev);
+    source.st_size = static_cast<long>(opened_source.st_size);
+    source.st_blksize = static_cast<long>(opened_source.st_blksize);
+    source.st_blocks = static_cast<long>(opened_source.st_blocks);
+    source.st_atime = static_cast<long>(opened_source.st_atime);
+    source.st_mtime = static_cast<long>(opened_source.st_mtime);
+    source.st_ctime = static_cast<long>(opened_source.st_ctime);
 
     if (!detail::copy_resolve_destination_path(
             to.c_str(), destination_text,
