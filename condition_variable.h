@@ -659,17 +659,28 @@ public:
             return cv_status::timeout;
         }
 
-        struct timespec now_ts;
-        if (clock_gettime(CLOCK_REALTIME, &now_ts) != 0) {
-            const int clock_error = errno != 0 ? errno : EIO;
-            detail::condition_variable_operation_failed(
-                clock_error, "condition_variable realtime clock");
-        }
-
-        struct timespec ts;
-        if (!detail::condition_variable_make_realtime_deadline(
-                now_ts, rel_ns, ts)) {
-            return cv_status::timeout;
+        const bool monotonic_deadline =
+            is_same<Clock, chrono::steady_clock>::value;
+        struct timespec ts = {};
+#if defined(RIN_LIBC_PTHREAD_HEADER) || defined(RIN_FREESTANDING)
+        if (monotonic_deadline) {
+            if (!detail::mutex_epoch_timespec_deadline(
+                    timeout_time.time_since_epoch(), ts))
+                return cv_status::timeout;
+        } else
+#else
+        (void)monotonic_deadline;
+#endif
+        {
+            struct timespec now_ts = {};
+            if (clock_gettime(CLOCK_REALTIME, &now_ts) != 0) {
+                const int clock_error = errno != 0 ? errno : EIO;
+                detail::condition_variable_operation_failed(
+                    clock_error, "condition_variable realtime clock");
+            }
+            if (!detail::condition_variable_make_realtime_deadline(
+                    now_ts, rel_ns, ts))
+                return cv_status::timeout;
         }
 
         pthread_mutex_t* gate = nullptr;
@@ -701,7 +712,16 @@ public:
             detail::condition_variable_operation_failed(
                 unlock_result, "condition_variable timed wait lock release");
         }
-        int ret = pthread_cond_timedwait(&cond_, gate, &ts);
+        int ret;
+#if defined(RIN_LIBC_PTHREAD_HEADER) || defined(RIN_FREESTANDING)
+        if (monotonic_deadline) {
+            ret = pthread_cond_clockwait(
+                &cond_, gate, CLOCK_MONOTONIC, &ts);
+        } else
+#endif
+        {
+            ret = pthread_cond_timedwait(&cond_, gate, &ts);
+        }
         const int gate_unlock_result = pthread_mutex_unlock(gate);
         const int relock_result = pthread_mutex_lock(pmtx);
         detail::__condition_variable_registry_end_wait(
