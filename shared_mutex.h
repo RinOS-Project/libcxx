@@ -77,7 +77,7 @@ struct shared_timed_lock_strategy<chrono::steady_clock> {
         struct timespec deadline = {};
         if (!mutex_epoch_timespec_deadline(timeout_time.time_since_epoch(),
                                            deadline))
-            return ETIMEDOUT;
+            return pthread_rwlock_trywrlock(rwlock);
         return pthread_rwlock_clockwrlock(rwlock, CLOCK_MONOTONIC, &deadline);
 #else
         return shared_timed_lock_wait(rwlock, true, timeout_time);
@@ -91,7 +91,7 @@ struct shared_timed_lock_strategy<chrono::steady_clock> {
         struct timespec deadline = {};
         if (!mutex_epoch_timespec_deadline(timeout_time.time_since_epoch(),
                                            deadline))
-            return ETIMEDOUT;
+            return pthread_rwlock_tryrdlock(rwlock);
         return pthread_rwlock_clockrdlock(rwlock, CLOCK_MONOTONIC, &deadline);
 #else
         return shared_timed_lock_wait(rwlock, false, timeout_time);
@@ -107,7 +107,7 @@ struct shared_timed_lock_strategy<chrono::system_clock> {
         struct timespec deadline = {};
         if (!mutex_epoch_timespec_deadline(timeout_time.time_since_epoch(),
                                            deadline))
-            return ETIMEDOUT;
+            return pthread_rwlock_trywrlock(rwlock);
         return pthread_rwlock_timedwrlock(rwlock, &deadline);
     }
 
@@ -117,7 +117,7 @@ struct shared_timed_lock_strategy<chrono::system_clock> {
         struct timespec deadline = {};
         if (!mutex_epoch_timespec_deadline(timeout_time.time_since_epoch(),
                                            deadline))
-            return ETIMEDOUT;
+            return pthread_rwlock_tryrdlock(rwlock);
         return pthread_rwlock_timedrdlock(rwlock, &deadline);
     }
 };

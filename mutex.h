@@ -225,7 +225,7 @@ struct mutex_timed_lock_strategy<chrono::steady_clock> {
         struct timespec deadline = {};
         if (!mutex_epoch_timespec_deadline(timeout_time.time_since_epoch(),
                                            deadline))
-            return ETIMEDOUT;
+            return pthread_mutex_trylock(mutex);
         return pthread_mutex_clocklock(mutex, CLOCK_MONOTONIC, &deadline);
 #else
         struct timespec deadline = {};
@@ -245,7 +245,7 @@ struct mutex_timed_lock_strategy<chrono::system_clock> {
         struct timespec deadline = {};
         if (!mutex_epoch_timespec_deadline(timeout_time.time_since_epoch(),
                                            deadline))
-            return ETIMEDOUT;
+            return pthread_mutex_trylock(mutex);
         return pthread_mutex_timedlock(mutex, &deadline);
     }
 };
