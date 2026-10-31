@@ -2638,8 +2638,8 @@ public:
     void disable_recursion_pending() noexcept { recursion_pending_ = false; }
     bool recursion_pending() const noexcept { return recursion_pending_; }
     directory_options options() const noexcept { return options_; }
-    unsigned depth() const noexcept {
-        return stack_.empty() ? 0u : static_cast<unsigned>(stack_.size() - 1u);
+    int depth() const noexcept {
+        return stack_.empty() ? 0 : static_cast<int>(stack_.size() - 1u);
     }
 
     bool operator==(const recursive_directory_iterator& rhs) const {
