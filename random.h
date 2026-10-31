@@ -1774,9 +1774,7 @@ public:
  * uniform_real_distribution
  * ═══════════════════════════════════════════════════════════════*/
 
-template<typename RealType,
-         size_t bits = static_cast<size_t>(numeric_limits<RealType>::digits),
-         typename Generator>
+template<typename RealType, size_t bits, typename Generator>
 RealType generate_canonical(Generator& g);
 
 template<typename RealType = double>
