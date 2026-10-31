@@ -1652,7 +1652,13 @@ public:
         }
         return file_size_;
     }
-    uintmax_t hard_link_count() const { return hard_link_count_; }
+    uintmax_t hard_link_count() const {
+        error_code ec;
+        const uintmax_t result = hard_link_count(ec);
+        if (ec) detail::filesystem_failure("directory_entry::hard_link_count",
+                                           path_, ec);
+        return result;
+    }
     uintmax_t hard_link_count(error_code& ec) const noexcept {
         ec.clear();
         if (!exists()) {
@@ -1661,7 +1667,13 @@ public:
         }
         return hard_link_count_;
     }
-    file_time_type last_write_time() const { return last_write_time_; }
+    file_time_type last_write_time() const {
+        error_code ec;
+        const file_time_type result = last_write_time(ec);
+        if (ec) detail::filesystem_failure(
+            "directory_entry::last_write_time", path_, ec);
+        return result;
+    }
     file_time_type last_write_time(error_code& ec) const noexcept {
         ec.clear();
         if (!exists()) {
