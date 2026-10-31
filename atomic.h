@@ -527,6 +527,8 @@ struct __atomic_waiter {
     const void* address;
     volatile uint32_t wake_word;
     __atomic_waiter* next;
+    __atomic_waiter* wake_next;
+    volatile uint32_t wake_in_flight;
     bool linked;
 };
 
@@ -534,6 +536,7 @@ struct __atomic_waiter {
 
 struct __atomic_wait_registry {
     volatile uint32_t lock[__ATOMIC_WAIT_BUCKET_COUNT];
+    volatile uint32_t retirement_generation[__ATOMIC_WAIT_BUCKET_COUNT];
     __atomic_waiter* waiters[__ATOMIC_WAIT_BUCKET_COUNT];
 };
 
@@ -582,6 +585,64 @@ inline void __atomic_waiter_wake(__atomic_waiter* waiter) noexcept {
     if (rin_atomic_notify_one_u32(&waiter->wake_word) < 0)
         rin_panic("atomic::notify futex wake failed");
 #endif
+    /* This is the final access to the stack waiter by the notifier. A waiter
+     * that woke spuriously may return from FUTEX_WAIT before the wake syscall
+     * above finishes, so its lifetime pin is released only after that syscall
+     * has stopped using wake_word. */
+    __atomic_store_n(&waiter->wake_in_flight, 0u, __ATOMIC_RELEASE);
+}
+
+inline void __atomic_waiter_wait_for_wake_release(
+    __atomic_wait_registry& registry, uint32_t bucket,
+    __atomic_waiter* waiter) noexcept {
+#if !defined(RIN_ATOMIC_HAS_LINUX_FUTEX) && \
+    !defined(RIN_ATOMIC_HAS_RINOS_FUTEX)
+    (void)registry;
+    (void)bucket;
+#endif
+    while (__atomic_load_n(&waiter->wake_in_flight, __ATOMIC_ACQUIRE) != 0u) {
+#if defined(RIN_ATOMIC_HAS_LINUX_FUTEX)
+        const uint32_t generation = __atomic_load_n(
+            &registry.retirement_generation[bucket], __ATOMIC_ACQUIRE);
+        intptr_t wait_result;
+        if (__atomic_load_n(&waiter->wake_in_flight, __ATOMIC_ACQUIRE) == 0u)
+            break;
+        wait_result = syscall(
+            SYS_futex,
+            const_cast<uint32_t*>(&registry.retirement_generation[bucket]),
+            FUTEX_WAIT_PRIVATE, generation, nullptr, nullptr, 0);
+        if (wait_result == 0) continue;
+#elif defined(RIN_ATOMIC_HAS_RINOS_FUTEX)
+        const uint32_t generation = __atomic_load_n(
+            &registry.retirement_generation[bucket], __ATOMIC_ACQUIRE);
+        if (__atomic_load_n(&waiter->wake_in_flight, __ATOMIC_ACQUIRE) == 0u)
+            break;
+        if (rin_atomic_wait_u32(
+                &registry.retirement_generation[bucket], generation,
+                nullptr) == 0)
+            continue;
+#endif
+        /* Unsupported/error futex paths retain the pin and retry. This may
+         * spin only after a kernel wait error; returning early would permit a
+         * notifier to use a retired stack address. */
+        __asm__ volatile("pause" ::: "memory");
+    }
+}
+
+inline void __atomic_wait_registry_wake_retirees(
+    __atomic_wait_registry& registry, uint32_t bucket) noexcept {
+    (void)__atomic_add_fetch(&registry.retirement_generation[bucket], 1u,
+                             __ATOMIC_RELEASE);
+#if defined(RIN_ATOMIC_HAS_LINUX_FUTEX)
+    (void)syscall(
+        SYS_futex,
+        const_cast<uint32_t*>(&registry.retirement_generation[bucket]),
+        FUTEX_WAKE_PRIVATE, 0x7fffffff, nullptr, nullptr, 0);
+#elif defined(RIN_ATOMIC_HAS_RINOS_FUTEX)
+    if (rin_atomic_notify_all_u32(
+            &registry.retirement_generation[bucket]) < 0)
+        rin_panic("atomic::notify waiter retirement wake failed");
+#endif
 }
 
 inline void __atomic_waiter_park(__atomic_waiter* waiter) noexcept {
@@ -611,11 +672,23 @@ inline void __atomic_waiter_unlink(__atomic_wait_registry& registry,
         waiter->linked = false;
     }
     __atomic_wait_registry_unlock(registry, bucket);
+    __atomic_waiter_wait_for_wake_release(registry, bucket, waiter);
 }
 
 inline void __atomic_wait_notify(const void* address, bool all) noexcept {
     __atomic_wait_registry& registry = __atomic_wait_registry_instance();
     const uint32_t bucket = __atomic_wait_bucket(address);
+    __atomic_waiter* wake_list = nullptr;
+    bool has_wake_batch = false;
+    bool cancellation_deferred = false;
+#if defined(__GNUC__) && \
+    (defined(RIN_ATOMIC_HAS_LINUX_FUTEX) || \
+     defined(RIN_ATOMIC_HAS_RINOS_FUTEX))
+    if (__rin_pthread_async_cancel_defer != nullptr) {
+        __rin_pthread_async_cancel_defer();
+        cancellation_deferred = true;
+    }
+#endif
     __atomic_wait_registry_lock(registry, bucket);
     __atomic_waiter** link = &registry.waiters[bucket];
     while (*link != nullptr) {
@@ -627,12 +700,30 @@ inline void __atomic_wait_notify(const void* address, bool all) noexcept {
         *link = waiter->next;
         waiter->next = nullptr;
         waiter->linked = false;
-        /* Wake while holding the registry lock so the stack waiter cannot
-         * return and expire before the futex operation uses its address. */
-        __atomic_waiter_wake(waiter);
+        /* Pin the stack object while detaching it. The waiter can now leave
+         * the registry, but unlink waits for this pin before returning. */
+        __atomic_store_n(&waiter->wake_in_flight, 1u, __ATOMIC_RELEASE);
+        waiter->wake_next = wake_list;
+        wake_list = waiter;
+        has_wake_batch = true;
         if (!all) break;
     }
     __atomic_wait_registry_unlock(registry, bucket);
+    while (wake_list != nullptr) {
+        __atomic_waiter* waiter = wake_list;
+        wake_list = waiter->wake_next;
+        __atomic_waiter_wake(waiter);
+    }
+    if (has_wake_batch)
+        __atomic_wait_registry_wake_retirees(registry, bucket);
+#if defined(__GNUC__) && \
+    (defined(RIN_ATOMIC_HAS_LINUX_FUTEX) || \
+     defined(RIN_ATOMIC_HAS_RINOS_FUTEX))
+    if (cancellation_deferred && __rin_pthread_async_cancel_resume != nullptr)
+        __rin_pthread_async_cancel_resume();
+#else
+    (void)cancellation_deferred;
+#endif
 }
 
 template<class Predicate>
@@ -641,7 +732,7 @@ inline void __atomic_wait_until_changed(const void* address,
     __atomic_wait_registry& registry = __atomic_wait_registry_instance();
     const uint32_t bucket = __atomic_wait_bucket(address);
     while (unchanged()) {
-        __atomic_waiter waiter = { address, 0u, nullptr, false };
+        __atomic_waiter waiter = { address, 0u, nullptr, nullptr, 0u, false };
 #if defined(__GNUC__) && \
     (defined(RIN_ATOMIC_HAS_LINUX_FUTEX) || \
      defined(RIN_ATOMIC_HAS_RINOS_FUTEX))
