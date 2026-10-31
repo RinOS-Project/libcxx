@@ -24,19 +24,31 @@ inline int shared_timed_lock_wait(pthread_rwlock_t* rwlock, bool writer,
     constexpr long long recheck_nanoseconds = 10000000LL;
     for (;;) {
         const auto now = Clock::now();
-        if (!(now < timeout_time)) return ETIMEDOUT;
+        if (!(now < timeout_time))
+            return writer ? pthread_rwlock_trywrlock(rwlock)
+                          : pthread_rwlock_tryrdlock(rwlock);
         long long remaining_nanoseconds = 0;
         if (!mutex_duration_to_nanoseconds(timeout_time - now,
                                            remaining_nanoseconds))
-            return ETIMEDOUT;
+            return writer ? pthread_rwlock_trywrlock(rwlock)
+                          : pthread_rwlock_tryrdlock(rwlock);
         if (remaining_nanoseconds > recheck_nanoseconds)
             remaining_nanoseconds = recheck_nanoseconds;
         struct timespec deadline = {};
+#if defined(RIN_LIBC_PTHREAD_HEADER)
+        if (!mutex_monotonic_deadline(remaining_nanoseconds, deadline))
+            return writer ? pthread_rwlock_trywrlock(rwlock)
+                          : pthread_rwlock_tryrdlock(rwlock);
+        const int result = writer
+            ? pthread_rwlock_clockwrlock(rwlock, CLOCK_MONOTONIC, &deadline)
+            : pthread_rwlock_clockrdlock(rwlock, CLOCK_MONOTONIC, &deadline);
+#else
         if (!mutex_realtime_deadline(remaining_nanoseconds, deadline))
             return ETIMEDOUT;
         const int result = writer
             ? pthread_rwlock_timedwrlock(rwlock, &deadline)
             : pthread_rwlock_timedrdlock(rwlock, &deadline);
+#endif
         if (result != ETIMEDOUT) return result;
     }
 }
