@@ -799,48 +799,50 @@ constexpr auto fold_left_first_with_iter_impl(R&& range, F function)
     }
 }
 
-template<bidirectional_iterator I, typename T, typename F>
+template<bidirectional_iterator I, sentinel_for<I> S, typename T, typename F>
 requires numeric_fold_detail::right_foldable<T, I, F>
-constexpr auto fold_right_impl(I first, I last, T init, F function)
+constexpr auto fold_right_impl(I first, S last, T init, F function)
     -> numeric_fold_detail::right_value_t<T, I, F> {
     using result_type = numeric_fold_detail::right_value_t<T, I, F>;
     result_type value = static_cast<result_type>(std::move(init));
-    while (first != last) {
-        --last;
+    I end = first;
+    while (end != last) ++end;
+    while (first != end) {
+        --end;
         value = static_cast<result_type>(
-            std::invoke(function, *last, std::move(value)));
+            std::invoke(function, *end, std::move(value)));
     }
     return value;
 }
 
 template<bidirectional_range R, typename T, typename F>
-requires same_as<iterator_t<R>, sentinel_t<R>> &&
-         numeric_fold_detail::right_foldable<T, iterator_t<R>, F>
+requires numeric_fold_detail::right_foldable<T, iterator_t<R>, F>
 constexpr auto fold_right_impl(R&& range, T init, F function)
     -> numeric_fold_detail::right_value_t<T, iterator_t<R>, F> {
     return fold_right_impl(ranges::begin(range), ranges::end(range),
                            std::move(init), std::move(function));
 }
 
-template<bidirectional_iterator I, typename F>
+template<bidirectional_iterator I, sentinel_for<I> S, typename F>
 requires numeric_fold_detail::right_first_foldable<I, F>
-constexpr auto fold_right_last_impl(I first, I last, F function)
+constexpr auto fold_right_last_impl(I first, S last, F function)
     -> optional<numeric_fold_detail::right_first_value_t<I, F>> {
     using result_type = numeric_fold_detail::right_first_value_t<I, F>;
-    if (first == last) return nullopt;
-    --last;
-    result_type value = static_cast<result_type>(*last);
-    while (first != last) {
-        --last;
+    I end = first;
+    while (end != last) ++end;
+    if (first == end) return nullopt;
+    --end;
+    result_type value = static_cast<result_type>(*end);
+    while (first != end) {
+        --end;
         value = static_cast<result_type>(
-            std::invoke(function, *last, std::move(value)));
+            std::invoke(function, *end, std::move(value)));
     }
     return optional<result_type>(std::move(value));
 }
 
 template<bidirectional_range R, typename F>
-requires same_as<iterator_t<R>, sentinel_t<R>> &&
-         numeric_fold_detail::right_first_foldable<iterator_t<R>, F>
+requires numeric_fold_detail::right_first_foldable<iterator_t<R>, F>
 constexpr auto fold_right_last_impl(R&& range, F function)
     -> optional<numeric_fold_detail::right_first_value_t<iterator_t<R>, F>> {
     return fold_right_last_impl(ranges::begin(range), ranges::end(range),
