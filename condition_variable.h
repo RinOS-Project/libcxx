@@ -473,6 +473,29 @@ condition_variable_steady_deadline(long long relative_nanoseconds) noexcept {
         now, relative_nanoseconds);
 }
 
+inline bool condition_variable_custom_clock_slice_deadline(
+    long long relative_nanoseconds, struct timespec& deadline) {
+    constexpr long long recheck_nanoseconds = 10000000LL;
+    if (relative_nanoseconds <= 0) return false;
+    if (relative_nanoseconds > recheck_nanoseconds)
+        relative_nanoseconds = recheck_nanoseconds;
+#if defined(RIN_LIBC_PTHREAD_HEADER) || defined(RIN_FREESTANDING)
+    const auto steady_deadline =
+        condition_variable_steady_deadline(relative_nanoseconds);
+    return mutex_epoch_timespec_deadline(
+        steady_deadline.time_since_epoch(), deadline);
+#else
+    struct timespec now = {};
+    if (clock_gettime(CLOCK_REALTIME, &now) != 0) {
+        const int clock_error = errno != 0 ? errno : EIO;
+        condition_variable_operation_failed(
+            clock_error, "condition_variable custom clock slice");
+    }
+    return condition_variable_make_realtime_deadline(
+        now, relative_nanoseconds, deadline);
+#endif
+}
+
 /* A condition_variable_any wait must reacquire its caller lock before it
  * returns or propagates a native-wait exception.  If a user Lock throws from
  * that relock, returning would violate the wait contract with an unowned
@@ -661,17 +684,20 @@ public:
 
         const bool monotonic_deadline =
             is_same<Clock, chrono::steady_clock>::value;
+        const bool custom_clock_deadline =
+            !monotonic_deadline &&
+            !is_same<Clock, chrono::system_clock>::value;
         struct timespec ts = {};
 #if defined(RIN_LIBC_PTHREAD_HEADER) || defined(RIN_FREESTANDING)
         if (monotonic_deadline) {
             if (!detail::mutex_epoch_timespec_deadline(
                     timeout_time.time_since_epoch(), ts))
                 return cv_status::timeout;
-        } else
-#else
-        (void)monotonic_deadline;
-#endif
-        {
+        } else if (custom_clock_deadline) {
+            if (!detail::condition_variable_custom_clock_slice_deadline(
+                    rel_ns, ts))
+                return cv_status::timeout;
+        } else {
             struct timespec now_ts = {};
             if (clock_gettime(CLOCK_REALTIME, &now_ts) != 0) {
                 const int clock_error = errno != 0 ? errno : EIO;
@@ -682,6 +708,24 @@ public:
                     now_ts, rel_ns, ts))
                 return cv_status::timeout;
         }
+#else
+        (void)monotonic_deadline;
+        if (custom_clock_deadline) {
+            if (!detail::condition_variable_custom_clock_slice_deadline(
+                    rel_ns, ts))
+                return cv_status::timeout;
+        } else {
+            struct timespec now_ts = {};
+            if (clock_gettime(CLOCK_REALTIME, &now_ts) != 0) {
+                const int clock_error = errno != 0 ? errno : EIO;
+                detail::condition_variable_operation_failed(
+                    clock_error, "condition_variable realtime clock");
+            }
+            if (!detail::condition_variable_make_realtime_deadline(
+                    now_ts, rel_ns, ts))
+                return cv_status::timeout;
+        }
+#endif
 
         pthread_mutex_t* gate = nullptr;
         volatile unsigned char* closing = nullptr;
@@ -713,14 +757,25 @@ public:
                 unlock_result, "condition_variable timed wait lock release");
         }
         int ret;
+        for (;;) {
 #if defined(RIN_LIBC_PTHREAD_HEADER) || defined(RIN_FREESTANDING)
-        if (monotonic_deadline) {
-            ret = pthread_cond_clockwait(
-                &cond_, gate, CLOCK_MONOTONIC, &ts);
-        } else
+            if (monotonic_deadline || custom_clock_deadline) {
+                ret = pthread_cond_clockwait(
+                    &cond_, gate, CLOCK_MONOTONIC, &ts);
+            } else {
+                ret = pthread_cond_timedwait(&cond_, gate, &ts);
+            }
 #endif
-        {
+#if !defined(RIN_LIBC_PTHREAD_HEADER) && !defined(RIN_FREESTANDING)
             ret = pthread_cond_timedwait(&cond_, gate, &ts);
+#endif
+            if (ret != ETIMEDOUT || !custom_clock_deadline) break;
+            now = Clock::now();
+            if (!detail::condition_variable_timepoint_delta_nanoseconds(
+                    timeout_time, now, rel_ns) ||
+                !detail::condition_variable_custom_clock_slice_deadline(
+                    rel_ns, ts))
+                break;
         }
         const int gate_unlock_result = pthread_mutex_unlock(gate);
         const int relock_result = pthread_mutex_lock(pmtx);
