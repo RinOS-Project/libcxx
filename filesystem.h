@@ -1483,6 +1483,7 @@ public:
 private:
     path_type path_;
     file_status status_;
+    mutable bool status_valid_;
     mutable file_status symlink_status_;
     mutable bool symlink_status_valid_;
     uintmax_t file_size_;
@@ -1491,14 +1492,16 @@ private:
 
 public:
     directory_entry() noexcept
-        : path_(), status_(), symlink_status_(), symlink_status_valid_(false),
+        : path_(), status_(), status_valid_(false), symlink_status_(),
+          symlink_status_valid_(false),
           file_size_(0), hard_link_count_(0),
           last_write_time_(file_time_type::min()) {}
     directory_entry(const directory_entry&) = default;
     directory_entry(directory_entry&&) noexcept = default;
 
     explicit directory_entry(const path_type& p)
-        : path_(p), status_(), symlink_status_(), symlink_status_valid_(false),
+        : path_(p), status_(), status_valid_(false), symlink_status_(),
+          symlink_status_valid_(false),
           file_size_(0), hard_link_count_(0), last_write_time_() {
         refresh();
     }
@@ -1509,7 +1512,8 @@ public:
      * second public status cache so all metadata still flows through
      * refresh(error_code&). */
     directory_entry(const path_type& p, error_code& ec) noexcept
-        : path_(p), status_(), symlink_status_(), symlink_status_valid_(false),
+        : path_(p), status_(), status_valid_(false), symlink_status_(),
+          symlink_status_valid_(false),
           file_size_(0), hard_link_count_(0), last_write_time_() {
         refresh(ec);
     }
@@ -1529,6 +1533,7 @@ public:
 
     void refresh(error_code& ec) noexcept {
         ec.clear();
+        status_valid_ = false;
         symlink_status_valid_ = false;
         /* stat を呼んで情報を更新する。失敗時は stale cache を
          * 公開せず、not_found/zero へ閉じる。 */
@@ -1561,6 +1566,7 @@ public:
             file_size_ = static_cast<uintmax_t>(measured_size);
             hard_link_count_ = static_cast<uintmax_t>(stat_view->st_nlink);
             last_write_time_ = file_time_type(::std::chrono::duration_cast<file_time_type::duration>(::std::chrono::seconds(stat_view->st_mtime)));
+            status_valid_ = true;
         } else {
             status_.type(file_type::not_found);
             status_.permissions(perms::unknown);
@@ -1587,8 +1593,22 @@ public:
                status_.type() != file_type::none &&
                status_.type() != file_type::unknown;
     }
+    bool exists(error_code& ec) const noexcept {
+        const file_status value = status(ec);
+        return !ec && value.type() != file_type::not_found &&
+               value.type() != file_type::none &&
+               value.type() != file_type::unknown;
+    }
     bool is_regular_file() const { return status_.type() == file_type::regular; }
+    bool is_regular_file(error_code& ec) const noexcept {
+        const file_status value = status(ec);
+        return !ec && value.type() == file_type::regular;
+    }
     bool is_directory() const { return status_.type() == file_type::directory; }
+    bool is_directory(error_code& ec) const noexcept {
+        const file_status value = status(ec);
+        return !ec && value.type() == file_type::directory;
+    }
     file_status symlink_status(error_code& ec) const noexcept {
         ec.clear();
         if (symlink_status_valid_) return symlink_status_;
@@ -1633,11 +1653,35 @@ public:
         return is_symlink(ec);
     }
     bool is_block_file() const { return status_.type() == file_type::block; }
+    bool is_block_file(error_code& ec) const noexcept {
+        const file_status value = status(ec);
+        return !ec && value.type() == file_type::block;
+    }
     bool is_character_file() const { return status_.type() == file_type::character; }
+    bool is_character_file(error_code& ec) const noexcept {
+        const file_status value = status(ec);
+        return !ec && value.type() == file_type::character;
+    }
     bool is_fifo() const { return status_.type() == file_type::fifo; }
+    bool is_fifo(error_code& ec) const noexcept {
+        const file_status value = status(ec);
+        return !ec && value.type() == file_type::fifo;
+    }
     bool is_socket() const { return status_.type() == file_type::socket; }
+    bool is_socket(error_code& ec) const noexcept {
+        const file_status value = status(ec);
+        return !ec && value.type() == file_type::socket;
+    }
     bool is_other() const {
         return exists() && !is_regular_file() && !is_directory();
+    }
+    bool is_other(error_code& ec) const noexcept {
+        const file_status value = status(ec);
+        return !ec && value.type() != file_type::not_found &&
+               value.type() != file_type::none &&
+               value.type() != file_type::unknown &&
+               value.type() != file_type::regular &&
+               value.type() != file_type::directory;
     }
 
     uintmax_t file_size() const {
@@ -1689,6 +1733,9 @@ public:
     file_status status() const { return status_; }
     file_status status(error_code& ec) const noexcept {
         ec.clear();
+        if (!status_valid_) {
+            const_cast<directory_entry*>(this)->refresh(ec);
+        }
         return status_;
     }
 
