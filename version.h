@@ -79,6 +79,7 @@
  * ===================================================================*/
 
 #if defined(__cplusplus) && __cplusplus >= 202002L
+#define __cpp_lib_assume_aligned             201811L
 #define __cpp_lib_destroying_delete          201806L
 /* Keep the advertised chrono revision below the C++20 time-zone API: this
  * implementation has calendar support but no tzdb/time_zone surface yet. */
