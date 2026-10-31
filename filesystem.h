@@ -25,6 +25,9 @@
 #include "iterator.h"
 #include "mutex.h"
 #include "type_traits.h"
+#include <dirent.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
 #if __cplusplus >= 202002L
@@ -3149,48 +3152,226 @@ inline bool remove(const path& p, error_code& ec) noexcept {
     return true;
 }
 
-inline uintmax_t remove_all(const path& p, error_code& ec) noexcept {
-    ec.clear();
-    error_code status_ec;
-    /* remove_all removes a symlink itself.  Following it here would recurse
-     * into and delete the target before rmdir eventually rejects the link. */
-    const file_status entry_status = symlink_status(p, status_ec);
-    if (status_ec) {
-        if (status_ec == make_error_code(errc::no_such_file_or_directory) ||
-            status_ec == make_error_code(errc::not_a_directory)) {
-            return 0;
+namespace detail {
+
+inline uintmax_t remove_all_failure(error_code& ec, int saved_errno) noexcept {
+    errno = saved_errno != 0 ? saved_errno : EIO;
+    ec = make_error_code(filesystem_error_from_errno());
+    return static_cast<uintmax_t>(-1);
+}
+
+inline uintmax_t remove_all_at(int parent_fd, const char* name,
+                               uint64_t* root_mount_id,
+                               error_code& ec) noexcept {
+    int directory_fd = -1;
+    int pinned_fd = -1;
+    int saved_errno = 0;
+    uintmax_t removed = 0u;
+
+    /* O_DIRECTORY|O_NOFOLLOW opens one directory identity.  If the name is a
+     * file or symlink, O_PATH pins that entry without following it so the
+     * kernel can unlink exactly the pinned identity. */
+    directory_fd = openat(parent_fd, name,
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (directory_fd < 0) {
+        const int directory_error = errno;
+        if (directory_error == ENOENT) return 0u;
+        if (directory_error != ENOTDIR && directory_error != ELOOP)
+            return remove_all_failure(ec, directory_error);
+
+        pinned_fd = openat(parent_fd, name, O_PATH | O_CLOEXEC | O_NOFOLLOW);
+        if (pinned_fd < 0) {
+            saved_errno = errno;
+            if (saved_errno == ENOENT) return 0u;
+            return remove_all_failure(ec, saved_errno);
         }
-        ec = status_ec;
-        return static_cast<uintmax_t>(-1);
-    }
-    const bool directory = is_directory(entry_status);
-    if (!directory) {
-        if (rin_unlink(p.c_str()) != 0) {
-            ec = make_error_code(detail::filesystem_error_from_errno());
-            return static_cast<uintmax_t>(-1);
+        struct stat pinned_status;
+        if (fstat(pinned_fd, &pinned_status) != 0) {
+            saved_errno = errno;
+            (void)close(pinned_fd);
+            return remove_all_failure(ec, saved_errno);
         }
-        return 1;
+        if (S_ISDIR(pinned_status.st_mode)) {
+            (void)close(pinned_fd);
+            /* The entry changed from a directory-open failure to a
+             * directory. Retry through O_DIRECTORY so its iterator gets a
+             * directory capability; a changing name eventually fails. */
+            directory_fd = openat(parent_fd, name,
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+            if (directory_fd < 0) {
+                saved_errno = errno;
+                if (saved_errno == ENOENT) return 0u;
+                return remove_all_failure(ec, saved_errno);
+            }
+        } else {
+            RinPathAtFileIdentityV1 identity = {0};
+            if (rin_fgetidentity(pinned_fd, &identity) != 0) {
+                saved_errno = errno;
+                (void)close(pinned_fd);
+                return remove_all_failure(ec, saved_errno);
+            }
+            if (identity.mount_id == 0u) {
+                (void)close(pinned_fd);
+                return remove_all_failure(ec, EIO);
+            }
+            if (*root_mount_id == 0u) {
+                *root_mount_id = identity.mount_id;
+            } else if (*root_mount_id != identity.mount_id) {
+                (void)close(pinned_fd);
+                return remove_all_failure(ec, EBUSY);
+            }
+            if (rin_unlinkat_if_same(parent_fd, name, pinned_fd) != 0) {
+                saved_errno = errno;
+                (void)close(pinned_fd);
+                if (saved_errno == ENOENT) return 0u;
+                return remove_all_failure(ec, saved_errno);
+            }
+            if (close(pinned_fd) != 0)
+                return remove_all_failure(ec, errno);
+            return 1u;
+        }
     }
-    uintmax_t removed = 0;
-    directory_iterator iter(p, ec);
-    if (ec) return static_cast<uintmax_t>(-1);
-    const directory_iterator finish;
-    while (iter != finish) {
-        const uintmax_t child = remove_all(iter->path(), ec);
-        if (ec) return static_cast<uintmax_t>(-1);
+
+    struct stat directory_status;
+    RinPathAtFileIdentityV1 directory_identity = {0};
+    if (fstat(directory_fd, &directory_status) != 0) {
+        saved_errno = errno;
+        (void)close(directory_fd);
+        return remove_all_failure(ec, saved_errno);
+    }
+    if (!S_ISDIR(directory_status.st_mode)) {
+        (void)close(directory_fd);
+        return remove_all_failure(ec, EIO);
+    }
+    if (rin_fgetidentity(directory_fd, &directory_identity) != 0) {
+        saved_errno = errno;
+        (void)close(directory_fd);
+        return remove_all_failure(ec, saved_errno);
+    }
+    if (directory_identity.mount_id == 0u) {
+        (void)close(directory_fd);
+        return remove_all_failure(ec, EIO);
+    }
+    if (*root_mount_id == 0u) {
+        *root_mount_id = directory_identity.mount_id;
+    } else if (*root_mount_id != directory_identity.mount_id) {
+        (void)close(directory_fd);
+        return remove_all_failure(ec, EBUSY);
+    }
+
+    const int iterator_fd = fcntl(directory_fd, F_DUPFD_CLOEXEC, 0);
+    if (iterator_fd < 0) {
+        saved_errno = errno;
+        (void)close(directory_fd);
+        return remove_all_failure(ec, saved_errno);
+    }
+    DIR* iterator = fdopendir(iterator_fd);
+    if (!iterator) {
+        saved_errno = errno;
+        (void)close(iterator_fd);
+        (void)close(directory_fd);
+        return remove_all_failure(ec, saved_errno);
+    }
+    for (;;) {
+        errno = 0;
+        struct dirent* entry = readdir(iterator);
+        if (!entry) {
+            if (errno != 0) saved_errno = errno;
+            break;
+        }
+        if ((entry->d_name[0] == '.' && entry->d_name[1] == '\0') ||
+            (entry->d_name[0] == '.' && entry->d_name[1] == '.' &&
+             entry->d_name[2] == '\0'))
+            continue;
+        size_t entry_name_length = 0u;
+        while (entry_name_length < sizeof(entry->d_name) &&
+               entry->d_name[entry_name_length] != '\0')
+            ++entry_name_length;
+        if (entry_name_length == 0u ||
+            entry_name_length == sizeof(entry->d_name) ||
+            ::memchr(entry->d_name, '/', entry_name_length) != NULL) {
+            ec = make_error_code(errc::io_error);
+            saved_errno = 0;
+            break;
+        }
+        const uintmax_t child = remove_all_at(
+            directory_fd, entry->d_name, root_mount_id, ec);
+        if (ec) {
+            saved_errno = 0;
+            break;
+        }
         if (child > static_cast<uintmax_t>(-1) - removed) {
             ec = make_error_code(errc::value_too_large);
-            return static_cast<uintmax_t>(-1);
+            saved_errno = 0;
+            break;
         }
         removed += child;
-        iter.increment(ec);
-        if (ec) return static_cast<uintmax_t>(-1);
     }
-    if (rin_rmdir(p.c_str()) != 0 || removed == static_cast<uintmax_t>(-1)) {
-        ec = make_error_code(detail::filesystem_error_from_errno());
+    if (closedir(iterator) != 0 && !ec) saved_errno = errno;
+    if (ec || saved_errno != 0) {
+        const int close_error = saved_errno;
+        (void)close(directory_fd);
+        if (ec) return static_cast<uintmax_t>(-1);
+        return remove_all_failure(ec, close_error);
+    }
+
+    if (rin_rmdirat_if_same(parent_fd, name, directory_fd) != 0) {
+        saved_errno = errno;
+        (void)close(directory_fd);
+        if (saved_errno == ENOENT) return 0u;
+        return remove_all_failure(ec, saved_errno);
+    }
+    if (close(directory_fd) != 0)
+        return remove_all_failure(ec, errno);
+    if (removed == static_cast<uintmax_t>(-1)) {
+        ec = make_error_code(errc::value_too_large);
         return static_cast<uintmax_t>(-1);
     }
-    return removed + 1;
+    return removed + 1u;
+}
+
+} /* namespace detail */
+
+inline uintmax_t remove_all(const path& p, error_code& ec) noexcept {
+    ec.clear();
+    if (p.empty()) return 0u;
+
+    std::string target_text = p.native();
+    while (target_text.size() > 1u && target_text.back() == '/')
+        target_text.pop_back();
+    const path target(target_text);
+    const path leaf = target.filename();
+    if (leaf.empty() || leaf.native() == "." || leaf.native() == "..") {
+        ec = make_error_code(errc::operation_not_permitted);
+        return static_cast<uintmax_t>(-1);
+    }
+    const path parent = target.parent_path();
+    const char* parent_name = parent.empty() ? "." : parent.c_str();
+    const int parent_fd = open(parent_name,
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (parent_fd < 0) {
+        if (errno == ENOENT || errno == ENOTDIR) return 0u;
+        return detail::remove_all_failure(ec, errno);
+    }
+
+    RinPathAtFileIdentityV1 parent_identity = {0};
+    if (rin_fgetidentity(parent_fd, &parent_identity) != 0) {
+        const int saved_errno = errno;
+        (void)close(parent_fd);
+        return detail::remove_all_failure(ec, saved_errno);
+    }
+    if (parent_identity.mount_id == 0u) {
+        (void)close(parent_fd);
+        return detail::remove_all_failure(ec, EIO);
+    }
+    uint64_t root_mount_id = parent_identity.mount_id;
+    const uintmax_t removed = detail::remove_all_at(
+        parent_fd, leaf.c_str(), &root_mount_id, ec);
+    const int saved_errno = errno;
+    if (close(parent_fd) != 0 && !ec)
+        return detail::remove_all_failure(ec, errno);
+    errno = saved_errno;
+    return removed;
 }
 
 inline uintmax_t remove_all(const path& p) {
