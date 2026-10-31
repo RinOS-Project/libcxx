@@ -3646,7 +3646,7 @@ public:
             double, static_cast<size_t>(numeric_limits<double>::digits)>(generator);
         size_t index = 0;
         while (index + 1 < parameter.cumulative_.size() &&
-               parameter.cumulative_[index] < unit) ++index;
+               parameter.cumulative_[index] <= unit) ++index;
         return static_cast<result_type>(index);
     }
     friend bool operator==(const discrete_distribution& a,
