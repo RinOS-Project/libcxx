@@ -282,6 +282,7 @@
 
 #if defined(__cplusplus) && __cplusplus >= 201103L
 #define __cpp_lib_allocator_traits_is_always_equal 201411L
+#define __cpp_lib_future                   201304L
 #endif
 
 /* ===================================================================

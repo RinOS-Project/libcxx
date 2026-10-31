@@ -11,6 +11,7 @@
 #include "chrono.h"
 #include "stop_token.h"
 #include "system_error.h"
+#include "new.h"
 #include "__pthread.h"
 #if !defined(RIN_FREESTANDING) && defined(__STDC_HOSTED__) && __STDC_HOSTED__
 #include <errno.h>
@@ -1138,6 +1139,8 @@ struct __notify_at_thread_exit_node {
     pthread_cond_t* cond;
     unsigned long long generation;
     pthread_mutex_t* mtx;
+    void* lifetime;
+    void (*release_lifetime)(void*);
     __notify_at_thread_exit_node* next;
 };
 
@@ -1203,6 +1206,8 @@ inline void __notify_at_thread_exit_tls_dtor(void*) {
         }
         (void)std::detail::__condition_variable_registry_notify(
             n->cond, n->generation);
+        if (n->release_lifetime)
+            n->release_lifetime(n->lifetime);
         __notify_at_thread_exit_node_deallocate(n);
         n = next;
     }
@@ -1213,70 +1218,104 @@ inline void __notify_at_thread_exit_key_init() {
         &__notify_at_exit_key(), __notify_at_thread_exit_tls_dtor);
 }
 
-} /* namespace __detail */
-
-inline void notify_all_at_thread_exit(condition_variable& cond, unique_lock<mutex> lk) {
+inline void __notify_all_at_thread_exit_register(
+    condition_variable& cond, unique_lock<mutex> lk, void* lifetime,
+    void (*release_lifetime)(void*)) {
     if (!lk.owns_lock() || lk.mutex() == nullptr) {
         detail::condition_variable_operation_failed(
             EINVAL, "notify_all_at_thread_exit lock state");
     }
 
-    call_once(__detail::__notify_at_exit_once(), [] {
-        __detail::__notify_at_thread_exit_key_init();
+    call_once(__notify_at_exit_once(), [] {
+        __notify_at_thread_exit_key_init();
     });
 
-    if (__detail::__notify_at_exit_key_error() != 0) {
+    if (__notify_at_exit_key_error() != 0) {
 #if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
         detail::condition_variable_operation_failed(
-            __detail::__notify_at_exit_key_error(),
+            __notify_at_exit_key_error(),
             "notify_all_at_thread_exit key initialization");
 #else
-        /* A TLS destructor cannot be registered in a no-exception product;
-         * preserve the existing liveness fallback at that boundary. */
-        lk.unlock();
-        cond.notify_all();
-        return;
+        terminate();
 #endif
     }
 
-    auto* node = static_cast<__detail::__notify_at_thread_exit_node*>(
-        __detail::__notify_at_thread_exit_node_allocate(
-            sizeof(__detail::__notify_at_thread_exit_node)));
+    auto* node = static_cast<__notify_at_thread_exit_node*>(
+        __notify_at_thread_exit_node_allocate(
+            sizeof(__notify_at_thread_exit_node)));
 
     if (!node) {
 #if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
         throw bad_alloc();
 #else
-        /* Fallback: preserve liveness even under OOM. */
-        lk.unlock();
-        cond.notify_all();
-        return;
+        terminate();
 #endif
     }
 
     node->cond = cond.native_handle();
     node->generation = cond.__rin_registry_generation();
     node->mtx = lk.mutex()->native_handle();
-    node->next = __detail::__notify_at_exit_head();
-    __detail::__notify_at_exit_head() = node;
+    node->lifetime = lifetime;
+    node->release_lifetime = release_lifetime;
+    node->next = __notify_at_exit_head();
+    __notify_at_exit_head() = node;
 
     const int specific_result = pthread_setspecific(
-        __detail::__notify_at_exit_key(), (void*)node);
+        __notify_at_exit_key(), (void*)node);
     if (specific_result != 0) {
-        __detail::__notify_at_exit_head() = node->next;
-        __detail::__notify_at_thread_exit_node_deallocate(node);
+        __notify_at_exit_head() = node->next;
+        __notify_at_thread_exit_node_deallocate(node);
 #if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
         detail::condition_variable_operation_failed(
             specific_result, "notify_all_at_thread_exit registration");
 #else
-        lk.unlock();
-        cond.notify_all();
-        return;
+        terminate();
 #endif
     }
 
     /* Transfer ownership: keep mutex locked until thread exit destructor. */
     (void)lk.release();
+}
+
+template<typename Owner>
+struct __notify_at_thread_exit_owner {
+    Owner value;
+
+    explicit __notify_at_thread_exit_owner(Owner&& owner)
+        : value(std::move(owner)) {}
+};
+
+template<typename Owner>
+inline void __notify_at_thread_exit_release_owner(void* pointer) {
+    using owner_type = __notify_at_thread_exit_owner<Owner>;
+    delete static_cast<owner_type*>(pointer);
+}
+
+} /* namespace __detail */
+
+inline void notify_all_at_thread_exit(condition_variable& cond, unique_lock<mutex> lk) {
+    __detail::__notify_all_at_thread_exit_register(
+        cond, std::move(lk), nullptr, nullptr);
+}
+
+template<typename Owner>
+inline void notify_all_at_thread_exit(condition_variable& cond,
+                                      unique_lock<mutex> lk, Owner&& owner) {
+    using owner_type = typename decay<Owner>::type;
+    using holder_type = __detail::__notify_at_thread_exit_owner<owner_type>;
+    holder_type* holder = new holder_type(std::forward<Owner>(owner));
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+    try {
+#endif
+        __detail::__notify_all_at_thread_exit_register(
+            cond, std::move(lk), holder,
+            &__detail::__notify_at_thread_exit_release_owner<owner_type>);
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+    } catch (...) {
+        delete holder;
+        throw;
+    }
+#endif
 }
 
 } /* namespace std */
