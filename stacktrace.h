@@ -322,14 +322,13 @@ public:
     friend constexpr strong_ordering operator<=>
         (const basic_stacktrace& left,
          const basic_stacktrace& right) noexcept {
-        const size_type common = left.size_ < right.size_ ? left.size_ : right.size_;
-        for (size_type index = 0; index < common; ++index) {
+        if (left.size_ < right.size_) return strong_ordering::less;
+        if (left.size_ > right.size_) return strong_ordering::greater;
+        for (size_type index = 0; index < left.size_; ++index) {
             const strong_ordering order = left.entries_[index] <=>
                                           right.entries_[index];
             if (order != strong_ordering::equal) return order;
         }
-        if (left.size_ < right.size_) return strong_ordering::less;
-        if (left.size_ > right.size_) return strong_ordering::greater;
         return strong_ordering::equal;
     }
 
