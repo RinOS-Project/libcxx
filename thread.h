@@ -209,12 +209,6 @@ public:
         }
     }
 
-    template<typename Callable, typename... Args>
-    bool try_start(Callable&& f, Args&&... args) {
-        return detail::try_start_thread(
-            *this, std::forward<Callable>(f), std::forward<Args>(args)...) == 0;
-    }
-
     /* コピー禁止 */
     thread(const thread&) = delete;
     thread& operator=(const thread&) = delete;
@@ -286,7 +280,7 @@ public:
     static unsigned int hardware_concurrency() noexcept {
 #if defined(RIN_FREESTANDING) || defined(RIN_USERSPACE)
         const intptr_t count = __rin_syscall_posixize(
-            _syscall0((uintptr_t)SYS_GETCPU_COUNT));
+            _syscall0((uintptr_t)SYS_GETCPU_ONLINE_COUNT));
         if (count <= 0 ||
             static_cast<uintptr_t>(count) >
                 static_cast<uintptr_t>(UINT_MAX)) {
@@ -523,6 +517,69 @@ inline bool sleep_once(timespec requested) noexcept {
     }
 }
 
+template<typename Duration>
+inline bool duration_to_timespec(const Duration& duration,
+                                timespec* deadline) noexcept {
+    if (!deadline) return false;
+    const auto whole_seconds = chrono::duration_cast<chrono::seconds>(duration);
+    const auto whole_duration = chrono::duration_cast<Duration>(whole_seconds);
+    const auto fractional_nanoseconds = chrono::duration_cast<chrono::nanoseconds>(
+        duration - whole_duration);
+    long long seconds_count = static_cast<long long>(whole_seconds.count());
+    long nanoseconds = static_cast<long>(fractional_nanoseconds.count());
+
+    if (numeric_limits<time_t>::is_signed) {
+        if (seconds_count < static_cast<long long>(numeric_limits<time_t>::min()) ||
+            seconds_count > static_cast<long long>(numeric_limits<time_t>::max()))
+            return false;
+    } else if (seconds_count < 0 ||
+               static_cast<unsigned long long>(seconds_count) >
+                   static_cast<unsigned long long>(
+                       numeric_limits<time_t>::max())) {
+        return false;
+    }
+
+    if (nanoseconds < 0) {
+        if (!numeric_limits<time_t>::is_signed ||
+            seconds_count ==
+                static_cast<long long>(numeric_limits<time_t>::min()))
+            return false;
+        --seconds_count;
+        nanoseconds += 1000000000L;
+    }
+    deadline->tv_sec = static_cast<time_t>(seconds_count);
+    deadline->tv_nsec = nanoseconds;
+    return true;
+}
+
+template<typename Clock, typename Duration>
+inline bool sleep_until_native_clock(
+    const chrono::time_point<Clock, Duration>& deadline) noexcept {
+#if defined(RIN_FREESTANDING)
+    const bool realtime = is_same<Clock, chrono::system_clock>::value;
+    const bool monotonic =
+        is_same<Clock, chrono::steady_clock>::value ||
+        is_same<Clock, chrono::high_resolution_clock>::value;
+    if ((realtime || monotonic) &&
+        is_same<Duration, typename Clock::duration>::value) {
+        timespec absolute_deadline{};
+        if (!duration_to_timespec(deadline.time_since_epoch(),
+                                  &absolute_deadline))
+            return false;
+        const clockid_t clock_id = realtime ? CLOCK_REALTIME : CLOCK_MONOTONIC;
+        int result;
+        do {
+            result = ::clock_nanosleep(clock_id, TIMER_ABSTIME,
+                                       &absolute_deadline, nullptr);
+        } while (result == EINTR);
+        return result == 0;
+    }
+#else
+    (void)deadline;
+#endif
+    return false;
+}
+
 } /* namespace detail */
 
 inline thread::id get_id() noexcept {
@@ -595,10 +652,23 @@ void sleep_for(const chrono::duration<Rep, Period>& sleep_duration) {
 
 template<typename Clock, typename Duration>
 void sleep_until(const chrono::time_point<Clock, Duration>& sleep_time) {
-    auto now = Clock::now();
-    if (sleep_time > now) {
-        sleep_for(sleep_time - now);
+    if (!(sleep_time > Clock::now())) return;
+    if (detail::sleep_until_native_clock(sleep_time)) return;
+#if defined(RIN_FREESTANDING)
+    constexpr chrono::milliseconds recheck_interval(10);
+    for (;;) {
+        const auto now = Clock::now();
+        if (!(sleep_time > now)) return;
+        const auto remaining = sleep_time - now;
+        if (remaining > recheck_interval)
+            sleep_for(recheck_interval);
+        else
+            sleep_for(remaining);
     }
+#else
+    const auto now = Clock::now();
+    if (sleep_time > now) sleep_for(sleep_time - now);
+#endif
 }
 
 } /* namespace this_thread */
