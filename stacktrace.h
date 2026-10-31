@@ -2,11 +2,10 @@
  * RinOS C++ <stacktrace> ✿
  * Bounded stacktrace entry and capture surface (C++23)
  *
- * The target runtime does not currently provide an unwind, symbol, or DSO
- * service.  This header therefore exposes a deliberately bounded carrier:
- * `current()` records at most the immediate return address and never walks
- * memory or allocates.  The type and iterator contracts are useful to panic
- * diagnostics while unsupported symbolization remains explicit.
+ * `current()` uses the compiler unwind ABI when it is available, with a
+ * fixed-capacity result and no allocation.  Toolchains without that ABI keep
+ * the safe one-frame return-address fallback.  Symbol and DSO lookup remain
+ * explicitly unavailable.
  */
 
 #ifndef RINCXX_STACKTRACE_H
@@ -20,6 +19,16 @@
 #include "string.h"
 
 #include "version.h"
+
+#if defined(__has_include)
+#if __has_include(<unwind.h>)
+#include <unwind.h>
+#define RIN_LIBCXX_HAS_UNWIND_BACKTRACE 1
+#endif
+#elif defined(__GNUC__) || defined(__clang__)
+#include <unwind.h>
+#define RIN_LIBCXX_HAS_UNWIND_BACKTRACE 1
+#endif
 
 #if defined(RIN_LIBCXX_CXX23_DIALECT)
 
@@ -41,8 +50,8 @@ private:
 public:
     constexpr stacktrace_entry() noexcept : native_(0) {}
 
-    /* Public construction keeps host and kernel diagnostics testable without
-     * pretending that a target-specific unwinder exists. */
+    /* Public construction keeps diagnostics testable without requiring a
+     * target symbolization service. */
     constexpr explicit stacktrace_entry(native_handle_type native) noexcept
         : native_(native) {}
 
@@ -111,6 +120,61 @@ struct hash<stacktrace_entry> {
     }
 };
 
+#if defined(RIN_LIBCXX_HAS_UNWIND_BACKTRACE)
+namespace __stacktrace_detail {
+
+struct capture_state {
+    stacktrace_entry* entries;
+    size_t capacity;
+    size_t skip;
+    size_t count;
+    bool full;
+};
+
+static _Unwind_Reason_Code capture_frame(
+    _Unwind_Context* frame, void* opaque) {
+    capture_state* state = static_cast<capture_state*>(opaque);
+    uintptr_t instruction;
+
+    if (state == nullptr || frame == nullptr) return _URC_FATAL_PHASE1_ERROR;
+    if (state->skip != 0u) {
+        --state->skip;
+        return _URC_NO_REASON;
+    }
+    instruction = static_cast<uintptr_t>(_Unwind_GetIP(frame));
+    if (instruction == 0u) return _URC_NO_REASON;
+    if (state->count >= state->capacity) {
+        state->full = true;
+        return _URC_NORMAL_STOP;
+    }
+    state->entries[state->count++] =
+        stacktrace_entry(static_cast<stacktrace_entry::native_handle_type>(
+            instruction));
+    if (state->count == state->capacity) {
+        state->full = true;
+        return _URC_NORMAL_STOP;
+    }
+    return _URC_NO_REASON;
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline))
+#endif
+static size_t capture(stacktrace_entry* entries, size_t capacity,
+                      size_t skip) {
+    capture_state state = { entries, capacity, skip, 0u, false };
+    const _Unwind_Reason_Code reason =
+        _Unwind_Backtrace(capture_frame, &state);
+
+    /* A partial trace after a malformed/missing unwind record is misleading.
+     * Only natural end-of-stack or our bounded-capacity stop is publishable. */
+    if (state.full || reason == _URC_END_OF_STACK) return state.count;
+    return 0u;
+}
+
+} /* namespace __stacktrace_detail */
+#endif
+
 template<class Allocator = allocator<stacktrace_entry>>
 class basic_stacktrace {
 public:
@@ -123,8 +187,8 @@ public:
     using allocator_traits_type = allocator_traits<allocator_type>;
 
 private:
-    /* Keep capture bounded and deterministic until RinOS has a real unwind
-     * provider.  The capacity is part of this implementation's ABI. */
+    /* Keep capture bounded and deterministic.  The capacity is part of this
+     * implementation's ABI. */
     static constexpr size_type capacity = 16;
     value_type entries_[capacity];
     size_type size_;
@@ -267,25 +331,53 @@ public:
         return strong_ordering::equal;
     }
 
+#if defined(__GNUC__) || defined(__clang__)
+    __attribute__((noinline))
+#endif
     static basic_stacktrace current(size_type skip = 0) noexcept {
-        return current(allocator_type(), skip);
+        basic_stacktrace result;
+#if defined(RIN_LIBCXX_HAS_UNWIND_BACKTRACE)
+        if (skip <= static_cast<size_type>(-1) - 2u)
+            result.size_ = __stacktrace_detail::capture(
+                result.entries_, capacity, skip + 2u);
+#elif defined(__GNUC__) || defined(__clang__)
+        if (skip == 0u) {
+            const void* return_address = __builtin_return_address(0);
+            if (return_address != nullptr) {
+                result.entries_[0] = stacktrace_entry(
+                    reinterpret_cast<stacktrace_entry::native_handle_type>(
+                        return_address));
+                result.size_ = 1u;
+            }
+        }
+#else
+        (void)skip;
+#endif
+        return result;
     }
 
+#if defined(__GNUC__) || defined(__clang__)
+    __attribute__((noinline))
+#endif
     static basic_stacktrace current(const allocator_type& alloc,
                                     size_type skip = 0) noexcept {
         basic_stacktrace result(alloc);
-        /* A bounded capture cannot satisfy a non-zero skip without an unwind
-         * walk.  Return an empty range instead of reporting the wrong frame. */
-        if (skip != 0) return result;
-
-#if defined(__GNUC__) || defined(__clang__)
-        const void* return_address = __builtin_return_address(0);
-        if (return_address != nullptr) {
-            result.entries_[0] = stacktrace_entry(
-                reinterpret_cast<stacktrace_entry::native_handle_type>(
-                    return_address));
-            result.size_ = 1;
+#if defined(RIN_LIBCXX_HAS_UNWIND_BACKTRACE)
+        if (skip <= static_cast<size_type>(-1) - 2u)
+            result.size_ = __stacktrace_detail::capture(
+                result.entries_, capacity, skip + 2u);
+#elif defined(__GNUC__) || defined(__clang__)
+        if (skip == 0u) {
+            const void* return_address = __builtin_return_address(0);
+            if (return_address != nullptr) {
+                result.entries_[0] = stacktrace_entry(
+                    reinterpret_cast<stacktrace_entry::native_handle_type>(
+                        return_address));
+                result.size_ = 1u;
+            }
         }
+#else
+        (void)skip;
 #endif
         return result;
     }
