@@ -2594,12 +2594,38 @@ public:
         return *this;
     }
 
-    void pop() {
-        if (stack_.empty()) return;
+    void pop(error_code& ec) {
+        ec.clear();
         snapshot_active_ = false;
         recursion_pending_ = false;
+        if (at_end_ || stack_.empty()) return;
+        if (stack_.size() == 1u) {
+            set_end();
+            return;
+        }
+
+        /* Stop iterating the current directory, then resume at its parent's
+         * next entry. If that parent is exhausted, keep unwinding iteratively
+         * so deep trees do not consume the C stack. */
+        stack_.pop_back();
+        while (!stack_.empty()) {
+            stack_.back().increment(ec);
+            if (ec) {
+                set_end();
+                return;
+            }
+            if (stack_.back() != directory_iterator()) {
+                recursion_pending_ = true;
+                return;
+            }
+            stack_.pop_back();
+        }
+        set_end();
+    }
+
+    void pop() {
         error_code ec;
-        stack_.back().increment(ec);
+        pop(ec);
         if (ec) {
             if (!stack_.empty()) {
                 detail::filesystem_failure("recursive_directory_iterator::pop",
@@ -2607,15 +2633,6 @@ public:
             }
             detail::filesystem_failure("recursive_directory_iterator::pop", ec);
         }
-        if (stack_.back() != directory_iterator()) return;
-        stack_.pop_back();
-        if (stack_.empty()) {
-            set_end();
-            return;
-        }
-        /* The parent iterator is already positioned at the directory that
-         * pop skipped; continue with its next sibling. */
-        pop();
     }
 
     void disable_recursion_pending() noexcept { recursion_pending_ = false; }
