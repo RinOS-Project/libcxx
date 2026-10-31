@@ -20,6 +20,7 @@
 
 #include "version.h"
 
+#if defined(RIN_LIBCXX_CXX23_DIALECT)
 #if defined(__has_include)
 #if __has_include(<unwind.h>)
 #include <unwind.h>
@@ -28,6 +29,7 @@
 #elif defined(__GNUC__) || defined(__clang__)
 #include <unwind.h>
 #define RIN_LIBCXX_HAS_UNWIND_BACKTRACE 1
+#endif
 #endif
 
 #if defined(RIN_LIBCXX_CXX23_DIALECT)
@@ -398,4 +400,7 @@ using stacktrace = basic_stacktrace<>;
 } /* namespace std */
 
 #endif /* C++23 */
+#if defined(RIN_LIBCXX_HAS_UNWIND_BACKTRACE)
+#undef RIN_LIBCXX_HAS_UNWIND_BACKTRACE
+#endif
 #endif /* RINCXX_STACKTRACE_H */
