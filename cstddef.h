@@ -6,6 +6,19 @@
 #ifndef RINCXX_CSTDDEF_H
 #define RINCXX_CSTDDEF_H
 
+/* A host <cstddef> (libstdc++) may share a TU with this header when
+ * product code mixes RinOS libcxx with host-STL-based runtime headers.
+ * Whichever runs first wins: preclaim the libstdc++ guard so a later
+ * host <cstddef> skips its body (cf. cstdlib.h), and skip ours when
+ * the host already ran. */
+#if defined(_GLIBCXX_CSTDDEF)
+#define RINCXX_CSTDDEF_HOST_NAMESPACE 1
+#else
+#define _GLIBCXX_CSTDDEF 1
+#endif
+
+#ifndef RINCXX_CSTDDEF_HOST_NAMESPACE
+
 #include "../libc/stddef.h"
 
 namespace std {
@@ -87,5 +100,7 @@ namespace std {
     }
 #endif
 }
+
+#endif /* !RINCXX_CSTDDEF_HOST_NAMESPACE */
 
 #endif /* RINCXX_CSTDDEF_H */
