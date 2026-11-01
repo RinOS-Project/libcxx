@@ -31,20 +31,83 @@ namespace detail {
 #endif
 }
 
-inline void print_write(FILE* stream, string_view output) {
-    if (!stream) print_output_failed(EINVAL);
-    if (output.empty()) return;
+class print_file_lock {
+    FILE* stream_;
 
-    /* One fwrite keeps each formatted result within one stream-lock interval. */
-    errno = 0;
-    const size_t written = fwrite(output.data(), 1, output.size(), stream);
-    if (written != output.size()) print_output_failed(errno);
-}
+public:
+    explicit print_file_lock(FILE* stream) : stream_(stream) {
+        if (!stream_) print_output_failed(EINVAL);
+#if defined(_MSC_VER) && !defined(RIN_FREESTANDING)
+        _lock_file(stream_);
+#else
+        ::flockfile(stream_);
+#endif
+    }
+
+    print_file_lock(const print_file_lock&) = delete;
+    print_file_lock& operator=(const print_file_lock&) = delete;
+
+    ~print_file_lock() {
+#if defined(_MSC_VER) && !defined(RIN_FREESTANDING)
+        _unlock_file(stream_);
+#else
+        ::funlockfile(stream_);
+#endif
+    }
+};
+
+class print_file_output_iterator {
+    FILE* stream_;
+
+public:
+    using iterator_category = output_iterator_tag;
+    using value_type = void;
+    using difference_type = ptrdiff_t;
+    using pointer = void;
+    using reference = void;
+
+    explicit print_file_output_iterator(FILE* stream) : stream_(stream) {}
+
+    print_file_output_iterator& operator=(char character) {
+        errno = 0;
+        if (fputc(static_cast<unsigned char>(character), stream_) == EOF) {
+            print_output_failed(errno);
+        }
+        return *this;
+    }
+
+    print_file_output_iterator& operator*() { return *this; }
+    print_file_output_iterator& operator++() { return *this; }
+    print_file_output_iterator operator++(int) { return *this; }
+};
 
 inline void print_vformat(FILE* stream, string_view format,
                           format_args args) {
-    const string output = vformat(format, args);
-    print_write(stream, string_view(output.data(), output.size()));
+    print_file_lock lock(stream);
+    vformat_to(print_file_output_iterator(stream), format, args);
+}
+
+template<class... Args>
+inline void print_format(FILE* stream, format_string<Args...> format,
+                         Args&&... args) {
+    print_file_lock lock(stream);
+    format_to(print_file_output_iterator(stream), format,
+              std::forward<Args>(args)...);
+}
+
+template<class... Args>
+inline void println_format(FILE* stream, format_string<Args...> format,
+                           Args&&... args) {
+    print_file_lock lock(stream);
+    auto output = format_to(print_file_output_iterator(stream), format,
+                            std::forward<Args>(args)...);
+    *output++ = '\n';
+}
+
+inline void println_newline(FILE* stream) {
+    print_file_lock lock(stream);
+    print_file_output_iterator output(stream);
+    *output++ = '\n';
 }
 
 } /* namespace detail */
@@ -70,8 +133,7 @@ inline void vprint_nonunicode(string_view format, format_args args) {
 
 template<class... Args>
 void print(FILE* stream, format_string<Args...> format, Args&&... args) {
-    const string output = std::format(format, std::forward<Args>(args)...);
-    detail::print_write(stream, string_view(output.data(), output.size()));
+    detail::print_format(stream, format, std::forward<Args>(args)...);
 }
 
 template<class... Args>
@@ -81,13 +143,11 @@ void print(format_string<Args...> format, Args&&... args) {
 
 template<class... Args>
 void println(FILE* stream, format_string<Args...> format, Args&&... args) {
-    string output = std::format(format, std::forward<Args>(args)...);
-    output.push_back('\n');
-    detail::print_write(stream, string_view(output.data(), output.size()));
+    detail::println_format(stream, format, std::forward<Args>(args)...);
 }
 
 inline void println(FILE* stream) {
-    detail::print_write(stream, string_view("\n", 1));
+    detail::println_newline(stream);
 }
 
 template<class... Args>
