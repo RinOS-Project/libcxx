@@ -17,6 +17,12 @@
 #include "limits.h"
 #include "system_error.h"
 
+#if __cplusplus > 202002L
+#define RIN_CHARCONV_CONSTEXPR23 constexpr
+#else
+#define RIN_CHARCONV_CONSTEXPR23 inline
+#endif
+
 /* P0067R5 defines the C++17 charconv surface.  P2497R0 adds the explicit
  * result conversion in C++26 and bumps the representative feature-test
  * macro.  GCC 13's C++2b mode still reports __cplusplus == 202100L, so the
@@ -145,7 +151,8 @@ inline constexpr char digit_pairs[] =
 inline constexpr char digit_chars[] = "0123456789abcdefghijklmnopqrstuvwxyz";
 
 template<typename T>
-inline to_chars_result to_chars_unsigned(char* first, char* last, T value, int base) {
+RIN_CHARCONV_CONSTEXPR23 to_chars_result to_chars_unsigned(
+    char* first, char* last, T value, int base) {
     if (base < 2 || base > 36) {
         return {first, errc::invalid_argument};
     }
@@ -192,7 +199,8 @@ inline to_chars_result to_chars_unsigned(char* first, char* last, T value, int b
 }
 
 template<typename T>
-inline to_chars_result to_chars_signed(char* first, char* last, T value, int base) {
+RIN_CHARCONV_CONSTEXPR23 to_chars_result to_chars_signed(
+    char* first, char* last, T value, int base) {
     using U = make_unsigned_t<T>;
 
     /* Validate the base before touching caller storage.  In particular, a
@@ -230,47 +238,58 @@ inline to_chars_result to_chars_signed(char* first, char* last, T value, int bas
 } // namespace detail
 
 /* Integer to_chars overloads */
-inline to_chars_result to_chars(char* first, char* last, char value, int base = 10) {
+RIN_CHARCONV_CONSTEXPR23 to_chars_result to_chars(
+    char* first, char* last, char value, int base = 10) {
     return detail::to_chars_signed(first, last, value, base);
 }
 
-inline to_chars_result to_chars(char* first, char* last, signed char value, int base = 10) {
+RIN_CHARCONV_CONSTEXPR23 to_chars_result to_chars(
+    char* first, char* last, signed char value, int base = 10) {
     return detail::to_chars_signed(first, last, value, base);
 }
 
-inline to_chars_result to_chars(char* first, char* last, unsigned char value, int base = 10) {
+RIN_CHARCONV_CONSTEXPR23 to_chars_result to_chars(
+    char* first, char* last, unsigned char value, int base = 10) {
     return detail::to_chars_unsigned(first, last, value, base);
 }
 
-inline to_chars_result to_chars(char* first, char* last, short value, int base = 10) {
+RIN_CHARCONV_CONSTEXPR23 to_chars_result to_chars(
+    char* first, char* last, short value, int base = 10) {
     return detail::to_chars_signed(first, last, value, base);
 }
 
-inline to_chars_result to_chars(char* first, char* last, unsigned short value, int base = 10) {
+RIN_CHARCONV_CONSTEXPR23 to_chars_result to_chars(
+    char* first, char* last, unsigned short value, int base = 10) {
     return detail::to_chars_unsigned(first, last, value, base);
 }
 
-inline to_chars_result to_chars(char* first, char* last, int value, int base = 10) {
+RIN_CHARCONV_CONSTEXPR23 to_chars_result to_chars(
+    char* first, char* last, int value, int base = 10) {
     return detail::to_chars_signed(first, last, value, base);
 }
 
-inline to_chars_result to_chars(char* first, char* last, unsigned int value, int base = 10) {
+RIN_CHARCONV_CONSTEXPR23 to_chars_result to_chars(
+    char* first, char* last, unsigned int value, int base = 10) {
     return detail::to_chars_unsigned(first, last, value, base);
 }
 
-inline to_chars_result to_chars(char* first, char* last, long value, int base = 10) {
+RIN_CHARCONV_CONSTEXPR23 to_chars_result to_chars(
+    char* first, char* last, long value, int base = 10) {
     return detail::to_chars_signed(first, last, value, base);
 }
 
-inline to_chars_result to_chars(char* first, char* last, unsigned long value, int base = 10) {
+RIN_CHARCONV_CONSTEXPR23 to_chars_result to_chars(
+    char* first, char* last, unsigned long value, int base = 10) {
     return detail::to_chars_unsigned(first, last, value, base);
 }
 
-inline to_chars_result to_chars(char* first, char* last, long long value, int base = 10) {
+RIN_CHARCONV_CONSTEXPR23 to_chars_result to_chars(
+    char* first, char* last, long long value, int base = 10) {
     return detail::to_chars_signed(first, last, value, base);
 }
 
-inline to_chars_result to_chars(char* first, char* last, unsigned long long value, int base = 10) {
+RIN_CHARCONV_CONSTEXPR23 to_chars_result to_chars(
+    char* first, char* last, unsigned long long value, int base = 10) {
     return detail::to_chars_unsigned(first, last, value, base);
 }
 
@@ -295,7 +314,8 @@ inline constexpr int char_to_digit(char c, int base) {
 }
 
 template<typename T>
-inline from_chars_result from_chars_unsigned(const char* first, const char* last, T& value, int base) {
+RIN_CHARCONV_CONSTEXPR23 from_chars_result from_chars_unsigned(
+    const char* first, const char* last, T& value, int base) {
     if (base < 2 || base > 36 || first == last) {
         return {first, errc::invalid_argument};
     }
@@ -333,7 +353,8 @@ inline from_chars_result from_chars_unsigned(const char* first, const char* last
 }
 
 template<typename T>
-inline from_chars_result from_chars_signed(const char* first, const char* last, T& value, int base) {
+RIN_CHARCONV_CONSTEXPR23 from_chars_result from_chars_signed(
+    const char* first, const char* last, T& value, int base) {
     if (first == last) {
         return {first, errc::invalid_argument};
     }
@@ -381,47 +402,58 @@ inline from_chars_result from_chars_signed(const char* first, const char* last, 
 } // namespace detail
 
 /* Integer from_chars overloads */
-inline from_chars_result from_chars(const char* first, const char* last, char& value, int base = 10) {
+RIN_CHARCONV_CONSTEXPR23 from_chars_result from_chars(
+    const char* first, const char* last, char& value, int base = 10) {
     return detail::from_chars_signed(first, last, value, base);
 }
 
-inline from_chars_result from_chars(const char* first, const char* last, signed char& value, int base = 10) {
+RIN_CHARCONV_CONSTEXPR23 from_chars_result from_chars(
+    const char* first, const char* last, signed char& value, int base = 10) {
     return detail::from_chars_signed(first, last, value, base);
 }
 
-inline from_chars_result from_chars(const char* first, const char* last, unsigned char& value, int base = 10) {
+RIN_CHARCONV_CONSTEXPR23 from_chars_result from_chars(
+    const char* first, const char* last, unsigned char& value, int base = 10) {
     return detail::from_chars_unsigned(first, last, value, base);
 }
 
-inline from_chars_result from_chars(const char* first, const char* last, short& value, int base = 10) {
+RIN_CHARCONV_CONSTEXPR23 from_chars_result from_chars(
+    const char* first, const char* last, short& value, int base = 10) {
     return detail::from_chars_signed(first, last, value, base);
 }
 
-inline from_chars_result from_chars(const char* first, const char* last, unsigned short& value, int base = 10) {
+RIN_CHARCONV_CONSTEXPR23 from_chars_result from_chars(
+    const char* first, const char* last, unsigned short& value, int base = 10) {
     return detail::from_chars_unsigned(first, last, value, base);
 }
 
-inline from_chars_result from_chars(const char* first, const char* last, int& value, int base = 10) {
+RIN_CHARCONV_CONSTEXPR23 from_chars_result from_chars(
+    const char* first, const char* last, int& value, int base = 10) {
     return detail::from_chars_signed(first, last, value, base);
 }
 
-inline from_chars_result from_chars(const char* first, const char* last, unsigned int& value, int base = 10) {
+RIN_CHARCONV_CONSTEXPR23 from_chars_result from_chars(
+    const char* first, const char* last, unsigned int& value, int base = 10) {
     return detail::from_chars_unsigned(first, last, value, base);
 }
 
-inline from_chars_result from_chars(const char* first, const char* last, long& value, int base = 10) {
+RIN_CHARCONV_CONSTEXPR23 from_chars_result from_chars(
+    const char* first, const char* last, long& value, int base = 10) {
     return detail::from_chars_signed(first, last, value, base);
 }
 
-inline from_chars_result from_chars(const char* first, const char* last, unsigned long& value, int base = 10) {
+RIN_CHARCONV_CONSTEXPR23 from_chars_result from_chars(
+    const char* first, const char* last, unsigned long& value, int base = 10) {
     return detail::from_chars_unsigned(first, last, value, base);
 }
 
-inline from_chars_result from_chars(const char* first, const char* last, long long& value, int base = 10) {
+RIN_CHARCONV_CONSTEXPR23 from_chars_result from_chars(
+    const char* first, const char* last, long long& value, int base = 10) {
     return detail::from_chars_signed(first, last, value, base);
 }
 
-inline from_chars_result from_chars(const char* first, const char* last, unsigned long long& value, int base = 10) {
+RIN_CHARCONV_CONSTEXPR23 from_chars_result from_chars(
+    const char* first, const char* last, unsigned long long& value, int base = 10) {
     return detail::from_chars_unsigned(first, last, value, base);
 }
 
@@ -2308,6 +2340,8 @@ inline wstring to_wstring(long double value) {
 
 } /* namespace std */
 #endif
+
+#undef RIN_CHARCONV_CONSTEXPR23
 
 #endif /* defined(__cplusplus) && __cplusplus >= 201703L */
 #endif /* RINCXX_CHARCONV_H */
