@@ -263,7 +263,7 @@ private:
         if (new_cap > limit)
             detail::vector_length_failure();
 
-        size_type cap = 4;
+        size_type cap = limit < 4 ? limit : 4;
         if (m_capacity != 0) {
             cap = m_capacity > limit / 2 ? limit : m_capacity * 2;
         }
@@ -1219,6 +1219,593 @@ public:
     }
 };
 
+namespace detail {
+
+/* A vector<bool> iterator is not contiguous.  The tag gives the C++23 range
+ * formatter a narrow way to format its proxy as the bool value it denotes. */
+struct vector_bool_reference_tag {};
+
+class vector_bool_reference : public vector_bool_reference_tag {
+    using word_type = unsigned long long;
+    word_type* word_;
+    word_type mask_;
+
+public:
+    vector_bool_reference() noexcept : word_(nullptr), mask_(0) {}
+    vector_bool_reference(const vector_bool_reference&) noexcept = default;
+    vector_bool_reference(word_type* word, word_type mask) noexcept
+        : word_(word), mask_(mask) {}
+
+    operator bool() const noexcept {
+        return word_ && ((*word_ & mask_) != 0);
+    }
+
+    vector_bool_reference& operator=(bool value) noexcept {
+        if (value) *word_ |= mask_;
+        else *word_ &= ~mask_;
+        return *this;
+    }
+
+    vector_bool_reference& operator=(const vector_bool_reference& value)
+        noexcept {
+        return *this = static_cast<bool>(value);
+    }
+
+    void flip() noexcept { *word_ ^= mask_; }
+
+    friend void swap(vector_bool_reference left,
+                     vector_bool_reference right) noexcept {
+        const bool value = static_cast<bool>(left);
+        left = static_cast<bool>(right);
+        right = value;
+    }
+};
+
+} /* namespace detail */
+
+/* The standard vector<bool> specialization stores one bit per element.  Its
+ * word vector keeps the allocator's rebind and allocation machinery while
+ * the proxy iterator preserves writable random-access semantics. */
+template<typename Allocator>
+class vector<bool, Allocator> {
+public:
+    using value_type = bool;
+    using allocator_type = Allocator;
+    using alloc_traits = allocator_traits<Allocator>;
+    using size_type = typename alloc_traits::size_type;
+    using difference_type = ptrdiff_t;
+    using reference = detail::vector_bool_reference;
+    using const_reference = bool;
+    using pointer = void;
+    using const_pointer = void;
+
+private:
+    using word_type = unsigned long long;
+    static constexpr size_type word_bits = sizeof(word_type) * 8u;
+    using word_allocator = typename alloc_traits::template rebind_alloc<word_type>;
+    using word_vector = vector<word_type, word_allocator>;
+    using word_traits = allocator_traits<word_allocator>;
+
+    Allocator m_allocator;
+    word_vector m_words;
+    size_type m_size;
+
+    static size_type words_for(size_type bit_count) noexcept {
+        return bit_count / word_bits +
+            static_cast<size_type>((bit_count % word_bits) != 0);
+    }
+
+    static word_type bit_mask(size_type index) noexcept {
+        return word_type(1) << (index % word_bits);
+    }
+
+    bool read_bit(size_type index) const noexcept {
+        return (m_words[index / word_bits] & bit_mask(index)) != 0;
+    }
+
+    void write_bit(size_type index, bool value) noexcept {
+        word_type& word = m_words[index / word_bits];
+        const word_type mask = bit_mask(index);
+        if (value) word |= mask;
+        else word &= ~mask;
+    }
+
+    void clear_padding() noexcept {
+        const size_type remainder = m_size % word_bits;
+        if (remainder != 0 && !m_words.empty())
+            m_words.back() &= (word_type(1) << remainder) - 1;
+    }
+
+    size_type checked_add(size_type extra) const {
+        const size_type limit = max_size();
+        if (extra > limit - m_size) detail::vector_length_failure();
+        return m_size + extra;
+    }
+
+    template<bool IsConst>
+    class bit_iterator {
+        template<bool> friend class bit_iterator;
+        using word_pointer = typename conditional<IsConst,
+            const word_type*, word_type*>::type;
+        word_pointer words_;
+        size_type index_;
+
+        template<bool Const = IsConst>
+        typename enable_if<!Const, detail::vector_bool_reference>::type
+        dereference() const {
+            return detail::vector_bool_reference(
+                words_ + index_ / word_bits, bit_mask(index_));
+        }
+
+        template<bool Const = IsConst>
+        typename enable_if<Const, bool>::type dereference() const {
+            return (words_[index_ / word_bits] & bit_mask(index_)) != 0;
+        }
+
+    public:
+        using iterator_category = random_access_iterator_tag;
+#if __cplusplus >= 202002L
+        using iterator_concept = random_access_iterator_tag;
+#endif
+        using value_type = bool;
+        using difference_type = ptrdiff_t;
+        using pointer = void;
+        using reference = typename conditional<IsConst, bool,
+            detail::vector_bool_reference>::type;
+
+        bit_iterator() noexcept : words_(nullptr), index_(0) {}
+        bit_iterator(word_pointer words, size_type index) noexcept
+            : words_(words), index_(index) {}
+
+        template<bool Other,
+                 typename enable_if<IsConst && !Other, int>::type = 0>
+        bit_iterator(const bit_iterator<Other>& other) noexcept
+            : words_(other.words_), index_(other.index_) {}
+
+        word_pointer base() const noexcept { return words_; }
+        size_type position() const noexcept { return index_; }
+
+        reference operator*() const {
+            return dereference<IsConst>();
+        }
+
+        reference operator[](difference_type offset) const {
+            return *(*this + offset);
+        }
+
+        bit_iterator& operator++() noexcept { ++index_; return *this; }
+        bit_iterator operator++(int) noexcept {
+            bit_iterator previous(*this); ++*this; return previous;
+        }
+        bit_iterator& operator--() noexcept { --index_; return *this; }
+        bit_iterator operator--(int) noexcept {
+            bit_iterator previous(*this); --*this; return previous;
+        }
+        bit_iterator& operator+=(difference_type offset) noexcept {
+            index_ = static_cast<size_type>(
+                static_cast<difference_type>(index_) + offset);
+            return *this;
+        }
+        bit_iterator& operator-=(difference_type offset) noexcept {
+            return *this += -offset;
+        }
+        bit_iterator operator+(difference_type offset) const noexcept {
+            bit_iterator result(*this); result += offset; return result;
+        }
+        bit_iterator operator-(difference_type offset) const noexcept {
+            bit_iterator result(*this); result -= offset; return result;
+        }
+
+        template<bool Other>
+        difference_type operator-(const bit_iterator<Other>& other) const {
+            if (words_ != other.words_)
+                detail::vector_iterator_contract_fail();
+            return static_cast<difference_type>(index_) -
+                   static_cast<difference_type>(other.index_);
+        }
+        template<bool Other>
+        bool operator==(const bit_iterator<Other>& other) const noexcept {
+            return words_ == other.words_ && index_ == other.index_;
+        }
+        template<bool Other>
+        bool operator!=(const bit_iterator<Other>& other) const noexcept {
+            return !(*this == other);
+        }
+        template<bool Other>
+        bool operator<(const bit_iterator<Other>& other) const noexcept {
+            return index_ < other.index_;
+        }
+        template<bool Other>
+        bool operator>(const bit_iterator<Other>& other) const noexcept {
+            return other < *this;
+        }
+        template<bool Other>
+        bool operator<=(const bit_iterator<Other>& other) const noexcept {
+            return !(other < *this);
+        }
+        template<bool Other>
+        bool operator>=(const bit_iterator<Other>& other) const noexcept {
+            return !(*this < other);
+        }
+        friend bit_iterator operator+(difference_type offset,
+                                     bit_iterator value) noexcept {
+            value += offset; return value;
+        }
+    };
+
+public:
+    using iterator = bit_iterator<false>;
+    using const_iterator = bit_iterator<true>;
+    using reverse_iterator = std::reverse_iterator<iterator>;
+    using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+
+private:
+    template<bool IsConst>
+    size_type iterator_index(const bit_iterator<IsConst>& position) const {
+        if (position.base() != m_words.data() || position.position() > m_size)
+            detail::vector_iterator_contract_fail();
+        return position.position();
+    }
+
+    iterator iterator_at(size_type index) noexcept {
+        return iterator(m_words.data(), index);
+    }
+
+    const_iterator iterator_at(size_type index) const noexcept {
+        return const_iterator(m_words.data(), index);
+    }
+
+    void resize_bits(size_type count, bool value) {
+        if (count > max_size()) detail::vector_length_failure();
+        if (count > m_size) {
+            m_words.resize(words_for(count), word_type(0));
+            const size_type original_size = m_size;
+            m_size = count;
+            for (size_type index = original_size; index < count; ++index)
+                write_bit(index, value);
+        } else if (count < m_size) {
+            m_size = count;
+            clear_padding();
+            m_words.resize(words_for(count));
+        }
+    }
+
+    template<typename InputIt, typename Sentinel>
+    iterator insert_range_impl(const_iterator position, InputIt first,
+                               Sentinel last) {
+        const size_type index = iterator_index(position);
+        vector staged(first, last, m_allocator);
+        const size_type added = staged.size();
+        const size_type new_size = checked_add(added);
+        if (added == 0) return iterator_at(index);
+        reserve(new_size);
+        resize_bits(new_size, false);
+        for (size_type cursor = new_size; cursor > index + added; --cursor)
+            write_bit(cursor - 1, read_bit(cursor - 1 - added));
+        for (size_type offset = 0; offset < added; ++offset)
+            write_bit(index + offset, staged.read_bit(offset));
+        return iterator_at(index);
+    }
+
+    void copy_assign(const vector& other, true_type) {
+        vector replacement(other, other.m_allocator);
+        m_allocator = other.m_allocator;
+        m_words.~word_vector();
+        ::new (static_cast<void*>(&m_words)) word_vector(
+            std::move(replacement.m_words));
+        m_size = other.m_size;
+    }
+
+    void copy_assign(const vector& other, false_type) {
+        vector replacement(other, m_allocator);
+        m_words = std::move(replacement.m_words);
+        m_size = replacement.m_size;
+    }
+
+    void move_assign(vector& other, true_type) {
+        m_allocator = std::move(other.m_allocator);
+        m_words.~word_vector();
+        ::new (static_cast<void*>(&m_words)) word_vector(
+            std::move(other.m_words));
+        m_size = other.m_size;
+        other.m_size = 0;
+    }
+
+    void move_assign(vector& other, false_type) {
+        if (m_allocator == other.m_allocator) {
+            m_words = std::move(other.m_words);
+            m_size = other.m_size;
+            other.m_size = 0;
+        } else {
+            vector replacement(other, m_allocator);
+            m_words = std::move(replacement.m_words);
+            m_size = replacement.m_size;
+            other.clear();
+        }
+    }
+
+public:
+    vector() : m_allocator(), m_words(word_allocator(m_allocator)), m_size(0) {}
+    explicit vector(const Allocator& alloc)
+        : m_allocator(alloc), m_words(word_allocator(m_allocator)), m_size(0) {}
+
+    explicit vector(size_type count)
+        : vector() { resize_bits(count, false); }
+    vector(size_type count, const Allocator& alloc)
+        : vector(alloc) { resize_bits(count, false); }
+    vector(size_type count, const bool& value)
+        : vector() { resize_bits(count, value); }
+    vector(size_type count, const bool& value, const Allocator& alloc)
+        : vector(alloc) { resize_bits(count, value); }
+
+    vector(const vector& other)
+        : vector(other, alloc_traits::select_on_container_copy_construction(
+                            other.m_allocator)) {}
+    vector(const vector& other, const Allocator& alloc)
+        : m_allocator(alloc),
+          m_words(other.m_words.begin(), other.m_words.end(),
+                  word_allocator(m_allocator)),
+          m_size(other.m_size) {}
+
+    vector(vector&& other) noexcept
+        : m_allocator(std::move(other.m_allocator)),
+          m_words(std::move(other.m_words)), m_size(other.m_size) {
+        other.m_size = 0;
+    }
+    vector(vector&& other, const Allocator& alloc)
+        : vector(alloc) {
+        if (m_allocator == other.m_allocator) {
+            m_words = std::move(other.m_words);
+            m_size = other.m_size;
+            other.m_size = 0;
+        } else {
+            for (size_type index = 0; index < other.m_size; ++index)
+                push_back(other.read_bit(index));
+        }
+    }
+
+    vector(initializer_list<bool> values) : vector() {
+        reserve(values.size());
+        for (bool value : values) push_back(value);
+    }
+    vector(initializer_list<bool> values, const Allocator& alloc)
+        : vector(alloc) {
+        reserve(values.size());
+        for (bool value : values) push_back(value);
+    }
+
+    template<typename InputIt, typename Sentinel,
+             typename = typename enable_if<!is_integral<InputIt>::value>::type>
+    vector(InputIt first, Sentinel last) : vector() {
+        for (; first != last; ++first) push_back(static_cast<bool>(*first));
+    }
+    template<typename InputIt, typename Sentinel,
+             typename = typename enable_if<!is_integral<InputIt>::value>::type>
+    vector(InputIt first, Sentinel last, const Allocator& alloc)
+        : vector(alloc) {
+        for (; first != last; ++first) push_back(static_cast<bool>(*first));
+    }
+
+#if __cplusplus > 202002L
+    template<class R>
+        requires detail::container_compatible_range<R, bool>
+    vector(from_range_t, R&& range, const Allocator& alloc = Allocator())
+        : vector(alloc) {
+        for (auto&& value : range) push_back(static_cast<bool>(value));
+    }
+#endif
+
+    vector& operator=(const vector& other) {
+        if (this != &other)
+            copy_assign(other, typename alloc_traits::
+                propagate_on_container_copy_assignment());
+        return *this;
+    }
+    vector& operator=(vector&& other) {
+        if (this != &other)
+        move_assign(other, integral_constant<bool,
+                alloc_traits::propagate_on_container_move_assignment::value>());
+        return *this;
+    }
+    vector& operator=(initializer_list<bool> values) {
+        assign(values.begin(), values.end());
+        return *this;
+    }
+
+    reference operator[](size_type index) noexcept {
+        return reference(m_words.data() + index / word_bits, bit_mask(index));
+    }
+    const_reference operator[](size_type index) const noexcept {
+        return read_bit(index);
+    }
+    reference at(size_type index) {
+        if (index >= m_size) detail::vector_at_contract_fail();
+        return (*this)[index];
+    }
+    const_reference at(size_type index) const {
+        if (index >= m_size) detail::vector_at_contract_fail();
+        return read_bit(index);
+    }
+    reference front() noexcept { return (*this)[0]; }
+    const_reference front() const noexcept { return read_bit(0); }
+    reference back() noexcept { return (*this)[m_size - 1]; }
+    const_reference back() const noexcept { return read_bit(m_size - 1); }
+
+    void data() = delete;
+    void data() const = delete;
+    allocator_type get_allocator() const noexcept { return m_allocator; }
+
+    iterator begin() noexcept { return iterator(m_words.data(), 0); }
+    const_iterator begin() const noexcept { return iterator_at(0); }
+    const_iterator cbegin() const noexcept { return begin(); }
+    iterator end() noexcept { return iterator(m_words.data(), m_size); }
+    const_iterator end() const noexcept { return iterator_at(m_size); }
+    const_iterator cend() const noexcept { return end(); }
+    reverse_iterator rbegin() noexcept { return reverse_iterator(end()); }
+    const_reverse_iterator rbegin() const noexcept {
+        return const_reverse_iterator(end());
+    }
+    reverse_iterator rend() noexcept { return reverse_iterator(begin()); }
+    const_reverse_iterator rend() const noexcept {
+        return const_reverse_iterator(begin());
+    }
+
+    bool empty() const noexcept { return m_size == 0; }
+    size_type size() const noexcept { return m_size; }
+    size_type capacity() const noexcept {
+        const size_type word_capacity = m_words.capacity();
+        const size_type size_limit = static_cast<size_type>(-1);
+        const size_type packed_capacity = word_capacity > size_limit / word_bits
+            ? size_limit : word_capacity * word_bits;
+        const size_type max_capacity = max_size();
+        return packed_capacity < max_capacity ? packed_capacity : max_capacity;
+    }
+    size_type max_size() const noexcept {
+        const size_type size_limit = static_cast<size_type>(-1);
+        const size_type difference_limit = size_limit >> 1;
+        const size_type allocator_limit = alloc_traits::max_size(m_allocator);
+        const size_type word_limit = word_traits::max_size(m_words.get_allocator());
+        const size_type packed_limit = word_limit > size_limit / word_bits
+            ? size_limit : word_limit * word_bits;
+        size_type result = allocator_limit < packed_limit
+            ? allocator_limit : packed_limit;
+        if (result > difference_limit) result = difference_limit;
+        return result;
+    }
+    void reserve(size_type count) {
+        if (count > max_size()) detail::vector_length_failure();
+        m_words.reserve(words_for(count));
+    }
+    void shrink_to_fit() { m_words.shrink_to_fit(); }
+
+    void clear() noexcept { m_words.clear(); m_size = 0; }
+    void push_back(bool value) {
+        const size_type new_size = checked_add(1);
+        if (new_size % word_bits == 1u) m_words.push_back(word_type(0));
+        write_bit(m_size, value);
+        m_size = new_size;
+    }
+    template<typename... Args>
+    reference emplace_back(Args&&... args) {
+        const bool value(std::forward<Args>(args)...);
+        push_back(value);
+        return back();
+    }
+    void pop_back() noexcept {
+        if (m_size != 0) resize_bits(m_size - 1, false);
+    }
+    void resize(size_type count) { resize_bits(count, false); }
+    void resize(size_type count, bool value) { resize_bits(count, value); }
+    void flip() noexcept {
+        for (size_type index = 0; index < m_words.size(); ++index)
+            m_words[index] = ~m_words[index];
+        clear_padding();
+    }
+
+#if __cplusplus > 202002L
+    template<class R>
+        requires detail::container_compatible_range<R, bool>
+    void append_range(R&& range) {
+        vector staged(from_range, std::forward<R>(range), m_allocator);
+        insert_range_impl(cend(), staged.begin(), staged.end());
+    }
+#endif
+
+    template<typename... Args>
+    iterator emplace(const_iterator position, Args&&... args) {
+        const bool value(std::forward<Args>(args)...);
+        return insert(position, value);
+    }
+    iterator insert(const_iterator position, bool value) {
+        const size_type index = iterator_index(position);
+        const size_type new_size = checked_add(1);
+        reserve(new_size);
+        resize_bits(new_size, false);
+        for (size_type cursor = new_size - 1; cursor > index; --cursor)
+            write_bit(cursor, read_bit(cursor - 1));
+        write_bit(index, value);
+        return iterator_at(index);
+    }
+    iterator insert(const_iterator position, size_type count,
+                    const bool& value) {
+        const size_type index = iterator_index(position);
+        const size_type new_size = checked_add(count);
+        if (count == 0) return iterator_at(index);
+        const bool selected = value;
+        reserve(new_size);
+        resize_bits(new_size, false);
+        for (size_type cursor = new_size; cursor > index + count; --cursor)
+            write_bit(cursor - 1, read_bit(cursor - 1 - count));
+        for (size_type offset = 0; offset < count; ++offset)
+            write_bit(index + offset, selected);
+        return iterator_at(index);
+    }
+    template<typename InputIt, typename Sentinel,
+             typename = typename enable_if<!is_integral<InputIt>::value>::type>
+    iterator insert(const_iterator position, InputIt first, Sentinel last) {
+        return insert_range_impl(position, first, last);
+    }
+    iterator insert(const_iterator position, initializer_list<bool> values) {
+        return insert(position, values.begin(), values.end());
+    }
+    iterator erase(const_iterator position) {
+        const size_type index = iterator_index(position);
+        if (index == m_size) return end();
+        return erase(position, position + 1);
+    }
+    iterator erase(const_iterator first, const_iterator last) {
+        const size_type first_index = iterator_index(first);
+        const size_type last_index = iterator_index(last);
+        if (first_index > last_index) detail::vector_iterator_contract_fail();
+        const size_type removed = last_index - first_index;
+        for (size_type index = first_index; index + removed < m_size; ++index)
+            write_bit(index, read_bit(index + removed));
+        resize_bits(m_size - removed, false);
+        return iterator_at(first_index);
+    }
+
+    template<typename InputIt, typename Sentinel,
+             typename = typename enable_if<!is_integral<InputIt>::value>::type>
+    void assign(InputIt first, Sentinel last) {
+        vector replacement(first, last, m_allocator);
+        m_words = std::move(replacement.m_words);
+        m_size = replacement.m_size;
+    }
+    void assign(size_type count, const bool& value) {
+        vector replacement(count, value, m_allocator);
+        m_words = std::move(replacement.m_words);
+        m_size = replacement.m_size;
+    }
+    void assign(initializer_list<bool> values) {
+        assign(values.begin(), values.end());
+    }
+
+#if __cplusplus > 202002L
+    template<class R>
+        requires detail::container_compatible_range<R, bool>
+    iterator insert_range(const_iterator position, R&& range) {
+        vector staged(from_range, std::forward<R>(range), m_allocator);
+        return insert_range_impl(position, staged.begin(), staged.end());
+    }
+    template<class R>
+        requires detail::container_compatible_range<R, bool>
+    void assign_range(R&& range) {
+        vector replacement(from_range, std::forward<R>(range), m_allocator);
+        m_words = std::move(replacement.m_words);
+        m_size = replacement.m_size;
+    }
+#endif
+
+    void swap(vector& other) noexcept(
+        alloc_traits::propagate_on_container_swap::value ||
+        alloc_traits::is_always_equal::value) {
+        if (alloc_traits::propagate_on_container_swap::value)
+            detail::vector_exchange(m_allocator, other.m_allocator);
+        m_words.swap(other.m_words);
+        detail::vector_exchange(m_size, other.m_size);
+    }
+};
+
 #if __cplusplus > 202002L
 template<ranges::input_range R,
          class Allocator = allocator<ranges::range_value_t<R>>>
@@ -1362,4 +1949,5 @@ struct hash<vector<bool, Alloc>> {
 } /* namespace std */
 
 #endif /* __cplusplus */
+
 #endif /* RINCXX_VECTOR_H */

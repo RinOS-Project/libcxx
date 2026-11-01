@@ -15,6 +15,7 @@
 #include "unordered_set.h"
 #include "queue.h"
 #include "stack.h"
+#include "vector.h"
 
 namespace std {
 
@@ -533,6 +534,19 @@ public:
 };
 
 } /* namespace detail */
+
+template<typename CharT>
+struct formatter<detail::vector_bool_reference, CharT>
+    : formatter<bool, CharT> {
+    using base_type = formatter<bool, CharT>;
+
+    template<typename Context>
+    auto format(const detail::vector_bool_reference& value,
+                Context& context) const {
+        return static_cast<const base_type&>(*this).format(
+            static_cast<bool>(value), context);
+    }
+};
 
 template<ranges::input_range R, typename CharT>
     requires (format_kind<R> != range_format::disabled) &&
