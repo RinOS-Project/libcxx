@@ -10,6 +10,14 @@
 #include "climits.h"
 #include "cfloat.h"
 
+#if !defined(LDBL_TRUE_MIN) && defined(__LDBL_DENORM_MIN__)
+#define RINCXX_LDBL_TRUE_MIN __LDBL_DENORM_MIN__
+#elif defined(LDBL_TRUE_MIN)
+#define RINCXX_LDBL_TRUE_MIN LDBL_TRUE_MIN
+#else
+#define RINCXX_LDBL_TRUE_MIN (LDBL_MIN * LDBL_EPSILON)
+#endif
+
 #ifdef __cplusplus
 
 namespace std {
@@ -636,7 +644,9 @@ public:
     static constexpr long double infinity() noexcept { return __builtin_huge_vall(); }
     static constexpr long double quiet_NaN() noexcept { return __builtin_nanl(""); }
     static constexpr long double signaling_NaN() noexcept { return __builtin_nansl(""); }
-    static constexpr long double denorm_min() noexcept { return LDBL_TRUE_MIN; }
+    static constexpr long double denorm_min() noexcept {
+        return RINCXX_LDBL_TRUE_MIN;
+    }
     static constexpr bool is_iec559 = true;
     static constexpr bool is_bounded = true;
     static constexpr bool is_modulo = false;
@@ -780,6 +790,8 @@ RIN_DEFINE_NL_ARITHMETIC(long double)
 #endif
 
 } /* namespace std */
+
+#undef RINCXX_LDBL_TRUE_MIN
 
 #endif /* __cplusplus */
 #endif /* RINCXX_LIMITS_H */

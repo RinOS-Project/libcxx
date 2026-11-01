@@ -1327,6 +1327,7 @@ private:
         template<bool> friend class bit_iterator;
         using word_pointer = typename conditional<IsConst,
             const word_type*, word_type*>::type;
+        const vector* owner_;
         word_pointer words_;
         size_type index_;
 
@@ -1353,15 +1354,17 @@ private:
         using reference = typename conditional<IsConst, bool,
             detail::vector_bool_reference>::type;
 
-        bit_iterator() noexcept : words_(nullptr), index_(0) {}
-        bit_iterator(word_pointer words, size_type index) noexcept
-            : words_(words), index_(index) {}
+        bit_iterator() noexcept : owner_(nullptr), words_(nullptr), index_(0) {}
+        bit_iterator(const vector* owner, word_pointer words,
+                     size_type index) noexcept
+            : owner_(owner), words_(words), index_(index) {}
 
         template<bool Other,
                  typename enable_if<IsConst && !Other, int>::type = 0>
         bit_iterator(const bit_iterator<Other>& other) noexcept
-            : words_(other.words_), index_(other.index_) {}
+            : owner_(other.owner_), words_(other.words_), index_(other.index_) {}
 
+        const vector* owner() const noexcept { return owner_; }
         word_pointer base() const noexcept { return words_; }
         size_type position() const noexcept { return index_; }
 
@@ -1398,14 +1401,15 @@ private:
 
         template<bool Other>
         difference_type operator-(const bit_iterator<Other>& other) const {
-            if (words_ != other.words_)
+            if (owner_ != other.owner_ || words_ != other.words_)
                 detail::vector_iterator_contract_fail();
             return static_cast<difference_type>(index_) -
                    static_cast<difference_type>(other.index_);
         }
         template<bool Other>
         bool operator==(const bit_iterator<Other>& other) const noexcept {
-            return words_ == other.words_ && index_ == other.index_;
+            return owner_ == other.owner_ && words_ == other.words_ &&
+                   index_ == other.index_;
         }
         template<bool Other>
         bool operator!=(const bit_iterator<Other>& other) const noexcept {
@@ -1442,17 +1446,18 @@ public:
 private:
     template<bool IsConst>
     size_type iterator_index(const bit_iterator<IsConst>& position) const {
-        if (position.base() != m_words.data() || position.position() > m_size)
+        if (position.owner() != this || position.base() != m_words.data() ||
+            position.position() > m_size)
             detail::vector_iterator_contract_fail();
         return position.position();
     }
 
     iterator iterator_at(size_type index) noexcept {
-        return iterator(m_words.data(), index);
+        return iterator(this, m_words.data(), index);
     }
 
     const_iterator iterator_at(size_type index) const noexcept {
-        return const_iterator(m_words.data(), index);
+        return const_iterator(this, m_words.data(), index);
     }
 
     void resize_bits(size_type count, bool value) {
@@ -1635,10 +1640,10 @@ public:
     void data() const = delete;
     allocator_type get_allocator() const noexcept { return m_allocator; }
 
-    iterator begin() noexcept { return iterator(m_words.data(), 0); }
+    iterator begin() noexcept { return iterator(this, m_words.data(), 0); }
     const_iterator begin() const noexcept { return iterator_at(0); }
     const_iterator cbegin() const noexcept { return begin(); }
-    iterator end() noexcept { return iterator(m_words.data(), m_size); }
+    iterator end() noexcept { return iterator(this, m_words.data(), m_size); }
     const_iterator end() const noexcept { return iterator_at(m_size); }
     const_iterator cend() const noexcept { return end(); }
     reverse_iterator rbegin() noexcept { return reverse_iterator(end()); }
@@ -1648,6 +1653,12 @@ public:
     reverse_iterator rend() noexcept { return reverse_iterator(begin()); }
     const_reverse_iterator rend() const noexcept {
         return const_reverse_iterator(begin());
+    }
+    const_reverse_iterator crbegin() const noexcept {
+        return const_reverse_iterator(cend());
+    }
+    const_reverse_iterator crend() const noexcept {
+        return const_reverse_iterator(cbegin());
     }
 
     bool empty() const noexcept { return m_size == 0; }

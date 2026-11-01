@@ -360,9 +360,10 @@ struct __algorithm_iterator_value_predicate {
 /* 挿入ソート（小規模向け） */
 template<typename RandomIt, typename Compare>
 RIN_ALGORITHM_CONSTEXPR14 void insertion_sort(RandomIt first, RandomIt last, Compare comp) {
+    using value_type = typename iterator_traits<RandomIt>::value_type;
     if (first == last) return;
     for (RandomIt i = first + 1; i != last; ++i) {
-        auto key = std::move(*i);
+        value_type key = static_cast<value_type>(std::move(*i));
         RandomIt j = i;
         while (j != first && comp(key, *(j - 1))) {
             *j = std::move(*(j - 1));

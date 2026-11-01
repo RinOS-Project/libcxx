@@ -7849,9 +7849,11 @@ struct generator_valid<F, void_t<decltype(std::invoke(declval<F&>()))>>
 template<typename I1, typename I2, typename = void>
 struct swap_ranges_valid : false_type {};
 
+using std::swap;
+
 template<typename I1, typename I2>
 struct swap_ranges_valid<I1, I2,
-    void_t<decltype(std::swap(*declval<I1&>(), *declval<I2&>()))>>
+    void_t<decltype(swap(*declval<I1&>(), *declval<I2&>()))>>
     : true_type {};
 
 } /* namespace detail */
