@@ -36,6 +36,15 @@ struct is_allocator_construction_pair_like<
     : integral_constant<bool,
           tuple_size<remove_cvref_t<Tuple>>::value == 2> {};
 
+template<typename Pair, typename Alloc, typename Source>
+struct allocator_pair_constructor {
+    using pair_type = remove_cv_t<Pair>;
+    const Alloc& alloc;
+    Source& source;
+
+    constexpr operator pair_type() const;
+};
+
 } // namespace detail
 
 template<typename T, typename Alloc, typename... Args,
@@ -48,7 +57,7 @@ constexpr auto uses_allocator_construction_args(
 template<typename T, typename Alloc, typename Tuple1, typename Tuple2,
          typename enable_if<
              detail::is_allocator_construction_pair<remove_cv_t<T>>::value,
-             int>::type>
+             int>::type = 0>
 constexpr auto uses_allocator_construction_args(
     const Alloc& alloc, piecewise_construct_t,
     Tuple1&& first_args, Tuple2&& second_args) noexcept;
@@ -56,14 +65,14 @@ constexpr auto uses_allocator_construction_args(
 template<typename T, typename Alloc,
          typename enable_if<
              detail::is_allocator_construction_pair<remove_cv_t<T>>::value,
-             int>::type>
+             int>::type = 0>
 constexpr auto uses_allocator_construction_args(
     const Alloc& alloc) noexcept;
 
 template<typename T, typename Alloc, typename First, typename Second,
          typename enable_if<
              detail::is_allocator_construction_pair<remove_cv_t<T>>::value,
-             int>::type>
+             int>::type = 0>
 constexpr auto uses_allocator_construction_args(
     const Alloc& alloc, First&& first, Second&& second) noexcept;
 
@@ -71,9 +80,20 @@ template<typename T, typename Alloc, typename PairLike,
          typename enable_if<
              detail::is_allocator_construction_pair<remove_cv_t<T>>::value &&
                  detail::is_allocator_construction_pair_like<PairLike&&>::value,
-             int>::type>
+             int>::type = 0>
 constexpr auto uses_allocator_construction_args(
     const Alloc& alloc, PairLike&& value) noexcept;
+
+template<typename T, typename Alloc, typename Source,
+         typename enable_if<
+             detail::is_allocator_construction_pair<remove_cv_t<T>>::value &&
+                 !detail::is_allocator_construction_pair_like<Source&&>::value,
+             int>::type = 0>
+constexpr auto uses_allocator_construction_args(
+    const Alloc& alloc, Source&& value) noexcept;
+
+template<typename T, typename Alloc, typename... Args>
+constexpr T make_obj_using_allocator(const Alloc& alloc, Args&&... args);
 
 namespace detail {
 
@@ -163,7 +183,7 @@ constexpr auto uses_allocator_construction_args(
 template<typename T, typename Alloc, typename Tuple1, typename Tuple2,
          typename enable_if<
              detail::is_allocator_construction_pair<remove_cv_t<T>>::value,
-             int>::type = 0>
+             int>::type>
 constexpr auto uses_allocator_construction_args(
     const Alloc& alloc, piecewise_construct_t,
     Tuple1&& first_args, Tuple2&& second_args) noexcept {
@@ -175,7 +195,7 @@ constexpr auto uses_allocator_construction_args(
 template<typename T, typename Alloc,
          typename enable_if<
              detail::is_allocator_construction_pair<remove_cv_t<T>>::value,
-             int>::type = 0>
+             int>::type>
 constexpr auto uses_allocator_construction_args(
     const Alloc& alloc) noexcept {
     return uses_allocator_construction_args<T>(
@@ -185,7 +205,7 @@ constexpr auto uses_allocator_construction_args(
 template<typename T, typename Alloc, typename First, typename Second,
          typename enable_if<
              detail::is_allocator_construction_pair<remove_cv_t<T>>::value,
-             int>::type = 0>
+             int>::type>
 constexpr auto uses_allocator_construction_args(
     const Alloc& alloc, First&& first, Second&& second) noexcept {
     return uses_allocator_construction_args<T>(
@@ -198,7 +218,7 @@ template<typename T, typename Alloc, typename PairLike,
          typename enable_if<
              detail::is_allocator_construction_pair<remove_cv_t<T>>::value &&
                  detail::is_allocator_construction_pair_like<PairLike&&>::value,
-             int>::type = 0>
+             int>::type>
 constexpr auto uses_allocator_construction_args(
     const Alloc& alloc, PairLike&& value) noexcept {
     return uses_allocator_construction_args<T>(
@@ -209,10 +229,35 @@ constexpr auto uses_allocator_construction_args(
             std::forward<PairLike>(value))));
 }
 
+template<typename T, typename Alloc, typename Source,
+         typename enable_if<
+             detail::is_allocator_construction_pair<remove_cv_t<T>>::value &&
+                 !detail::is_allocator_construction_pair_like<Source&&>::value,
+             int>::type>
+constexpr auto uses_allocator_construction_args(
+    const Alloc& alloc, Source&& value) noexcept {
+    using pair_type = remove_cv_t<T>;
+    static_assert(is_constructible<pair_type, Source&&>::value,
+                  "pair is not constructible from the supplied value");
+    using constructor = detail::allocator_pair_constructor<
+        T, Alloc, Source>;
+    return make_tuple(constructor{alloc, value});
+}
+
 template<typename T, typename Alloc, typename... Args>
 constexpr T make_obj_using_allocator(const Alloc& alloc, Args&&... args) {
     return make_from_tuple<T>(uses_allocator_construction_args<T>(
         alloc, std::forward<Args>(args)...));
+}
+
+template<typename Pair, typename Alloc, typename Source>
+constexpr detail::allocator_pair_constructor<
+    Pair, Alloc, Source>::operator typename detail::allocator_pair_constructor<
+        Pair, Alloc, Source>::pair_type() const {
+    using pair_type = typename detail::allocator_pair_constructor<
+        Pair, Alloc, Source>::pair_type;
+    return make_obj_using_allocator<pair_type>(
+        alloc, static_cast<pair_type>(std::forward<Source>(source)));
 }
 
 template<typename T, typename Alloc, typename... Args>
