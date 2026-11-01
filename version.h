@@ -153,6 +153,7 @@
  * ===================================================================*/
 
 #if defined(RIN_LIBCXX_CXX23_DIALECT)
+#define __cpp_lib_format_ranges              202207L
 #ifndef __cpp_lib_allocate_at_least
 #define __cpp_lib_allocate_at_least 202302L
 #endif

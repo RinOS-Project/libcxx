@@ -19,6 +19,10 @@
 
 namespace std {
 
+namespace detail {
+struct format_container_access;
+}
+
 #if __cplusplus > 202002L
 #define RIN_STACK_CONSTEXPR constexpr
 #else
@@ -39,6 +43,7 @@ public:
     using const_reference = typename Container::const_reference;
     
 protected:
+    friend struct detail::format_container_access;
     Container c;
 
     template<class V>

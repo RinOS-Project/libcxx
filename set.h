@@ -1904,7 +1904,7 @@ public:
     class iterator {
         friend class multiset;
         const multiset* m_container;
-        const value_type* m_storage;
+        const Key* m_storage;
         size_type m_index;
 
         bool same_owner(const iterator& other) const noexcept {
@@ -1913,7 +1913,7 @@ public:
             return m_container == other.m_container;
         }
 
-        iterator(const multiset* container, const value_type* storage,
+        iterator(const multiset* container, const Key* storage,
                  size_type index)
             : m_container(container), m_storage(storage), m_index(index) {}
 

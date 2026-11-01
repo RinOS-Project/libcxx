@@ -19,6 +19,9 @@
 #include "climits.h"
 #include "locale.h"
 #include "pointer_order.h"
+#if __cplusplus > 202002L
+#include "format_unicode_data.h"
+#endif
 
 namespace std {
 
@@ -982,7 +985,8 @@ struct int_formatter {
     }
 
     template<typename FormatContext, typename T>
-    auto format(T value, FormatContext& ctx) -> typename FormatContext::iterator {
+    auto format(T value, FormatContext& ctx) const
+        -> typename FormatContext::iterator {
         bool negative = false;
         using UnsignedT = typename make_unsigned<T>::type;
         UnsignedT uval;
@@ -1054,8 +1058,10 @@ struct int_formatter {
         };
         size_t grouped_size = static_cast<size_t>(digits_size) +
                               separator_count(digits_size);
-        int padding = width_ > prefix_size + grouped_size
-            ? static_cast<int>(width_ - prefix_size - grouped_size) : 0;
+        const size_t occupied_width = static_cast<size_t>(prefix_size) +
+                                      grouped_size;
+        int padding = static_cast<size_t>(width_) > occupied_width
+            ? static_cast<int>(static_cast<size_t>(width_) - occupied_width) : 0;
         if (zero_padding_ && !explicit_align_) {
             while (prefix_size + static_cast<size_t>(digits_size) + zero_count +
                        separator_count(static_cast<size_t>(digits_size) +
@@ -1239,7 +1245,8 @@ struct float_formatter {
     }
 
     template<typename FormatContext, typename T>
-    auto format(T value, FormatContext& ctx) -> typename FormatContext::iterator {
+    auto format(T value, FormatContext& ctx) const
+        -> typename FormatContext::iterator {
         chars_format conversion_format = chars_format::general;
         bool has_precision = precision_ != unspecified_precision;
         size_t conversion_precision = precision_;
@@ -1470,32 +1477,22 @@ namespace detail {
 #if __cplusplus > 202002L
 template<typename CharT>
 constexpr bool format_debug_nonprinting(uint32_t value) {
-    if (value <= 0x1fu || (value >= 0x7fu && value <= 0x9fu)) return true;
-    if (value == 0x00adu || value == 0x034fu || value == 0x061cu ||
-        value == 0x115fu || value == 0x1160u || value == 0x1680u ||
-        value == 0x17b4u || value == 0x17b5u || value == 0x180eu ||
-        value == 0x200bu || value == 0x200cu || value == 0x200du ||
-        value == 0x2028u || value == 0x2029u || value == 0x202fu ||
-        value == 0x205fu || value == 0x3000u || value == 0xfeffu ||
-        value == 0xfff9u || value == 0xfffau || value == 0xfffbu ||
-        value == 0x3164u || value == 0xffa0u) return true;
-    return (value >= 0x0300u && value <= 0x036fu) ||
-           (value >= 0x0483u && value <= 0x0489u) ||
-           (value >= 0x0591u && value <= 0x05bdu) ||
-           (value >= 0x0610u && value <= 0x061au) ||
-           (value >= 0x064bu && value <= 0x065fu) ||
-           (value >= 0x06d6u && value <= 0x06edu) ||
-           (value >= 0x0900u && value <= 0x0903u) ||
-           (value >= 0x093au && value <= 0x094fu) ||
-           (value >= 0x1ab0u && value <= 0x1affu) ||
-           (value >= 0x1dc0u && value <= 0x1dffu) ||
-           (value >= 0x2000u && value <= 0x200au) ||
-           (value >= 0x202au && value <= 0x202eu) ||
-           (value >= 0x2060u && value <= 0x206fu) ||
-           (value >= 0x20d0u && value <= 0x20ffu) ||
-           (value >= 0xfe00u && value <= 0xfe0fu) ||
-           (value >= 0xe0100u && value <= 0xe01efu) ||
-           (value >= 0xe0000u && value <= 0xe0fffu);
+    (void)sizeof(CharT);
+    size_t first = 0u;
+    size_t last = sizeof(format_debug_nonprinting_ranges) /
+                  sizeof(format_debug_nonprinting_ranges[0]);
+    while (first < last) {
+        const size_t middle = first + (last - first) / 2u;
+        const auto& range = format_debug_nonprinting_ranges[middle];
+        if (value < range.first) {
+            last = middle;
+        } else if (value > range.last) {
+            first = middle + 1u;
+        } else {
+            return true;
+        }
+    }
+    return false;
 }
 
 template<typename CharT>
@@ -1529,41 +1526,56 @@ basic_string<CharT> format_debug_escape(const CharT* data, size_t size,
         if constexpr (is_same_v<CharT, char>) {
             const auto first = static_cast<unsigned char>(data[index]);
             code_point = first;
-            if (first >= 0x80u) {
-                if (first >= 0xc2u && first <= 0xdfu && index + 1u < size &&
-                    (static_cast<unsigned char>(data[index + 1u]) & 0xc0u) == 0x80u) {
-                    code_point = ((first & 0x1fu) << 6u) |
-                        (static_cast<unsigned char>(data[index + 1u]) & 0x3fu);
-                    units = 2u;
-                } else if (first >= 0xe0u && first <= 0xefu && index + 2u < size) {
-                    const auto second = static_cast<unsigned char>(data[index + 1u]);
-                    const auto third = static_cast<unsigned char>(data[index + 2u]);
-                    if ((second & 0xc0u) == 0x80u && (third & 0xc0u) == 0x80u &&
-                        !(first == 0xe0u && second < 0xa0u) &&
-                        !(first == 0xedu && second >= 0xa0u)) {
-                        code_point = ((first & 0x0fu) << 12u) |
-                            ((second & 0x3fu) << 6u) | (third & 0x3fu);
-                        units = 3u;
+            size_t sequence_length = 0u;
+            if (first >= 0xc2u && first <= 0xdfu) sequence_length = 2u;
+            else if (first >= 0xe0u && first <= 0xefu) sequence_length = 3u;
+            else if (first >= 0xf0u && first <= 0xf4u) sequence_length = 4u;
+
+            if (first >= 0x80u && sequence_length == 0u) {
+                format_debug_append_hex(output, first, true);
+                ++index;
+                continue;
+            }
+            if (sequence_length != 0u) {
+                uint32_t decoded = first &
+                    (sequence_length == 2u ? 0x1fu :
+                     sequence_length == 3u ? 0x0fu : 0x07u);
+                size_t consumed = 1u;
+                bool malformed = false;
+                for (size_t offset = 1u; offset < sequence_length; ++offset) {
+                    if (index + offset >= size) {
+                        malformed = true;
+                        consumed = offset;
+                        break;
                     }
-                } else if (first >= 0xf0u && first <= 0xf4u && index + 3u < size) {
-                    const auto second = static_cast<unsigned char>(data[index + 1u]);
-                    const auto third = static_cast<unsigned char>(data[index + 2u]);
-                    const auto fourth = static_cast<unsigned char>(data[index + 3u]);
-                    if ((second & 0xc0u) == 0x80u && (third & 0xc0u) == 0x80u &&
-                        (fourth & 0xc0u) == 0x80u &&
-                        !(first == 0xf0u && second < 0x90u) &&
-                        !(first == 0xf4u && second >= 0x90u)) {
-                        code_point = ((first & 0x07u) << 18u) |
-                            ((second & 0x3fu) << 12u) |
-                            ((third & 0x3fu) << 6u) | (fourth & 0x3fu);
-                        units = 4u;
+                    const auto next = static_cast<unsigned char>(data[index + offset]);
+                    if ((next & 0xc0u) != 0x80u) {
+                        malformed = true;
+                        consumed = offset +
+                            ((next < 0x80u || next == 0xc0u || next == 0xc1u ||
+                              next > 0xf4u) ? 1u : 0u);
+                        break;
                     }
+                    decoded = (decoded << 6u) | (next & 0x3fu);
+                    consumed = offset + 1u;
                 }
-                if (units == 1u) {
-                    format_debug_append_hex(output, first, true);
-                    ++index;
+                const bool invalid_scalar =
+                    (sequence_length == 3u && decoded < 0x800u) ||
+                    (sequence_length == 4u && decoded < 0x10000u) ||
+                    (decoded >= 0xd800u && decoded <= 0xdfffu) ||
+                    decoded > 0x10ffffu;
+                if (malformed || invalid_scalar) {
+                    if (!malformed) consumed = sequence_length;
+                    for (size_t unit = 0u; unit < consumed; ++unit) {
+                        format_debug_append_hex(
+                            output, static_cast<unsigned char>(data[index + unit]),
+                            true);
+                    }
+                    index += consumed;
                     continue;
                 }
+                code_point = decoded;
+                units = sequence_length;
             }
         } else {
             using unsigned_char = make_unsigned_t<CharT>;
@@ -1593,7 +1605,7 @@ basic_string<CharT> format_debug_escape(const CharT* data, size_t size,
         }
 
         if (invalid_code_unit) {
-            format_debug_append_hex(output, code_point);
+            format_debug_append_hex(output, code_point, true);
             index += units;
             continue;
         }
@@ -1678,7 +1690,7 @@ struct basic_string_formatter {
 #endif
 
     template<typename FormatContext>
-    auto format_view(const CharT* data, size_t size, FormatContext& ctx) {
+    auto format_view(const CharT* data, size_t size, FormatContext& ctx) const {
         auto out = ctx.out();
         const size_t shown = precision_ < size ? precision_ : size;
 #if __cplusplus > 202002L
@@ -1718,7 +1730,7 @@ using string_formatter = basic_string_formatter<char>;
 template<>
 struct formatter<const char*, char> : detail::string_formatter {
     template<typename FormatContext>
-    auto format(const char* s, FormatContext& ctx) {
+    auto format(const char* s, FormatContext& ctx) const {
         if (!s) detail::format_fail();
         size_t size = 0;
         while (size < detail::format_max_conversion_size && s[size]) ++size;
@@ -1732,7 +1744,7 @@ struct formatter<const char*, char> : detail::string_formatter {
 template<>
 struct formatter<string, char> : formatter<const char*, char> {
     template<typename FormatContext>
-    auto format(const string& s, FormatContext& ctx) {
+    auto format(const string& s, FormatContext& ctx) const {
         return this->format_view(s.data(), s.size(), ctx);
     }
 };
@@ -1741,7 +1753,7 @@ template<typename Traits>
 struct formatter<basic_string_view<char, Traits>, char>
     : formatter<const char*, char> {
     template<typename FormatContext>
-    auto format(basic_string_view<char, Traits> s, FormatContext& ctx) {
+    auto format(basic_string_view<char, Traits> s, FormatContext& ctx) const {
         if (!s.data() && s.size() != 0) detail::format_fail();
         return this->format_view(s.data(), s.size(), ctx);
     }
@@ -1752,7 +1764,7 @@ struct formatter<basic_string<char, Traits, Allocator>, char>
     : formatter<const char*, char> {
     template<typename FormatContext>
     auto format(const basic_string<char, Traits, Allocator>& s,
-                FormatContext& ctx) {
+                FormatContext& ctx) const {
         return this->format_view(s.data(), s.size(), ctx);
     }
 };
@@ -1804,7 +1816,7 @@ struct formatter<char, char> {
 #endif
 
     template<typename FormatContext>
-    auto format(char c, FormatContext& ctx) {
+    auto format(char c, FormatContext& ctx) const {
         if (numeric_presentation_) {
             return integer_formatter_.format(
                 static_cast<unsigned int>(static_cast<unsigned char>(c)), ctx);
@@ -1852,7 +1864,7 @@ struct formatter<bool, char> {
     }
 
     template<typename FormatContext>
-    auto format(bool b, FormatContext& ctx) {
+    auto format(bool b, FormatContext& ctx) const {
         if (numeric_presentation_) {
             return integer_formatter_.format(static_cast<unsigned int>(b), ctx);
         }
@@ -1909,7 +1921,7 @@ struct formatter<void*, char> {
     }
 
     template<typename FormatContext>
-    auto format(void* p, FormatContext& ctx) {
+    auto format(void* p, FormatContext& ctx) const {
         char buffer[2 * sizeof(uintptr_t)];
         int pos = static_cast<int>(sizeof(buffer));
         uintptr_t val = detail::object_pointer_hash(p);
@@ -1958,7 +1970,7 @@ struct formatter<void*, char> {
 template<>
 struct formatter<const void*, char> : formatter<void*, char> {
     template<typename FormatContext>
-    auto format(const void* p, FormatContext& ctx) {
+    auto format(const void* p, FormatContext& ctx) const {
         return formatter<void*, char>::format(const_cast<void*>(p), ctx);
     }
 };
@@ -2000,7 +2012,7 @@ struct format_custom_value {
     void (*format)(const void*, void*, string_view, format_context&);
 };
 
-template<typename T>
+template<typename T, typename CharT = char, typename = void>
 struct format_mutable_custom : false_type {};
 
 template<typename T>
@@ -2011,7 +2023,7 @@ inline void format_custom_dispatch(const void* object, void* mutable_object,
     formatter<T, char> selected;
     format_parse_context parse_context(spec);
     if (selected.parse(parse_context) != parse_context.end()) format_fail();
-    if constexpr (format_mutable_custom<T>::value) {
+    if constexpr (format_mutable_custom<T, char>::value) {
         if (!mutable_object) format_fail();
         (void)selected.format(*static_cast<T*>(mutable_object), context);
     } else {
@@ -2304,7 +2316,7 @@ struct formatter<void*, wchar_t> {
     }
 
     template<typename FormatContext>
-    auto format(void* p, FormatContext& ctx) {
+    auto format(void* p, FormatContext& ctx) const {
         wchar_t buffer[2 * sizeof(uintptr_t)];
         constexpr int buffer_size = static_cast<int>(2u * sizeof(uintptr_t));
         int pos = buffer_size;
@@ -2350,7 +2362,7 @@ struct formatter<void*, wchar_t> {
 template<>
 struct formatter<const void*, wchar_t> : formatter<void*, wchar_t> {
     template<typename FormatContext>
-    auto format(const void* p, FormatContext& ctx) {
+    auto format(const void* p, FormatContext& ctx) const {
         return formatter<void*, wchar_t>::format(const_cast<void*>(p), ctx);
     }
 };
@@ -2373,6 +2385,16 @@ struct formatter<wchar_t, wchar_t> {
                 numeric_presentation_ = true;
                 return integer_formatter_.parse(ctx);
             }
+            if (type == L'c') {
+                wformat_parse_context layout_context(
+                    wstring_view(begin,
+                                 static_cast<size_t>(end - begin - 1)));
+                if (string_formatter_.parse(layout_context) !=
+                    layout_context.end()) {
+                    return begin;
+                }
+                return end;
+            }
         }
         auto result = string_formatter_.parse(ctx);
 #if __cplusplus > 202002L
@@ -2389,12 +2411,67 @@ struct formatter<wchar_t, wchar_t> {
 #endif
 
     template<typename FormatContext>
-    auto format(wchar_t c, FormatContext& ctx) {
+    auto format(wchar_t c, FormatContext& ctx) const {
         if (numeric_presentation_) {
             return integer_formatter_.format(
                 static_cast<unsigned int>(c), ctx);
         }
         return string_formatter_.format_view(&c, 1u, ctx);
+    }
+};
+
+template<>
+struct formatter<char, wchar_t> {
+    detail::basic_string_formatter<wchar_t> string_formatter_;
+    detail::int_formatter<wchar_t> integer_formatter_;
+    bool numeric_presentation_ = false;
+
+    template<typename ParseContext>
+    constexpr auto parse(ParseContext& ctx) {
+        const auto begin = ctx.begin();
+        const auto end = ctx.end();
+        if (begin != end) {
+            const wchar_t type = *(end - 1) == L'L' && begin != end - 1
+                ? *(end - 2) : *(end - 1);
+            if (type == L'b' || type == L'B' || type == L'd' || type == L'o' ||
+                type == L'x' || type == L'X') {
+                numeric_presentation_ = true;
+                return integer_formatter_.parse(ctx);
+            }
+            if (type == L'c') {
+                wformat_parse_context layout_context(
+                    wstring_view(begin,
+                                 static_cast<size_t>(end - begin - 1)));
+                if (string_formatter_.parse(layout_context) !=
+                    layout_context.end()) {
+                    return begin;
+                }
+                return end;
+            }
+        }
+        auto result = string_formatter_.parse(ctx);
+#if __cplusplus > 202002L
+        if (result == end && begin != end && *(end - 1) == L'?')
+            string_formatter_.set_debug_format(true);
+#endif
+        return result;
+    }
+
+#if __cplusplus > 202002L
+    constexpr void set_debug_format() {
+        string_formatter_.set_debug_format(true);
+    }
+#endif
+
+    template<typename FormatContext>
+    auto format(char c, FormatContext& ctx) const {
+        if (numeric_presentation_) {
+            return integer_formatter_.format(
+                static_cast<unsigned int>(static_cast<unsigned char>(c)), ctx);
+        }
+        const wchar_t widened = static_cast<wchar_t>(
+            static_cast<unsigned char>(c));
+        return string_formatter_.format_view(&widened, 1u, ctx);
     }
 };
 
@@ -2433,7 +2510,7 @@ struct formatter<bool, wchar_t> {
     }
 
     template<typename FormatContext>
-    auto format(bool value, FormatContext& ctx) {
+    auto format(bool value, FormatContext& ctx) const {
         if (numeric_presentation_) {
             return integer_formatter_.format(static_cast<unsigned int>(value), ctx);
         }
@@ -2453,7 +2530,7 @@ struct formatter<bool, wchar_t> {
 template<>
 struct formatter<const wchar_t*, wchar_t> : detail::basic_string_formatter<wchar_t> {
     template<typename FormatContext>
-    auto format(const wchar_t* s, FormatContext& ctx) {
+    auto format(const wchar_t* s, FormatContext& ctx) const {
         if (!s) detail::format_fail();
         size_t size = 0u;
         while (size < detail::format_max_conversion_size && s[size]) ++size;
@@ -2467,7 +2544,7 @@ struct formatter<const wchar_t*, wchar_t> : detail::basic_string_formatter<wchar
 template<>
 struct formatter<wstring, wchar_t> : formatter<const wchar_t*, wchar_t> {
     template<typename FormatContext>
-    auto format(const wstring& s, FormatContext& ctx) {
+    auto format(const wstring& s, FormatContext& ctx) const {
         return this->format_view(s.data(), s.size(), ctx);
     }
 };
@@ -2476,7 +2553,8 @@ template<typename Traits>
 struct formatter<basic_string_view<wchar_t, Traits>, wchar_t>
     : formatter<const wchar_t*, wchar_t> {
     template<typename FormatContext>
-    auto format(basic_string_view<wchar_t, Traits> s, FormatContext& ctx) {
+    auto format(basic_string_view<wchar_t, Traits> s,
+                FormatContext& ctx) const {
         if (!s.data() && s.size() != 0u) detail::format_fail();
         return this->format_view(s.data(), s.size(), ctx);
     }
@@ -2487,7 +2565,7 @@ struct formatter<basic_string<wchar_t, Traits, Allocator>, wchar_t>
     : formatter<const wchar_t*, wchar_t> {
     template<typename FormatContext>
     auto format(const basic_string<wchar_t, Traits, Allocator>& s,
-                FormatContext& ctx) {
+                FormatContext& ctx) const {
         return this->format_view(s.data(), s.size(), ctx);
     }
 };
@@ -2530,7 +2608,7 @@ inline void wide_format_custom_dispatch(const void* object,
     formatter<T, wchar_t> selected;
     wformat_parse_context parse_context(spec);
     if (selected.parse(parse_context) != parse_context.end()) format_fail();
-    if constexpr (format_mutable_custom<T>::value) {
+    if constexpr (format_mutable_custom<T, wchar_t>::value) {
         if (!mutable_object) format_fail();
         (void)selected.format(*static_cast<T*>(mutable_object), context);
     } else {
@@ -3363,7 +3441,7 @@ inline wstring render_wide_format(wstring_view fmt, wformat_args args,
 
 template<typename OutputIt>
 OutputIt vformat_to(OutputIt out, string_view fmt, format_args args) {
-    detail::format_output_sink<char> sink(out, format_max_output_size);
+    detail::format_output_sink<char> sink(out, detail::format_max_output_size);
     detail::write_format(fmt, args, sink, std::locale());
     return out;
 }
@@ -3371,7 +3449,7 @@ OutputIt vformat_to(OutputIt out, string_view fmt, format_args args) {
 template<typename OutputIt>
 OutputIt vformat_to(const std::locale& selected_locale, OutputIt out,
                     string_view fmt, format_args args) {
-    detail::format_output_sink<char> sink(out, format_max_output_size);
+    detail::format_output_sink<char> sink(out, detail::format_max_output_size);
     detail::write_format(fmt, args, sink, selected_locale);
     return out;
 }
@@ -3434,7 +3512,7 @@ template<typename FormatArg, typename... Args,
          enable_if_t<is_same_v<decay_t<FormatArg>, string_view>, int> = 0>
 size_t formatted_size(FormatArg&& fmt, Args&&... args) {
     auto arg_array = make_format_args<format_context>(std::forward<Args>(args)...);
-    detail::format_output_sink<char> sink(format_max_output_size);
+    detail::format_output_sink<char> sink(detail::format_max_output_size);
     detail::write_format(
         fmt, format_args(arg_array.data(), arg_array.size()), sink,
         std::locale());
@@ -3452,7 +3530,7 @@ size_t formatted_size(const std::locale& selected_locale, FormatArg&& fmt,
                       Args&&... args) {
     auto arg_array = make_format_args<format_context>(
         std::forward<Args>(args)...);
-    detail::format_output_sink<char> sink(format_max_output_size);
+    detail::format_output_sink<char> sink(detail::format_max_output_size);
     detail::write_format(
         fmt, format_args(arg_array.data(), arg_array.size()), sink,
         selected_locale);
@@ -3509,7 +3587,7 @@ format_to_n_result<OutputIt> format_to_n(OutputIt out, size_t n,
     detail::format_output_sink<char> sink(
         &output_state,
         &detail::format_to_n_output_state<OutputIt, char>::write,
-        format_max_output_size);
+        detail::format_max_output_size);
     detail::write_format(
         fmt, format_args(arg_array.data(), arg_array.size()), sink,
         std::locale());
@@ -3534,7 +3612,7 @@ format_to_n_result<OutputIt> format_to_n(
     detail::format_output_sink<char> sink(
         &output_state,
         &detail::format_to_n_output_state<OutputIt, char>::write,
-        format_max_output_size);
+        detail::format_max_output_size);
     detail::write_format(
         fmt, format_args(arg_array.data(), arg_array.size()), sink,
         selected_locale);
@@ -3592,7 +3670,7 @@ template<typename FormatArg, typename... Args,
 size_t formatted_size(FormatArg&& fmt, Args&&... args) {
     auto arg_array = make_format_args<wformat_context>(
         std::forward<Args>(args)...);
-    detail::format_output_sink<wchar_t> sink(format_max_output_size);
+    detail::format_output_sink<wchar_t> sink(detail::format_max_output_size);
     detail::write_wide_format(
         fmt, wformat_args(arg_array.data(), arg_array.size()), sink,
         std::locale());
@@ -3610,7 +3688,7 @@ size_t formatted_size(const std::locale& selected_locale, FormatArg&& fmt,
                       Args&&... args) {
     auto arg_array = make_format_args<wformat_context>(
         std::forward<Args>(args)...);
-    detail::format_output_sink<wchar_t> sink(format_max_output_size);
+    detail::format_output_sink<wchar_t> sink(detail::format_max_output_size);
     detail::write_wide_format(
         fmt, wformat_args(arg_array.data(), arg_array.size()), sink,
         selected_locale);
@@ -3626,7 +3704,7 @@ size_t formatted_size(const std::locale& selected_locale,
 
 template<typename OutputIt, typename... Args>
 OutputIt vformat_to(OutputIt out, wstring_view fmt, wformat_args args) {
-    detail::format_output_sink<wchar_t> sink(out, format_max_output_size);
+    detail::format_output_sink<wchar_t> sink(out, detail::format_max_output_size);
     detail::write_wide_format(fmt, args, sink, std::locale());
     return out;
 }
@@ -3634,7 +3712,7 @@ OutputIt vformat_to(OutputIt out, wstring_view fmt, wformat_args args) {
 template<typename OutputIt>
 OutputIt vformat_to(const std::locale& selected_locale, OutputIt out,
                     wstring_view fmt, wformat_args args) {
-    detail::format_output_sink<wchar_t> sink(out, format_max_output_size);
+    detail::format_output_sink<wchar_t> sink(out, detail::format_max_output_size);
     detail::write_wide_format(fmt, args, sink, selected_locale);
     return out;
 }
@@ -3682,7 +3760,7 @@ format_to_n_result<OutputIt> format_to_n(OutputIt out, size_t n,
     detail::format_output_sink<wchar_t> sink(
         &output_state,
         &detail::format_to_n_output_state<OutputIt, wchar_t>::write,
-        format_max_output_size);
+        detail::format_max_output_size);
     detail::write_wide_format(
         fmt, wformat_args(arg_array.data(), arg_array.size()), sink,
         std::locale());
@@ -3708,7 +3786,7 @@ format_to_n_result<OutputIt> format_to_n(
     detail::format_output_sink<wchar_t> sink(
         &output_state,
         &detail::format_to_n_output_state<OutputIt, wchar_t>::write,
-        format_max_output_size);
+        detail::format_max_output_size);
     detail::write_wide_format(
         fmt, wformat_args(arg_array.data(), arg_array.size()), sink,
         selected_locale);
@@ -3727,6 +3805,9 @@ format_to_n_result<OutputIt> format_to_n(
 
 #if __cplusplus > 202002L
 #include "format_ranges.h"
+#ifndef __cpp_lib_format_ranges
+#define __cpp_lib_format_ranges 202207L
+#endif
 #endif
 
 #endif /* __cplusplus >= 202002L */
