@@ -16,6 +16,8 @@
 #include "stdexcept.h"
 #include "array.h"
 #include "charconv.h"
+#include "climits.h"
+#include "locale.h"
 #include "pointer_order.h"
 
 namespace std {
@@ -204,6 +206,7 @@ constexpr bool validate_literal_integer_spec(const CharT* spec, size_t length) {
          spec[cursor] == static_cast<CharT>('B'))) {
         ++cursor;
     }
+    if (cursor < length && spec[cursor] == static_cast<CharT>('L')) ++cursor;
     return cursor == length;
 }
 
@@ -240,6 +243,7 @@ constexpr bool validate_literal_float_spec(const CharT* spec, size_t length) {
          spec[cursor] == static_cast<CharT>('G'))) {
         ++cursor;
     }
+    if (cursor < length && spec[cursor] == static_cast<CharT>('L')) ++cursor;
     return cursor == length;
 }
 
@@ -265,19 +269,25 @@ constexpr bool validate_literal_spec_for_kind(const CharT* spec, size_t length) 
     }
     if (kind == format_literal_kind::boolean) {
         return validate_literal_string_spec(spec, length) ||
-               validate_literal_integer_spec(spec, length);
+               validate_literal_integer_spec(spec, length) ||
+               (length != 0u &&
+                spec[length - 1u] == static_cast<CharT>('L') &&
+                validate_literal_string_spec(spec, length - 1u));
     }
     if (kind == format_literal_kind::character) {
         if (length != 0u && spec[length - 1u] == static_cast<CharT>('c')) {
             return validate_literal_string_spec(spec, length - 1u);
         }
-        if (length != 0u &&
-            (spec[length - 1u] == static_cast<CharT>('b') ||
-             spec[length - 1u] == static_cast<CharT>('B') ||
-             spec[length - 1u] == static_cast<CharT>('d') ||
-             spec[length - 1u] == static_cast<CharT>('o') ||
-             spec[length - 1u] == static_cast<CharT>('x') ||
-             spec[length - 1u] == static_cast<CharT>('X'))) {
+        const size_t numeric_length = length != 0u &&
+            spec[length - 1u] == static_cast<CharT>('L')
+                ? length - 1u : length;
+        if (numeric_length != 0u &&
+            (spec[numeric_length - 1u] == static_cast<CharT>('b') ||
+             spec[numeric_length - 1u] == static_cast<CharT>('B') ||
+             spec[numeric_length - 1u] == static_cast<CharT>('d') ||
+             spec[numeric_length - 1u] == static_cast<CharT>('o') ||
+             spec[numeric_length - 1u] == static_cast<CharT>('x') ||
+             spec[numeric_length - 1u] == static_cast<CharT>('X'))) {
             return validate_literal_integer_spec(spec, length);
         }
         return validate_literal_string_spec(spec, length);
@@ -777,15 +787,19 @@ public:
 private:
     OutputIt out_;
     basic_format_args<basic_format_context> args_;
+    std::locale locale_;
 
 public:
-    basic_format_context(OutputIt out, basic_format_args<basic_format_context> args)
-        : out_(out), args_(args) {}
+    basic_format_context(OutputIt out,
+                         basic_format_args<basic_format_context> args,
+                         const std::locale& selected_locale = std::locale())
+        : out_(out), args_(args), locale_(selected_locale) {}
 
     iterator out() { return out_; }
     void advance_to(iterator it) { out_ = it; }
 
     basic_format_args<basic_format_context> args() const { return args_; }
+    std::locale locale() const { return locale_; }
 
     /* Standard custom formatters may inspect another argument while
      * rendering the current field (for example, a formatter that consumes a
@@ -816,6 +830,82 @@ struct formatter {
 
 namespace detail {
 
+inline size_t format_grouping_separator_count(size_t digits,
+                                              const string& grouping) {
+    if (grouping.empty()) return 0u;
+
+    size_t group_size = static_cast<unsigned char>(grouping[0]);
+    size_t sequence_index = 0u;
+    size_t remaining = digits;
+    size_t count = 0u;
+    if (group_size == 0u || group_size == static_cast<size_t>(CHAR_MAX))
+        return 0u;
+    while (remaining > group_size) {
+        remaining -= group_size;
+        ++count;
+        if (sequence_index + 1u < grouping.size()) {
+            const size_t next = static_cast<unsigned char>(
+                grouping[++sequence_index]);
+            if (next == static_cast<size_t>(CHAR_MAX)) break;
+            if (next != 0u) group_size = next;
+        }
+    }
+    return count;
+}
+
+template<typename OutputIt, typename CharT, typename DigitAt>
+OutputIt format_write_grouped_digits(OutputIt out, size_t digits,
+                                     string& grouping,
+                                     CharT thousands_separator,
+                                     DigitAt digit_at) {
+    if (digits == 0u) return out;
+    if (grouping.empty()) {
+        for (size_t index = 0u; index < digits; ++index)
+            *out++ = digit_at(index);
+        return out;
+    }
+
+    for (size_t index = 1u; index < grouping.size(); ++index) {
+        if (grouping[index] == '\0') grouping[index] = grouping[index - 1u];
+    }
+
+    size_t group_size = static_cast<unsigned char>(grouping[0]);
+    size_t sequence_index = 0u;
+    size_t remaining = digits;
+    size_t group_count = 0u;
+    if (group_size == 0u || group_size == static_cast<size_t>(CHAR_MAX)) {
+        for (size_t index = 0u; index < digits; ++index)
+            *out++ = digit_at(index);
+        return out;
+    }
+    while (remaining > group_size) {
+        remaining -= group_size;
+        ++group_count;
+        if (sequence_index + 1u < grouping.size()) {
+            const size_t next = static_cast<unsigned char>(
+                grouping[++sequence_index]);
+            if (next == static_cast<size_t>(CHAR_MAX)) break;
+            group_size = next;
+        }
+    }
+
+    size_t digit_index = 0u;
+    for (; digit_index < remaining; ++digit_index)
+        *out++ = digit_at(digit_index);
+    while (group_count != 0u) {
+        --group_count;
+        const size_t group_index = group_count;
+        const size_t output_group_size = group_index < grouping.size()
+            ? static_cast<unsigned char>(grouping[group_index])
+            : static_cast<unsigned char>(grouping.back());
+        *out++ = thousands_separator;
+        for (size_t index = 0u; index < output_group_size; ++index) {
+            *out++ = digit_at(digit_index++);
+        }
+    }
+    return out;
+}
+
 template<typename CharT>
 struct int_formatter {
     int width_ = 0;
@@ -827,6 +917,7 @@ struct int_formatter {
     bool space_sign_ = false;
     bool show_base_ = false;
     bool zero_padding_ = false;
+    bool localized_ = false;
 
     template<typename ParseContext>
     constexpr auto parse(ParseContext& ctx) -> typename ParseContext::iterator {
@@ -878,6 +969,10 @@ struct int_formatter {
         if (it != end && (*it == 'd' || *it == 'x' || *it == 'X' ||
                          *it == 'o' || *it == 'b' || *it == 'B')) {
             type_ = *it++;
+        }
+        if (it != end && *it == 'L') {
+            localized_ = true;
+            ++it;
         }
 
         return it;
@@ -939,8 +1034,34 @@ struct int_formatter {
         }
 
         const int digits_size = 128 - pos;
-        const int len = prefix_size + digits_size;
-        int padding = (width_ > len) ? (width_ - len) : 0;
+        string grouping;
+        CharT thousands_separator = CharT();
+        if (localized_) {
+            const std::locale selected_locale = ctx.locale();
+            const auto& punctuation =
+                use_facet<numpunct<CharT>>(selected_locale);
+            grouping = punctuation.grouping();
+            thousands_separator = punctuation.thousands_sep();
+        }
+
+        size_t zero_count = 0u;
+        const auto separator_count = [&](size_t count) {
+            return localized_
+                ? format_grouping_separator_count(count, grouping) : 0u;
+        };
+        size_t grouped_size = static_cast<size_t>(digits_size) +
+                              separator_count(digits_size);
+        int padding = width_ > prefix_size + grouped_size
+            ? static_cast<int>(width_ - prefix_size - grouped_size) : 0;
+        if (zero_padding_ && !explicit_align_) {
+            while (prefix_size + static_cast<size_t>(digits_size) + zero_count +
+                       separator_count(static_cast<size_t>(digits_size) +
+                                       zero_count) <
+                   static_cast<size_t>(width_)) {
+                ++zero_count;
+            }
+            padding = static_cast<int>(zero_count);
+        }
         auto out = ctx.out();
 
         int left_padding = 0;
@@ -960,7 +1081,7 @@ struct int_formatter {
             for (int index = 0; index < prefix_size; ++index) {
                 *out++ = prefix[index];
             }
-            for (int index = 0; index < padding; ++index) *out++ = '0';
+            for (size_t index = 0u; index < zero_count; ++index) *out++ = '0';
         } else if (align_ == '=') {
             for (int index = 0; index < prefix_size; ++index) {
                 *out++ = prefix[index];
@@ -973,7 +1094,14 @@ struct int_formatter {
             }
         }
 
-        for (int index = pos; index < 128; ++index) *out++ = buffer[index];
+        const size_t total_digits = zero_count +
+                                    static_cast<size_t>(digits_size);
+        out = format_write_grouped_digits(
+            out, total_digits, grouping, thousands_separator,
+            [&](size_t index) -> CharT {
+                if (index < zero_count) return '0';
+                return buffer[pos + static_cast<int>(index - zero_count)];
+            });
         for (int index = 0; index < right_padding; ++index) *out++ = fill_;
 
         return out;
@@ -1017,7 +1145,8 @@ namespace detail {
  * Its grammar remains bounded to a 4 KiB format string, while the private
  * conversion owner accepts up to 65,536 code units.  The `#` decimal-point
  * form is implemented for finite float/double and supported long-double
- * presentations; locale remains outside this slice.
+ * presentations; locale-specific grouping and radix separators are applied
+ * after conversion by the shared formatter.
  */
 template<typename CharT>
 struct float_formatter {
@@ -1034,6 +1163,7 @@ struct float_formatter {
     bool space_sign_ = false;
     bool alternate_ = false;
     bool zero_padding_ = false;
+    bool localized_ = false;
 
     template<typename ParseContext>
     constexpr auto parse(ParseContext& ctx) -> typename ParseContext::iterator {
@@ -1086,6 +1216,10 @@ struct float_formatter {
                           *it == 'E' || *it == 'f' || *it == 'F' ||
                           *it == 'g' || *it == 'G')) {
             type_ = *it++;
+        }
+        if (it != end && *it == 'L') {
+            localized_ = true;
+            ++it;
         }
         return it;
     }
@@ -1226,8 +1360,47 @@ struct float_formatter {
             sign = ' ';
         }
         const size_t body_size = length - body_begin;
-        const size_t content_size = body_size + (sign != 0 ? 1u : 0u);
-        const size_t padding = width_ > content_size ? width_ - content_size : 0u;
+        const bool localized_decimal = localized_;
+        string grouping;
+        CharT decimal_point = static_cast<CharT>('.');
+        CharT thousands_separator = static_cast<CharT>(',');
+        if (localized_) {
+            const std::locale selected_locale = ctx.locale();
+            const auto& punctuation =
+                use_facet<numpunct<CharT>>(selected_locale);
+            decimal_point = punctuation.decimal_point();
+            thousands_separator = punctuation.thousands_sep();
+            if (localized_decimal) grouping = punctuation.grouping();
+        }
+
+        size_t integer_end = body_begin;
+        while (integer_end < length) {
+            const char digit = text[integer_end];
+            const bool decimal_digit = digit >= '0' && digit <= '9';
+            const bool hexadecimal_digit =
+                (type_ == 'a' || type_ == 'A') &&
+                ((digit >= 'a' && digit <= 'f') ||
+                 (digit >= 'A' && digit <= 'F'));
+            if (!decimal_digit && !hexadecimal_digit) break;
+            ++integer_end;
+        }
+        const size_t integer_digits = integer_end - body_begin;
+        if (integer_digits == 0u) grouping.clear();
+        const auto separator_count = [&](size_t count) {
+            return localized_decimal
+                ? format_grouping_separator_count(count, grouping) : 0u;
+        };
+        const size_t content_size = body_size +
+            (sign != 0 ? 1u : 0u) + separator_count(integer_digits);
+        size_t zero_count = 0u;
+        size_t padding = width_ > content_size ? width_ - content_size : 0u;
+        if (zero_padding_ && !explicit_align_) {
+            while ((sign != 0 ? 1u : 0u) + body_size + zero_count +
+                       separator_count(integer_digits + zero_count) < width_) {
+                ++zero_count;
+            }
+            padding = zero_count;
+        }
         size_t left_padding = 0u;
         size_t right_padding = 0u;
         if (align_ == '<') right_padding = padding;
@@ -1243,7 +1416,6 @@ struct float_formatter {
         auto out = ctx.out();
         if (zero_padding_ && !explicit_align_) {
             if (sign != 0) *out++ = sign;
-            for (size_t index = 0u; index < padding; ++index) *out++ = '0';
         } else if (align_ == '=') {
             if (sign != 0) *out++ = sign;
             for (size_t index = 0u; index < padding; ++index) *out++ = fill_;
@@ -1251,7 +1423,17 @@ struct float_formatter {
             for (size_t index = 0u; index < left_padding; ++index) *out++ = fill_;
             if (sign != 0) *out++ = sign;
         }
-        for (size_t index = body_begin; index < length; ++index) *out++ = text[index];
+        out = format_write_grouped_digits(
+            out, integer_digits + zero_count, grouping, thousands_separator,
+            [&](size_t index) -> CharT {
+                if (index < zero_count) return static_cast<CharT>('0');
+                return static_cast<CharT>(text[body_begin + index - zero_count]);
+            });
+        for (size_t index = integer_end; index < length; ++index) {
+            const CharT character = localized_decimal && text[index] == '.'
+                ? decimal_point : static_cast<CharT>(text[index]);
+            *out++ = character;
+        }
         for (size_t index = 0u; index < right_padding; ++index) *out++ = fill_;
         return out;
     }
@@ -1408,7 +1590,8 @@ struct formatter<char, char> {
         const auto begin = ctx.begin();
         const auto end = ctx.end();
         if (begin != end) {
-            const char type = *(end - 1);
+            const char type = *(end - 1) == 'L' && begin != end - 1
+                ? *(end - 2) : *(end - 1);
             if (type == 'b' || type == 'B' || type == 'd' || type == 'o' ||
                 type == 'x' || type == 'X') {
                 numeric_presentation_ = true;
@@ -1446,17 +1629,30 @@ struct formatter<bool, char> {
     detail::string_formatter string_formatter_;
     detail::int_formatter<char> integer_formatter_;
     bool numeric_presentation_ = false;
+    bool localized_ = false;
 
     template<typename ParseContext>
     constexpr auto parse(ParseContext& ctx) {
         const auto begin = ctx.begin();
         const auto end = ctx.end();
         if (begin != end) {
-            const char type = *(end - 1);
+            const char type = *(end - 1) == 'L' && begin != end - 1
+                ? *(end - 2) : *(end - 1);
             if (type == 'b' || type == 'B' || type == 'd' || type == 'o' ||
                 type == 'x' || type == 'X') {
                 numeric_presentation_ = true;
                 return integer_formatter_.parse(ctx);
+            }
+            if (*(end - 1) == 'L') {
+                format_parse_context localized_context(
+                    string_view(begin,
+                                static_cast<size_t>(end - begin - 1)));
+                if (string_formatter_.parse(localized_context) !=
+                    localized_context.end()) {
+                    return begin;
+                }
+                localized_ = true;
+                return end;
             }
         }
         return string_formatter_.parse(ctx);
@@ -1466,6 +1662,14 @@ struct formatter<bool, char> {
     auto format(bool b, FormatContext& ctx) {
         if (numeric_presentation_) {
             return integer_formatter_.format(static_cast<unsigned int>(b), ctx);
+        }
+        if (localized_) {
+            const std::locale selected_locale = ctx.locale();
+            const auto& punctuation =
+                use_facet<numpunct<char>>(selected_locale);
+            const string name = b ? punctuation.truename()
+                                  : punctuation.falsename();
+            return string_formatter_.format_view(name.data(), name.size(), ctx);
         }
         const char* s = b ? "true" : "false";
         return string_formatter_.format_view(s, b ? 4u : 5u, ctx);
@@ -1954,7 +2158,8 @@ struct formatter<wchar_t, wchar_t> {
         const auto begin = ctx.begin();
         const auto end = ctx.end();
         if (begin != end) {
-            const wchar_t type = *(end - 1);
+            const wchar_t type = *(end - 1) == L'L' && begin != end - 1
+                ? *(end - 2) : *(end - 1);
             if (type == L'b' || type == L'B' || type == L'd' || type == L'o' ||
                 type == L'x' || type == L'X') {
                 numeric_presentation_ = true;
@@ -1979,17 +2184,30 @@ struct formatter<bool, wchar_t> {
     detail::basic_string_formatter<wchar_t> string_formatter_;
     detail::int_formatter<wchar_t> integer_formatter_;
     bool numeric_presentation_ = false;
+    bool localized_ = false;
 
     template<typename ParseContext>
     constexpr auto parse(ParseContext& ctx) {
         const auto begin = ctx.begin();
         const auto end = ctx.end();
         if (begin != end) {
-            const wchar_t type = *(end - 1);
+            const wchar_t type = *(end - 1) == L'L' && begin != end - 1
+                ? *(end - 2) : *(end - 1);
             if (type == L'b' || type == L'B' || type == L'd' || type == L'o' ||
                 type == L'x' || type == L'X') {
                 numeric_presentation_ = true;
                 return integer_formatter_.parse(ctx);
+            }
+            if (*(end - 1) == L'L') {
+                wformat_parse_context localized_context(
+                    wstring_view(begin,
+                                 static_cast<size_t>(end - begin - 1)));
+                if (string_formatter_.parse(localized_context) !=
+                    localized_context.end()) {
+                    return begin;
+                }
+                localized_ = true;
+                return end;
             }
         }
         return string_formatter_.parse(ctx);
@@ -1999,6 +2217,14 @@ struct formatter<bool, wchar_t> {
     auto format(bool value, FormatContext& ctx) {
         if (numeric_presentation_) {
             return integer_formatter_.format(static_cast<unsigned int>(value), ctx);
+        }
+        if (localized_) {
+            const std::locale selected_locale = ctx.locale();
+            const auto& punctuation =
+                use_facet<numpunct<wchar_t>>(selected_locale);
+            const basic_string<wchar_t> name = value ? punctuation.truename()
+                                                    : punctuation.falsename();
+            return string_formatter_.format_view(name.data(), name.size(), ctx);
         }
         const wchar_t* text = value ? L"true" : L"false";
         return string_formatter_.format_view(text, value ? 4u : 5u, ctx);
@@ -2435,7 +2661,8 @@ auto make_format_args(Args&&... args) {
 namespace detail {
 
 inline void write_format(string_view fmt, format_args args,
-                         format_output_sink<char>& sink) {
+                         format_output_sink<char>& sink,
+                         const std::locale& selected_locale) {
     if (fmt.size() > format_max_input_size ||
         (!fmt.data() && fmt.size() != 0)) {
         format_fail();
@@ -2614,7 +2841,7 @@ inline void write_format(string_view fmt, format_args args,
             const auto arg = args.get(arg_index);
             if (!arg) format_fail();
             basic_format_context<format_output_iterator<char>, char>
-                context(out, args);
+                context(out, args, selected_locale);
             if (arg.is_custom()) {
                 arg.format_custom(spec, context);
             } else {
@@ -2649,12 +2876,21 @@ inline void write_format(string_view fmt, format_args args,
 inline string render_format(string_view fmt, format_args args) {
     string result;
     format_output_sink<char> sink(result, format_max_output_size);
-    write_format(fmt, args, sink);
+    write_format(fmt, args, sink, std::locale());
+    return result;
+}
+
+inline string render_format(string_view fmt, format_args args,
+                            const std::locale& selected_locale) {
+    string result;
+    format_output_sink<char> sink(result, format_max_output_size);
+    write_format(fmt, args, sink, selected_locale);
     return result;
 }
 
 inline void write_wide_format(wstring_view fmt, wformat_args args,
-                              format_output_sink<wchar_t>& sink) {
+                              format_output_sink<wchar_t>& sink,
+                              const std::locale& selected_locale) {
     if (fmt.size() > format_max_input_size ||
         (!fmt.data() && fmt.size() != 0) ||
         args.size() > format_max_field_count) {
@@ -2839,12 +3075,12 @@ inline void write_wide_format(wstring_view fmt, wformat_args args,
             if (!arg) format_fail();
             if (arg.is_custom()) {
                 basic_format_context<format_output_iterator<wchar_t>, wchar_t>
-                    context(out, args);
+                    context(out, args, selected_locale);
                 arg.format_custom(
                     wstring_view(resolved_storage, resolved_size), context);
             } else {
                 basic_format_context<format_output_iterator<wchar_t>, wchar_t>
-                    context(out, args);
+                    context(out, args, selected_locale);
                 arg.visit([&](auto value) {
                     using value_type = decay_t<decltype(value)>;
                     if constexpr (is_same_v<value_type, const wchar_t*>) {
@@ -2876,7 +3112,15 @@ inline void write_wide_format(wstring_view fmt, wformat_args args,
 inline wstring render_wide_format(wstring_view fmt, wformat_args args) {
     wstring result;
     format_output_sink<wchar_t> sink(result, format_max_output_size);
-    write_wide_format(fmt, args, sink);
+    write_wide_format(fmt, args, sink, std::locale());
+    return result;
+}
+
+inline wstring render_wide_format(wstring_view fmt, wformat_args args,
+                                  const std::locale& selected_locale) {
+    wstring result;
+    format_output_sink<wchar_t> sink(result, format_max_output_size);
+    write_wide_format(fmt, args, sink, selected_locale);
     return result;
 }
 
@@ -2889,7 +3133,15 @@ inline wstring render_wide_format(wstring_view fmt, wformat_args args) {
 template<typename OutputIt>
 OutputIt vformat_to(OutputIt out, string_view fmt, format_args args) {
     detail::format_output_sink<char> sink(out, format_max_output_size);
-    detail::write_format(fmt, args, sink);
+    detail::write_format(fmt, args, sink, std::locale());
+    return out;
+}
+
+template<typename OutputIt>
+OutputIt vformat_to(const std::locale& selected_locale, OutputIt out,
+                    string_view fmt, format_args args) {
+    detail::format_output_sink<char> sink(out, format_max_output_size);
+    detail::write_format(fmt, args, sink, selected_locale);
     return out;
 }
 
@@ -2905,6 +3157,11 @@ struct format_to_n_result {
 
 inline string vformat(string_view fmt, format_args args) {
     return detail::render_format(fmt, args);
+}
+
+inline string vformat(const std::locale& selected_locale, string_view fmt,
+                      format_args args) {
+    return detail::render_format(fmt, args, selected_locale);
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -2923,6 +3180,22 @@ string format(format_string<Args...> fmt, Args&&... args) {
     return format(fmt.get(), std::forward<Args>(args)...);
 }
 
+template<typename FormatArg, typename... Args,
+         enable_if_t<is_same_v<decay_t<FormatArg>, string_view>, int> = 0>
+string format(const std::locale& selected_locale, FormatArg&& fmt,
+              Args&&... args) {
+    auto arg_array = make_format_args<format_context>(
+        std::forward<Args>(args)...);
+    return vformat(selected_locale, fmt,
+                   format_args(arg_array.data(), arg_array.size()));
+}
+
+template<typename... Args>
+string format(const std::locale& selected_locale,
+              format_string<Args...> fmt, Args&&... args) {
+    return format(selected_locale, fmt.get(), std::forward<Args>(args)...);
+}
+
 /* Prefer the compile-time carrier for an actual string literal.  The
  * string_view overload remains available for callers that intentionally defer
  * validation (for example, data received at runtime). */
@@ -2932,13 +3205,34 @@ size_t formatted_size(FormatArg&& fmt, Args&&... args) {
     auto arg_array = make_format_args<format_context>(std::forward<Args>(args)...);
     detail::format_output_sink<char> sink(format_max_output_size);
     detail::write_format(
-        fmt, format_args(arg_array.data(), arg_array.size()), sink);
+        fmt, format_args(arg_array.data(), arg_array.size()), sink,
+        std::locale());
     return sink.size();
 }
 
 template<typename... Args>
 size_t formatted_size(format_string<Args...> fmt, Args&&... args) {
     return formatted_size(fmt.get(), std::forward<Args>(args)...);
+}
+
+template<typename FormatArg, typename... Args,
+         enable_if_t<is_same_v<decay_t<FormatArg>, string_view>, int> = 0>
+size_t formatted_size(const std::locale& selected_locale, FormatArg&& fmt,
+                      Args&&... args) {
+    auto arg_array = make_format_args<format_context>(
+        std::forward<Args>(args)...);
+    detail::format_output_sink<char> sink(format_max_output_size);
+    detail::write_format(
+        fmt, format_args(arg_array.data(), arg_array.size()), sink,
+        selected_locale);
+    return sink.size();
+}
+
+template<typename... Args>
+size_t formatted_size(const std::locale& selected_locale,
+                      format_string<Args...> fmt, Args&&... args) {
+    return formatted_size(selected_locale, fmt.get(),
+                          std::forward<Args>(args)...);
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -2959,6 +3253,24 @@ OutputIt format_to(OutputIt out, format_string<Args...> fmt, Args&&... args) {
 
 template<typename OutputIt, typename FormatArg, typename... Args,
          enable_if_t<is_same_v<decay_t<FormatArg>, string_view>, int> = 0>
+OutputIt format_to(const std::locale& selected_locale, OutputIt out,
+                   FormatArg&& fmt, Args&&... args) {
+    auto arg_array = make_format_args<format_context>(
+        std::forward<Args>(args)...);
+    return vformat_to(
+        selected_locale, out, fmt,
+        format_args(arg_array.data(), arg_array.size()));
+}
+
+template<typename OutputIt, typename... Args>
+OutputIt format_to(const std::locale& selected_locale, OutputIt out,
+                   format_string<Args...> fmt, Args&&... args) {
+    return format_to(selected_locale, out, fmt.get(),
+                     std::forward<Args>(args)...);
+}
+
+template<typename OutputIt, typename FormatArg, typename... Args,
+         enable_if_t<is_same_v<decay_t<FormatArg>, string_view>, int> = 0>
 format_to_n_result<OutputIt> format_to_n(OutputIt out, size_t n,
                                           FormatArg&& fmt, Args&&... args) {
     auto arg_array = make_format_args<format_context>(std::forward<Args>(args)...);
@@ -2968,7 +3280,8 @@ format_to_n_result<OutputIt> format_to_n(OutputIt out, size_t n,
         &detail::format_to_n_output_state<OutputIt, char>::write,
         format_max_output_size);
     detail::write_format(
-        fmt, format_args(arg_array.data(), arg_array.size()), sink);
+        fmt, format_args(arg_array.data(), arg_array.size()), sink,
+        std::locale());
     return {out, sink.size()};
 }
 
@@ -2979,8 +3292,39 @@ format_to_n_result<OutputIt> format_to_n(OutputIt out, size_t n,
     return format_to_n(out, n, fmt.get(), std::forward<Args>(args)...);
 }
 
+template<typename OutputIt, typename FormatArg, typename... Args,
+         enable_if_t<is_same_v<decay_t<FormatArg>, string_view>, int> = 0>
+format_to_n_result<OutputIt> format_to_n(
+    const std::locale& selected_locale, OutputIt out, size_t n,
+    FormatArg&& fmt, Args&&... args) {
+    auto arg_array = make_format_args<format_context>(
+        std::forward<Args>(args)...);
+    detail::format_to_n_output_state<OutputIt, char> output_state{&out, n, 0};
+    detail::format_output_sink<char> sink(
+        &output_state,
+        &detail::format_to_n_output_state<OutputIt, char>::write,
+        format_max_output_size);
+    detail::write_format(
+        fmt, format_args(arg_array.data(), arg_array.size()), sink,
+        selected_locale);
+    return {out, sink.size()};
+}
+
+template<typename OutputIt, typename... Args>
+format_to_n_result<OutputIt> format_to_n(
+    const std::locale& selected_locale, OutputIt out, size_t n,
+    format_string<Args...> fmt, Args&&... args) {
+    return format_to_n(selected_locale, out, n, fmt.get(),
+                       std::forward<Args>(args)...);
+}
+
 inline wstring vformat(wstring_view fmt, wformat_args args) {
     return detail::render_wide_format(fmt, args);
+}
+
+inline wstring vformat(const std::locale& selected_locale,
+                       wstring_view fmt, wformat_args args) {
+    return detail::render_wide_format(fmt, args, selected_locale);
 }
 
 template<typename FormatArg, typename... Args,
@@ -2998,12 +3342,29 @@ wstring format(wformat_string<Args...> fmt, Args&&... args) {
 
 template<typename FormatArg, typename... Args,
          enable_if_t<is_same_v<decay_t<FormatArg>, wstring_view>, int> = 0>
+wstring format(const std::locale& selected_locale, FormatArg&& fmt,
+               Args&&... args) {
+    auto arg_array = make_format_args<wformat_context>(
+        std::forward<Args>(args)...);
+    return vformat(selected_locale, fmt,
+                   wformat_args(arg_array.data(), arg_array.size()));
+}
+
+template<typename... Args>
+wstring format(const std::locale& selected_locale,
+               wformat_string<Args...> fmt, Args&&... args) {
+    return format(selected_locale, fmt.get(), std::forward<Args>(args)...);
+}
+
+template<typename FormatArg, typename... Args,
+         enable_if_t<is_same_v<decay_t<FormatArg>, wstring_view>, int> = 0>
 size_t formatted_size(FormatArg&& fmt, Args&&... args) {
     auto arg_array = make_format_args<wformat_context>(
         std::forward<Args>(args)...);
     detail::format_output_sink<wchar_t> sink(format_max_output_size);
     detail::write_wide_format(
-        fmt, wformat_args(arg_array.data(), arg_array.size()), sink);
+        fmt, wformat_args(arg_array.data(), arg_array.size()), sink,
+        std::locale());
     return sink.size();
 }
 
@@ -3012,10 +3373,38 @@ size_t formatted_size(wformat_string<Args...> fmt, Args&&... args) {
     return formatted_size(fmt.get(), std::forward<Args>(args)...);
 }
 
+template<typename FormatArg, typename... Args,
+         enable_if_t<is_same_v<decay_t<FormatArg>, wstring_view>, int> = 0>
+size_t formatted_size(const std::locale& selected_locale, FormatArg&& fmt,
+                      Args&&... args) {
+    auto arg_array = make_format_args<wformat_context>(
+        std::forward<Args>(args)...);
+    detail::format_output_sink<wchar_t> sink(format_max_output_size);
+    detail::write_wide_format(
+        fmt, wformat_args(arg_array.data(), arg_array.size()), sink,
+        selected_locale);
+    return sink.size();
+}
+
+template<typename... Args>
+size_t formatted_size(const std::locale& selected_locale,
+                      wformat_string<Args...> fmt, Args&&... args) {
+    return formatted_size(selected_locale, fmt.get(),
+                          std::forward<Args>(args)...);
+}
+
 template<typename OutputIt, typename... Args>
 OutputIt vformat_to(OutputIt out, wstring_view fmt, wformat_args args) {
     detail::format_output_sink<wchar_t> sink(out, format_max_output_size);
-    detail::write_wide_format(fmt, args, sink);
+    detail::write_wide_format(fmt, args, sink, std::locale());
+    return out;
+}
+
+template<typename OutputIt>
+OutputIt vformat_to(const std::locale& selected_locale, OutputIt out,
+                    wstring_view fmt, wformat_args args) {
+    detail::format_output_sink<wchar_t> sink(out, format_max_output_size);
+    detail::write_wide_format(fmt, args, sink, selected_locale);
     return out;
 }
 
@@ -3035,6 +3424,24 @@ OutputIt format_to(OutputIt out, wformat_string<Args...> fmt, Args&&... args) {
 
 template<typename OutputIt, typename FormatArg, typename... Args,
          enable_if_t<is_same_v<decay_t<FormatArg>, wstring_view>, int> = 0>
+OutputIt format_to(const std::locale& selected_locale, OutputIt out,
+                   FormatArg&& fmt, Args&&... args) {
+    auto arg_array = make_format_args<wformat_context>(
+        std::forward<Args>(args)...);
+    return vformat_to(
+        selected_locale, out, fmt,
+        wformat_args(arg_array.data(), arg_array.size()));
+}
+
+template<typename OutputIt, typename... Args>
+OutputIt format_to(const std::locale& selected_locale, OutputIt out,
+                   wformat_string<Args...> fmt, Args&&... args) {
+    return format_to(selected_locale, out, fmt.get(),
+                     std::forward<Args>(args)...);
+}
+
+template<typename OutputIt, typename FormatArg, typename... Args,
+         enable_if_t<is_same_v<decay_t<FormatArg>, wstring_view>, int> = 0>
 format_to_n_result<OutputIt> format_to_n(OutputIt out, size_t n,
                                           FormatArg&& fmt, Args&&... args) {
     auto arg_array = make_format_args<wformat_context>(
@@ -3046,7 +3453,8 @@ format_to_n_result<OutputIt> format_to_n(OutputIt out, size_t n,
         &detail::format_to_n_output_state<OutputIt, wchar_t>::write,
         format_max_output_size);
     detail::write_wide_format(
-        fmt, wformat_args(arg_array.data(), arg_array.size()), sink);
+        fmt, wformat_args(arg_array.data(), arg_array.size()), sink,
+        std::locale());
     return {out, sink.size()};
 }
 
@@ -3055,6 +3463,33 @@ format_to_n_result<OutputIt> format_to_n(OutputIt out, size_t n,
                                           wformat_string<Args...> fmt,
                                           Args&&... args) {
     return format_to_n(out, n, fmt.get(), std::forward<Args>(args)...);
+}
+
+template<typename OutputIt, typename FormatArg, typename... Args,
+         enable_if_t<is_same_v<decay_t<FormatArg>, wstring_view>, int> = 0>
+format_to_n_result<OutputIt> format_to_n(
+    const std::locale& selected_locale, OutputIt out, size_t n,
+    FormatArg&& fmt, Args&&... args) {
+    auto arg_array = make_format_args<wformat_context>(
+        std::forward<Args>(args)...);
+    detail::format_to_n_output_state<OutputIt, wchar_t> output_state{
+        &out, n, 0};
+    detail::format_output_sink<wchar_t> sink(
+        &output_state,
+        &detail::format_to_n_output_state<OutputIt, wchar_t>::write,
+        format_max_output_size);
+    detail::write_wide_format(
+        fmt, wformat_args(arg_array.data(), arg_array.size()), sink,
+        selected_locale);
+    return {out, sink.size()};
+}
+
+template<typename OutputIt, typename... Args>
+format_to_n_result<OutputIt> format_to_n(
+    const std::locale& selected_locale, OutputIt out, size_t n,
+    wformat_string<Args...> fmt, Args&&... args) {
+    return format_to_n(selected_locale, out, n, fmt.get(),
+                       std::forward<Args>(args)...);
 }
 
 } /* namespace std */
