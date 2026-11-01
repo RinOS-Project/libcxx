@@ -673,12 +673,64 @@ class basic_format_args;
 
 namespace detail {
 
-/* 出力イテレータラッパー */
+/* 同じformat engineから文字列・出力iterator・件数sinkへ書き込む。 */
+template<typename CharT>
+class format_output_sink {
+public:
+    using writer_type = void (*)(void*, CharT);
+
+private:
+    void* state_;
+    writer_type writer_;
+    size_t size_;
+    size_t maximum_size_;
+    bool failed_;
+
+    static void append_string(void* state, CharT character) {
+        static_cast<basic_string<CharT>*>(state)->push_back(character);
+    }
+
+    template<typename OutputIt>
+    static void write_output_iterator(void* state, CharT character) {
+        auto& output = *static_cast<OutputIt*>(state);
+        *output++ = character;
+    }
+
+public:
+    explicit format_output_sink(size_t maximum_size)
+        : state_(nullptr), writer_(nullptr), size_(0),
+          maximum_size_(maximum_size), failed_(false) {}
+
+    format_output_sink(basic_string<CharT>& output, size_t maximum_size)
+        : state_(&output), writer_(&append_string), size_(0),
+          maximum_size_(maximum_size), failed_(false) {}
+
+    template<typename OutputIt>
+    format_output_sink(OutputIt& output, size_t maximum_size)
+        : state_(&output), writer_(&write_output_iterator<OutputIt>),
+          size_(0), maximum_size_(maximum_size), failed_(false) {}
+
+    format_output_sink(void* state, writer_type writer, size_t maximum_size)
+        : state_(state), writer_(writer), size_(0),
+          maximum_size_(maximum_size), failed_(false) {}
+
+    void write(CharT character) {
+        if (failed_) return;
+        if (size_ >= maximum_size_) {
+            failed_ = true;
+            return;
+        }
+        if (writer_) writer_(state_, character);
+        ++size_;
+    }
+
+    size_t size() const noexcept { return size_; }
+    bool failed() const noexcept { return failed_; }
+};
+
 template<typename CharT>
 class format_output_iterator {
-    basic_string<CharT>* output_;
-    bool* failed_;
-    size_t maximum_size_;
+    format_output_sink<CharT>* sink_;
 
 public:
     using iterator_category = output_iterator_tag;
@@ -687,26 +739,31 @@ public:
     using pointer = void;
     using reference = void;
 
-    explicit format_output_iterator(
-        basic_string<CharT>& output, bool* failed = nullptr,
-        size_t maximum_size = static_cast<size_t>(-1))
-        : output_(&output), failed_(failed), maximum_size_(maximum_size) {}
+    explicit format_output_iterator(format_output_sink<CharT>& sink)
+        : sink_(&sink) {}
 
     format_output_iterator& operator=(CharT c) {
-        if (failed_ && *failed_) return *this;
-        if (output_->size() >= maximum_size_) {
-            if (failed_) *failed_ = true;
-            return *this;
-        }
-        const size_t old_size = output_->size();
-        output_->push_back(c);
-        if (output_->size() != old_size + 1u && failed_) *failed_ = true;
+        sink_->write(c);
         return *this;
     }
 
     format_output_iterator& operator*() { return *this; }
     format_output_iterator& operator++() { return *this; }
     format_output_iterator operator++(int) { return *this; }
+};
+
+template<typename OutputIt, typename CharT>
+struct format_to_n_output_state {
+    OutputIt* output;
+    size_t limit;
+    size_t written;
+
+    static void write(void* opaque, CharT character) {
+        auto& state = *static_cast<format_to_n_output_state*>(opaque);
+        if (state.written >= state.limit) return;
+        *(*state.output)++ = character;
+        ++state.written;
+    }
 };
 
 } /* namespace detail */
@@ -2377,17 +2434,15 @@ auto make_format_args(Args&&... args) {
 
 namespace detail {
 
-inline string render_format(string_view fmt, format_args args) {
+inline void write_format(string_view fmt, format_args args,
+                         format_output_sink<char>& sink) {
     if (fmt.size() > format_max_input_size ||
         (!fmt.data() && fmt.size() != 0)) {
         format_fail();
     }
-    if (fmt.empty()) return string();
+    if (fmt.empty()) return;
 
-    string result;
-    bool output_failed = false;
-    format_output_iterator<char> out(result, &output_failed,
-                                     format_max_output_size);
+    format_output_iterator<char> out(sink);
     size_t next_arg = 0;
     size_t field_count = 0;
     unsigned indexing = 0; /* 0: unset, 1: automatic, 2: manual */
@@ -2439,7 +2494,7 @@ inline string render_format(string_view fmt, format_args args) {
             if ((p + 1) != end && *(p + 1) == '{') {
                 *out++ = '{';
                 p += 2;
-                if (output_failed) format_fail();
+                if (sink.failed()) format_fail();
                 continue;
             }
 
@@ -2578,32 +2633,35 @@ inline string render_format(string_view fmt, format_args args) {
                     return 0;
                 });
             }
-            if (output_failed) format_fail();
+            if (sink.failed()) format_fail();
         } else if (*p == '}') {
             if ((p + 1) == end || *(p + 1) != '}') format_fail();
             *out++ = '}';
             p += 2;
-            if (output_failed) format_fail();
+            if (sink.failed()) format_fail();
         } else {
             *out++ = *p++;
-            if (output_failed) format_fail();
+            if (sink.failed()) format_fail();
         }
     }
+}
 
+inline string render_format(string_view fmt, format_args args) {
+    string result;
+    format_output_sink<char> sink(result, format_max_output_size);
+    write_format(fmt, args, sink);
     return result;
 }
 
-inline wstring render_wide_format(wstring_view fmt, wformat_args args) {
+inline void write_wide_format(wstring_view fmt, wformat_args args,
+                              format_output_sink<wchar_t>& sink) {
     if (fmt.size() > format_max_input_size ||
         (!fmt.data() && fmt.size() != 0) ||
         args.size() > format_max_field_count) {
         format_fail();
     }
 
-    wstring result;
-    bool output_failed = false;
-    format_output_iterator<wchar_t> out(result, &output_failed,
-                                        format_max_output_size);
+    format_output_iterator<wchar_t> out(sink);
     size_t next_arg = 0u;
     size_t field_count = 0u;
     unsigned indexing = 0u; /* 0: unset, 1: automatic, 2: manual */
@@ -2658,7 +2716,7 @@ inline wstring render_wide_format(wstring_view fmt, wformat_args args) {
             if ((cursor + 1) != end && *(cursor + 1) == L'{') {
                 *out++ = L'{';
                 cursor += 2;
-                if (output_failed) format_fail();
+                if (sink.failed()) format_fail();
                 continue;
             }
 
@@ -2806,13 +2864,19 @@ inline wstring render_wide_format(wstring_view fmt, wformat_args args) {
             if ((cursor + 1) == end || *(cursor + 1) != L'}') format_fail();
             *out++ = L'}';
             cursor += 2;
-            if (output_failed) format_fail();
+            if (sink.failed()) format_fail();
         } else {
             if (*cursor > 0x7f) format_fail();
             *out++ = *cursor++;
-            if (output_failed) format_fail();
+            if (sink.failed()) format_fail();
         }
     }
+}
+
+inline wstring render_wide_format(wstring_view fmt, wformat_args args) {
+    wstring result;
+    format_output_sink<wchar_t> sink(result, format_max_output_size);
+    write_wide_format(fmt, args, sink);
     return result;
 }
 
@@ -2824,8 +2888,8 @@ inline wstring render_wide_format(wstring_view fmt, wformat_args args) {
 
 template<typename OutputIt>
 OutputIt vformat_to(OutputIt out, string_view fmt, format_args args) {
-    const string rendered = detail::render_format(fmt, args);
-    for (char c : rendered) *out++ = c;
+    detail::format_output_sink<char> sink(out, format_max_output_size);
+    detail::write_format(fmt, args, sink);
     return out;
 }
 
@@ -2866,8 +2930,10 @@ template<typename FormatArg, typename... Args,
          enable_if_t<is_same_v<decay_t<FormatArg>, string_view>, int> = 0>
 size_t formatted_size(FormatArg&& fmt, Args&&... args) {
     auto arg_array = make_format_args<format_context>(std::forward<Args>(args)...);
-    return detail::render_format(
-        fmt, format_args(arg_array.data(), arg_array.size())).size();
+    detail::format_output_sink<char> sink(format_max_output_size);
+    detail::write_format(
+        fmt, format_args(arg_array.data(), arg_array.size()), sink);
+    return sink.size();
 }
 
 template<typename... Args>
@@ -2896,11 +2962,14 @@ template<typename OutputIt, typename FormatArg, typename... Args,
 format_to_n_result<OutputIt> format_to_n(OutputIt out, size_t n,
                                           FormatArg&& fmt, Args&&... args) {
     auto arg_array = make_format_args<format_context>(std::forward<Args>(args)...);
-    const string rendered = detail::render_format(
-        fmt, format_args(arg_array.data(), arg_array.size()));
-    const size_t written = rendered.size() < n ? rendered.size() : n;
-    for (size_t index = 0u; index < written; ++index) *out++ = rendered[index];
-    return {out, rendered.size()};
+    detail::format_to_n_output_state<OutputIt, char> output_state{&out, n, 0};
+    detail::format_output_sink<char> sink(
+        &output_state,
+        &detail::format_to_n_output_state<OutputIt, char>::write,
+        format_max_output_size);
+    detail::write_format(
+        fmt, format_args(arg_array.data(), arg_array.size()), sink);
+    return {out, sink.size()};
 }
 
 template<typename OutputIt, typename... Args>
@@ -2932,7 +3001,10 @@ template<typename FormatArg, typename... Args,
 size_t formatted_size(FormatArg&& fmt, Args&&... args) {
     auto arg_array = make_format_args<wformat_context>(
         std::forward<Args>(args)...);
-    return vformat(fmt, wformat_args(arg_array.data(), arg_array.size())).size();
+    detail::format_output_sink<wchar_t> sink(format_max_output_size);
+    detail::write_wide_format(
+        fmt, wformat_args(arg_array.data(), arg_array.size()), sink);
+    return sink.size();
 }
 
 template<typename... Args>
@@ -2942,8 +3014,8 @@ size_t formatted_size(wformat_string<Args...> fmt, Args&&... args) {
 
 template<typename OutputIt, typename... Args>
 OutputIt vformat_to(OutputIt out, wstring_view fmt, wformat_args args) {
-    const wstring rendered = detail::render_wide_format(fmt, args);
-    for (wchar_t character : rendered) *out++ = character;
+    detail::format_output_sink<wchar_t> sink(out, format_max_output_size);
+    detail::write_wide_format(fmt, args, sink);
     return out;
 }
 
@@ -2967,11 +3039,15 @@ format_to_n_result<OutputIt> format_to_n(OutputIt out, size_t n,
                                           FormatArg&& fmt, Args&&... args) {
     auto arg_array = make_format_args<wformat_context>(
         std::forward<Args>(args)...);
-    const wstring rendered = vformat(
-        fmt, wformat_args(arg_array.data(), arg_array.size()));
-    const size_t written = rendered.size() < n ? rendered.size() : n;
-    for (size_t index = 0; index < written; ++index) *out++ = rendered[index];
-    return {out, rendered.size()};
+    detail::format_to_n_output_state<OutputIt, wchar_t> output_state{
+        &out, n, 0};
+    detail::format_output_sink<wchar_t> sink(
+        &output_state,
+        &detail::format_to_n_output_state<OutputIt, wchar_t>::write,
+        format_max_output_size);
+    detail::write_wide_format(
+        fmt, wformat_args(arg_array.data(), arg_array.size()), sink);
+    return {out, sink.size()};
 }
 
 template<typename OutputIt, typename... Args>
