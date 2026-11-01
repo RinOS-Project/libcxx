@@ -652,20 +652,28 @@ void sleep_for(const chrono::duration<Rep, Period>& sleep_duration) {
 
 template<typename Clock, typename Duration>
 void sleep_until(const chrono::time_point<Clock, Duration>& sleep_time) {
-    if (!(sleep_time > Clock::now())) return;
-    if (detail::sleep_until_native_clock(sleep_time)) return;
 #if defined(RIN_FREESTANDING)
+    if (detail::sleep_until_native_clock(sleep_time)) return;
     constexpr chrono::milliseconds recheck_interval(10);
+    constexpr long double recheck_seconds = 0.010L;
+    const long double deadline_seconds =
+        chrono::duration_cast<chrono::duration<long double>>(
+            sleep_time.time_since_epoch()).count();
     for (;;) {
         const auto now = Clock::now();
-        if (!(sleep_time > now)) return;
-        const auto remaining = sleep_time - now;
-        if (remaining > recheck_interval)
+        const long double now_seconds =
+            chrono::duration_cast<chrono::duration<long double>>(
+                now.time_since_epoch()).count();
+        const long double remaining_seconds = deadline_seconds - now_seconds;
+        if (!(remaining_seconds > 0.0L)) return;
+        if (remaining_seconds > recheck_seconds)
             sleep_for(recheck_interval);
         else
-            sleep_for(remaining);
+            sleep_for(chrono::duration<long double>(remaining_seconds));
     }
 #else
+    if (!(sleep_time > Clock::now())) return;
+    if (detail::sleep_until_native_clock(sleep_time)) return;
     const auto now = Clock::now();
     if (sleep_time > now) sleep_for(sleep_time - now);
 #endif
