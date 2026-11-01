@@ -6805,48 +6805,80 @@ inline constexpr bool enable_borrowed_range<views::adjacent_transform_view<V, F>
 
 namespace detail {
 
+template<typename Container, typename Ref>
+concept container_appendable = requires(Container& container, Ref&& ref) {
+    requires (
+        requires { container.emplace_back(std::forward<Ref>(ref)); } ||
+        requires { container.push_back(std::forward<Ref>(ref)); } ||
+        requires {
+            container.emplace_hint(container.end(),
+                                   std::forward<Ref>(ref));
+        } ||
+        requires { container.insert(container.end(),
+                                    std::forward<Ref>(ref)); });
+};
+
+template<typename Container>
+concept reservable_container = ranges::sized_range<Container> &&
+    requires(Container& container,
+             decltype(ranges::size(container)) count) {
+        container.reserve(count);
+        { container.capacity() } -> same_as<decltype(count)>;
+        { container.max_size() } -> same_as<decltype(count)>;
+    };
+
 template<typename Container, typename R>
 concept container_from_range_constructible =
     requires(R&& range) {
-        Container(from_range, std::forward<R>(range));
+        Container(std::forward<R>(range));
     } ||
     requires(R&& range) {
-        Container(ranges::begin(range), ranges::end(range));
+        Container(from_range, std::forward<R>(range));
     } ||
+    (ranges::common_range<R> && requires(R&& range) {
+        Container(ranges::begin(range), ranges::end(range));
+    }) ||
     (default_initializable<Container> &&
      (requires(Container& container, R&& range) {
           container.append_range(std::forward<R>(range));
       } ||
-      requires(Container& container, R&& range) {
-          container.push_back(*ranges::begin(range));
-      }));
+      container_appendable<Container, ranges::range_reference_t<R>> ||
+      (ranges::input_range<ranges::range_reference_t<R>> &&
+       requires { typename Container::value_type; } &&
+       container_appendable<Container,
+                            typename Container::value_type&&>)));
 
 template<typename Container, typename R, typename... Args>
 concept container_from_range_with_args =
     requires(R&& range, Args&&... args) {
+        Container(std::forward<R>(range), std::forward<Args>(args)...);
+    } ||
+    requires(R&& range, Args&&... args) {
         Container(from_range, std::forward<R>(range),
                   std::forward<Args>(args)...);
     } ||
-    requires(R&& range, Args&&... args) {
+    (ranges::common_range<R> && requires(R&& range, Args&&... args) {
         Container(ranges::begin(range), ranges::end(range),
                   std::forward<Args>(args)...);
-    } ||
+    }) ||
     (requires(Args&&... args) {
          Container(std::forward<Args>(args)...);
      } &&
      (requires(Container& container, R&& range) {
           container.append_range(std::forward<R>(range));
       } ||
-      requires(Container& container, R&& range) {
-          container.push_back(*ranges::begin(range));
-      }));
+      container_appendable<Container, ranges::range_reference_t<R>> ||
+      (ranges::input_range<ranges::range_reference_t<R>> &&
+       requires { typename Container::value_type; } &&
+       container_appendable<Container,
+                            typename Container::value_type&&>)));
 
 } /* namespace detail */
 
 template<typename Container>
 struct to_fn {
     template<typename R>
-        requires range<R&> &&
+        requires input_range<R> &&
                  detail::container_from_range_constructible<Container, R>
     constexpr Container operator()(R&& range) const {
         return std::detail::make_container_from_range<Container>(
@@ -6854,7 +6886,7 @@ struct to_fn {
     }
 
     template<typename R, typename... Args>
-        requires (sizeof...(Args) > 0) && range<R&> &&
+        requires (sizeof...(Args) > 0) && input_range<R> &&
                  detail::container_from_range_with_args<Container, R, Args...>
     constexpr Container operator()(R&& range, Args&&... args) const {
         auto arguments = std::tuple<Args&&...>(std::forward<Args>(args)...);
@@ -6867,7 +6899,7 @@ template<typename Container>
 inline constexpr to_fn<Container> to{};
 
 template<typename R, typename Container>
-    requires range<R&>
+    requires input_range<R>
 constexpr auto operator|(R&& range, to_fn<Container> adaptor) {
     return adaptor(std::forward<R>(range));
 }
@@ -10976,6 +11008,48 @@ constexpr bool container_range_known_empty(R&& range) {
         integral_constant<bool, ranges::sized_range<R>>());
 }
 
+template<typename Container, typename Ref, typename... Args>
+constexpr void append_container_element(Container& container, Ref&& element,
+                                        Args&&... args) {
+    if constexpr (ranges::detail::container_appendable<Container, Ref>) {
+        if constexpr (requires {
+                          container.emplace_back(
+                              std::forward<Ref>(element));
+                      }) {
+            container.emplace_back(std::forward<Ref>(element));
+        } else if constexpr (requires {
+                                 container.push_back(
+                                     std::forward<Ref>(element));
+                             }) {
+            container.push_back(std::forward<Ref>(element));
+        } else if constexpr (requires {
+                                 container.emplace_hint(
+                                     container.end(),
+                                     std::forward<Ref>(element));
+                             }) {
+            container.emplace_hint(container.end(),
+                                   std::forward<Ref>(element));
+        } else {
+            container.insert(container.end(),
+                             std::forward<Ref>(element));
+        }
+    } else {
+        using value_type = typename Container::value_type;
+        auto converted = ranges::to<value_type>(
+            std::forward<Ref>(element), std::forward<Args>(args)...);
+        append_container_element(container, std::move(converted));
+    }
+}
+
+template<typename Container, typename R>
+constexpr void reserve_container_for_range(Container& container, R&& range) {
+    if constexpr (ranges::detail::reservable_container<Container> &&
+                  ranges::sized_range<R>) {
+        using size_type = decltype(ranges::size(container));
+        container.reserve(static_cast<size_type>(ranges::size(range)));
+    }
+}
+
 template<typename Container, typename R>
 constexpr void append_container_range(Container& container, R&& range) {
     if constexpr (requires {
@@ -10983,10 +11057,32 @@ constexpr void append_container_range(Container& container, R&& range) {
                   }) {
         container.append_range(std::forward<R>(range));
     } else {
+        reserve_container_for_range(container, range);
         auto first = ranges::begin(range);
         auto last = ranges::end(range);
         for (; first != last; ++first) {
-            container.push_back(*first);
+            append_container_element(container, *first);
+        }
+    }
+}
+
+template<typename Container, typename R, typename... Args>
+constexpr void append_container_range(Container& container, R&& range,
+                                      Args&&... args) {
+    if constexpr (sizeof...(Args) == 0) {
+        append_container_range(container, std::forward<R>(range));
+    } else if constexpr (requires {
+                             container.append_range(
+                                 std::forward<R>(range));
+                         }) {
+        container.append_range(std::forward<R>(range));
+    } else {
+        reserve_container_for_range(container, range);
+        auto first = ranges::begin(range);
+        auto last = ranges::end(range);
+        for (; first != last; ++first) {
+            append_container_element(container, *first,
+                                     std::forward<Args>(args)...);
         }
     }
 }
@@ -10994,10 +11090,14 @@ constexpr void append_container_range(Container& container, R&& range) {
 template<typename Container, typename R>
 constexpr Container make_container_from_range(R&& range) {
     if constexpr (requires {
+                      Container(std::forward<R>(range));
+                  }) {
+        return Container(std::forward<R>(range));
+    } else if constexpr (requires {
                       Container(from_range, std::forward<R>(range));
                   }) {
         return Container(from_range, std::forward<R>(range));
-    } else if constexpr (requires {
+    } else if constexpr (ranges::common_range<R> && requires {
                              Container(ranges::begin(range),
                                        ranges::end(range));
                          }) {
@@ -11013,12 +11113,18 @@ template<typename Container, typename R, typename Tuple, size_t... Is>
 constexpr Container make_container_from_range_args(
     R&& range, Tuple&& args, index_sequence<Is...>) {
     if constexpr (requires {
+                      Container(std::forward<R>(range),
+                                std::get<Is>(std::forward<Tuple>(args))...);
+                  }) {
+        return Container(std::forward<R>(range),
+                         std::get<Is>(std::forward<Tuple>(args))...);
+    } else if constexpr (requires {
                       Container(from_range, std::forward<R>(range),
                                 std::get<Is>(std::forward<Tuple>(args))...);
                   }) {
         return Container(from_range, std::forward<R>(range),
                          std::get<Is>(std::forward<Tuple>(args))...);
-    } else if constexpr (requires {
+    } else if constexpr (ranges::common_range<R> && requires {
                              Container(
                                  ranges::begin(range), ranges::end(range),
                                  std::get<Is>(std::forward<Tuple>(args))...);
@@ -11029,24 +11135,30 @@ constexpr Container make_container_from_range_args(
     } else {
         Container container(
             std::get<Is>(std::forward<Tuple>(args))...);
-        append_container_range(container, std::forward<R>(range));
+        append_container_range(
+            container, std::forward<R>(range),
+            std::get<Is>(std::forward<Tuple>(args))...);
         return container;
     }
 }
 template<typename Container, typename R, typename Alloc>
 constexpr Container make_container_from_range(R&& range, const Alloc& alloc) {
     if constexpr (requires {
+                      Container(std::forward<R>(range), alloc);
+                  }) {
+        return Container(std::forward<R>(range), alloc);
+    } else if constexpr (requires {
                       Container(from_range, std::forward<R>(range), alloc);
                   }) {
         return Container(from_range, std::forward<R>(range), alloc);
-    } else if constexpr (requires {
+    } else if constexpr (ranges::common_range<R> && requires {
                              Container(ranges::begin(range),
                                        ranges::end(range), alloc);
                          }) {
         return Container(ranges::begin(range), ranges::end(range), alloc);
     } else {
         Container container(alloc);
-        append_container_range(container, std::forward<R>(range));
+        append_container_range(container, std::forward<R>(range), alloc);
         return container;
     }
 }
