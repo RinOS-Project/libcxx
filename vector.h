@@ -108,7 +108,7 @@ public:
     using value_type = T;
     using allocator_type = Allocator;
     using alloc_traits = allocator_traits<Allocator>;
-    using size_type = size_t;
+    using size_type = typename alloc_traits::size_type;
     using reference = T&;
     using const_reference = const T&;
     using pointer = typename alloc_traits::pointer;

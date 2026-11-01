@@ -153,7 +153,9 @@
  * ===================================================================*/
 
 #if defined(RIN_LIBCXX_CXX23_DIALECT)
+#ifndef __cpp_lib_allocate_at_least
 #define __cpp_lib_allocate_at_least 202302L
+#endif
 #define __cpp_lib_flat_map                 202207L
 #if defined(RIN_LIBCXX_HAS_BIT_CAST_BACKEND)
 #define __cpp_lib_byteswap                  202110L
