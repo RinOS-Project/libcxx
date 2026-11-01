@@ -269,11 +269,20 @@ private:
         }
         if (cap < new_cap) cap = new_cap;
 
+#if __cplusplus > 202002L
+        allocation_result<pointer, size_type> allocation =
+            alloc_traits::allocate_at_least(m_alloc, cap);
+        pointer new_allocation = allocation.ptr;
+        const size_type allocated_capacity = allocation.count;
+#else
         pointer new_allocation = alloc_traits::allocate(m_alloc, cap);
+        const size_type allocated_capacity = cap;
+#endif
         T* new_data = detail::vector_pointer_address(new_allocation);
         if (!new_data) {
             if (new_allocation != pointer()) {
-                alloc_traits::deallocate(m_alloc, new_allocation, cap);
+                alloc_traits::deallocate(m_alloc, new_allocation,
+                                         allocated_capacity);
             }
             detail::vector_allocation_failure();
         }
@@ -285,7 +294,8 @@ private:
             integral_constant<bool, is_trivially_copyable<T>::value>());
 #if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
         } catch (...) {
-            alloc_traits::deallocate(m_alloc, new_allocation, cap);
+            alloc_traits::deallocate(m_alloc, new_allocation,
+                                     allocated_capacity);
             throw;
         }
 #endif
@@ -295,7 +305,7 @@ private:
         }
         m_allocation = new_allocation;
         m_data = new_data;
-        m_capacity = cap;
+        m_capacity = allocated_capacity;
     }
 
     void destroy_all() {
@@ -952,13 +962,28 @@ public:
                 m_capacity = 0;
             } else {
                 /* Try to allocate smaller buffer - on failure, just keep current */
-                pointer new_allocation = alloc_traits::allocate(m_alloc, m_size);
+#if __cplusplus > 202002L
+                allocation_result<pointer, size_type> allocation =
+                    alloc_traits::allocate_at_least(m_alloc, m_size);
+                pointer new_allocation = allocation.ptr;
+                const size_type allocated_capacity = allocation.count;
+#else
+                pointer new_allocation = alloc_traits::allocate(m_alloc,
+                                                                m_size);
+                const size_type allocated_capacity = m_size;
+#endif
                 T* new_data = detail::vector_pointer_address(new_allocation);
                 if (!new_data) {
                     if (new_allocation != pointer()) {
-                        alloc_traits::deallocate(m_alloc, new_allocation, m_size);
+                        alloc_traits::deallocate(m_alloc, new_allocation,
+                                                 allocated_capacity);
                     }
                     return; /* Allocation failed, keep current capacity */
+                }
+                if (allocated_capacity >= m_capacity) {
+                    alloc_traits::deallocate(m_alloc, new_allocation,
+                                             allocated_capacity);
+                    return;
                 }
 #if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
                 try {
@@ -967,14 +992,15 @@ public:
                     integral_constant<bool, is_trivially_copyable<T>::value>());
 #if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
                 } catch (...) {
-                    alloc_traits::deallocate(m_alloc, new_allocation, m_size);
+                    alloc_traits::deallocate(m_alloc, new_allocation,
+                                             allocated_capacity);
                     throw;
                 }
 #endif
                 alloc_traits::deallocate(m_alloc, m_allocation, m_capacity);
                 m_allocation = new_allocation;
                 m_data = new_data;
-                m_capacity = m_size;
+                m_capacity = allocated_capacity;
             }
         }
     }

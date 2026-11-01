@@ -32,6 +32,12 @@ namespace std {
 #define RIN_MEMORY_NODISCARD
 #endif
 
+#if __cplusplus > 202002L
+#ifndef __cpp_lib_allocate_at_least
+#define __cpp_lib_allocate_at_least 202302L
+#endif
+#endif
+
 inline void* align(size_t alignment, size_t size, void*& pointer,
                    size_t& space) {
     if (alignment == 0u || size > space) return nullptr;
@@ -551,6 +557,14 @@ class shared_ptr;
 
 template<typename T>
 class allocator;
+
+#if __cplusplus > 202002L
+template<typename Pointer, typename SizeType = size_t>
+struct allocation_result {
+    Pointer ptr;
+    SizeType count;
+};
+#endif
 
 template<typename T, typename Alloc, typename... Args,
          typename enable_if<!is_array<T>::value, int>::type = 0>
@@ -1824,6 +1838,12 @@ public:
         size_type total = n * sizeof(T);
         return static_cast<pointer>(rin_malloc(total));
     }
+
+#if __cplusplus > 202002L
+    allocation_result<pointer, size_type> allocate_at_least(size_type n) {
+        return {allocate(n), n};
+    }
+#endif
     
     void deallocate(pointer p, size_type) noexcept {
         rin_free(p);
@@ -2005,6 +2025,17 @@ namespace _alloc_traits_detail {
         void_t<decltype(declval<Alloc&>().allocate(
             declval<Size>(), declval<Hint&>()))>> : true_type {};
 
+#if __cplusplus > 202002L
+    template<typename Alloc, typename Size, typename = void>
+    struct _has_allocate_at_least : false_type {};
+
+    template<typename Alloc, typename Size>
+    struct _has_allocate_at_least<
+        Alloc, Size,
+        void_t<decltype(declval<Alloc&>().allocate_at_least(
+            declval<Size>()))>> : true_type {};
+#endif
+
     template<typename, typename Alloc, typename T, typename... Args>
     struct _has_construct_impl : false_type {};
 
@@ -2080,6 +2111,19 @@ private:
         return a.allocate(n);
     }
 
+#if __cplusplus > 202002L
+    static RIN_MEMORY_CONSTEXPR14 allocation_result<pointer, size_type>
+    allocate_at_least_with_allocator(Alloc& a, size_type n, true_type) {
+        auto result = a.allocate_at_least(n);
+        return {result.ptr, static_cast<size_type>(result.count)};
+    }
+
+    static RIN_MEMORY_CONSTEXPR14 allocation_result<pointer, size_type>
+    allocate_at_least_with_allocator(Alloc& a, size_type n, false_type) {
+        return {a.allocate(n), n};
+    }
+#endif
+
     template<typename T, typename... Args>
     static RIN_MEMORY_CONSTEXPR14 void construct_with_allocator(
         Alloc& a, T* p, true_type, Args&&... args) {
@@ -2137,6 +2181,16 @@ public:
             typename _alloc_traits_detail::_has_allocate_hint<
                 Alloc, size_type, const_void_pointer>());
     }
+
+#if __cplusplus > 202002L
+    RIN_MEMORY_NODISCARD static RIN_MEMORY_CONSTEXPR14
+    allocation_result<pointer, size_type> allocate_at_least(
+        Alloc& a, size_type n) {
+        return allocate_at_least_with_allocator(
+            a, n, typename _alloc_traits_detail::_has_allocate_at_least<
+                      Alloc, size_type>());
+    }
+#endif
 
     /* deallocate */
     static RIN_MEMORY_CONSTEXPR14 void deallocate(Alloc& a, pointer p, size_type n)
