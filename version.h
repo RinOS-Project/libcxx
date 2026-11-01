@@ -194,6 +194,7 @@
 #define __cpp_lib_expected                    202211L
 #define __cpp_lib_print                       202207L
 #define __cpp_lib_mdspan                      202207L
+#define __cpp_lib_spanstream                  202106L
 #if (defined(__cpp_impl_coroutine) && __cpp_impl_coroutine >= 201902L) || \
     (defined(__cpp_coroutines) && __cpp_coroutines >= 201703L)
 #define __cpp_lib_generator                   202207L

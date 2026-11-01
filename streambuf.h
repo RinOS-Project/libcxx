@@ -48,6 +48,17 @@ public:
 
     virtual ~basic_streambuf() = default;
 
+    void swap(basic_streambuf& other) noexcept {
+        using std::swap;
+        swap(locale_, other.locale_);
+        swap(eback_, other.eback_);
+        swap(gptr_, other.gptr_);
+        swap(egptr_, other.egptr_);
+        swap(pbase_, other.pbase_);
+        swap(pptr_, other.pptr_);
+        swap(epptr_, other.epptr_);
+    }
+
     /* ═══════════════════════════════════════════════════════════
      * 入力操作
      * ═══════════════════════════════════════════════════════════*/

@@ -55,6 +55,10 @@ public:
     basic_iostream(basic_iostream&& other) = default;
     basic_iostream& operator=(basic_iostream&& other) = default;
 
+    void swap(basic_iostream& other) noexcept {
+        basic_istream<CharT, Traits>::swap(other);
+    }
+
 protected:
     basic_iostream()
         : basic_ios<CharT, Traits>(),
