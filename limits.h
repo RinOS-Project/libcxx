@@ -8,6 +8,7 @@
 
 #include "rincxx.h"
 #include "climits.h"
+#include "cfloat.h"
 
 #ifdef __cplusplus
 
@@ -610,23 +611,23 @@ template<>
 class numeric_limits<long double> {
 public:
     static constexpr bool is_specialized = true;
-    static constexpr long double min() noexcept { return __LDBL_MIN__; }
-    static constexpr long double max() noexcept { return __LDBL_MAX__; }
-    static constexpr long double lowest() noexcept { return -__LDBL_MAX__; }
-    static constexpr int digits = __LDBL_MANT_DIG__;
-    static constexpr int digits10 = __LDBL_DIG__;
+    static constexpr long double min() noexcept { return LDBL_MIN; }
+    static constexpr long double max() noexcept { return LDBL_MAX; }
+    static constexpr long double lowest() noexcept { return -LDBL_MAX; }
+    static constexpr int digits = LDBL_MANT_DIG;
+    static constexpr int digits10 = LDBL_DIG;
     static constexpr int max_digits10 =
-        2 + (__LDBL_MANT_DIG__ * 301) / 1000;
+        2 + (LDBL_MANT_DIG * 301) / 1000;
     static constexpr bool is_signed = true;
     static constexpr bool is_integer = false;
     static constexpr bool is_exact = false;
     static constexpr int radix = 2;
-    static constexpr long double epsilon() noexcept { return __LDBL_EPSILON__; }
+    static constexpr long double epsilon() noexcept { return LDBL_EPSILON; }
     static constexpr long double round_error() noexcept { return 0.5L; }
-    static constexpr int min_exponent = __LDBL_MIN_EXP__;
-    static constexpr int min_exponent10 = __LDBL_MIN_10_EXP__;
-    static constexpr int max_exponent = __LDBL_MAX_EXP__;
-    static constexpr int max_exponent10 = __LDBL_MAX_10_EXP__;
+    static constexpr int min_exponent = LDBL_MIN_EXP;
+    static constexpr int min_exponent10 = LDBL_MIN_10_EXP;
+    static constexpr int max_exponent = LDBL_MAX_EXP;
+    static constexpr int max_exponent10 = LDBL_MAX_10_EXP;
     static constexpr bool has_infinity = true;
     static constexpr bool has_quiet_NaN = true;
     static constexpr bool has_signaling_NaN = true;
@@ -635,7 +636,7 @@ public:
     static constexpr long double infinity() noexcept { return __builtin_huge_vall(); }
     static constexpr long double quiet_NaN() noexcept { return __builtin_nanl(""); }
     static constexpr long double signaling_NaN() noexcept { return __builtin_nansl(""); }
-    static constexpr long double denorm_min() noexcept { return __LDBL_DENORM_MIN__; }
+    static constexpr long double denorm_min() noexcept { return LDBL_TRUE_MIN; }
     static constexpr bool is_iec559 = true;
     static constexpr bool is_bounded = true;
     static constexpr bool is_modulo = false;
