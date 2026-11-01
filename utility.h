@@ -185,6 +185,14 @@ struct pair {
 
     template<typename U1, typename U2,
              typename = typename enable_if<
+                 is_constructible<T1, U1&>::value &&
+                 is_constructible<T2, U2&>::value
+             >::type,
+             typename = void>
+    constexpr pair(pair<U1, U2>& p) : first(p.first), second(p.second) {}
+
+    template<typename U1, typename U2,
+             typename = typename enable_if<
                  is_constructible<T1, U1&&>::value &&
                  is_constructible<T2, U2&&>::value
              >::type>
@@ -239,6 +247,11 @@ public:
         swap(second, other.second);
     }
 };
+
+#if __cplusplus >= 201703L
+template<typename T1,typename T2>
+pair(T1,T2)->pair<typename decay<T1>::type,typename decay<T2>::type>;
+#endif
 
 /* pair比較 */
 template<typename T1, typename T2>
@@ -303,6 +316,34 @@ void swap(pair<T1, T2>& lhs, pair<T1, T2>& rhs) noexcept {
 }
 
 #endif /* RINCXX_PAIR_DEFINED */
+
+#if __cplusplus > 202002L
+namespace detail {
+template<typename Left, typename Right,
+         template<typename> class LeftQual,
+         template<typename> class RightQual, typename = void>
+struct pair_basic_common_reference {};
+
+template<typename L1, typename L2, typename R1, typename R2,
+         template<typename> class LeftQual,
+         template<typename> class RightQual>
+struct pair_basic_common_reference<
+    pair<L1, L2>, pair<R1, R2>, LeftQual, RightQual,
+    void_t<common_reference_t<LeftQual<L1>, RightQual<R1>>,
+           common_reference_t<LeftQual<L2>, RightQual<R2>>>> {
+    using type = pair<common_reference_t<LeftQual<L1>, RightQual<R1>>,
+                      common_reference_t<LeftQual<L2>, RightQual<R2>>>;
+};
+} // namespace detail
+
+template<typename L1, typename L2, typename R1, typename R2,
+         template<typename> class LeftQual,
+         template<typename> class RightQual>
+struct basic_common_reference<pair<L1, L2>, pair<R1, R2>,
+                              LeftQual, RightQual>
+    : detail::pair_basic_common_reference<
+          pair<L1, L2>, pair<R1, R2>, LeftQual, RightQual> {};
+#endif
 
 /* ═══════════════════════════════════════════════════════════════
  * get for pair (C++11) - tuple interface

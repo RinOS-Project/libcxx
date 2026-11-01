@@ -153,6 +153,7 @@
  * ===================================================================*/
 
 #if defined(RIN_LIBCXX_CXX23_DIALECT)
+#define __cpp_lib_flat_map                 202207L
 #if defined(RIN_LIBCXX_HAS_BIT_CAST_BACKEND)
 #define __cpp_lib_byteswap                  202110L
 #endif

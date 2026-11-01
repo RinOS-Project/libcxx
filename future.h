@@ -102,8 +102,27 @@ inline launch operator&(launch left, launch right) noexcept {
                                static_cast<unsigned int>(right));
 }
 
+inline launch operator^(launch left, launch right) noexcept {
+    return static_cast<launch>(static_cast<unsigned int>(left) ^
+                               static_cast<unsigned int>(right));
+}
+
+inline launch operator~(launch value) noexcept {
+    return static_cast<launch>(~static_cast<unsigned int>(value));
+}
+
 inline launch& operator|=(launch& left, launch right) noexcept {
     left = left | right;
+    return left;
+}
+
+inline launch& operator&=(launch& left, launch right) noexcept {
+    left = left & right;
+    return left;
+}
+
+inline launch& operator^=(launch& left, launch right) noexcept {
+    left = left ^ right;
     return left;
 }
 
@@ -218,6 +237,9 @@ class state {
     bool async_release_wait_;
     unsigned int observers_;
     thread::id async_thread_;
+    thread async_thread_handle_;
+    bool async_join_in_progress_;
+    bool async_joined_;
     shared_ptr<work<T>> deferred_work_;
 
     void notify_ready(unique_lock<mutex>& lock) {
@@ -250,16 +272,62 @@ class state {
         if (invocation) invocation->run(*this);
     }
 
+    void join_async_thread() {
+        thread joiner;
+        {
+            unique_lock<mutex> lock(mutex_);
+            if (!async_release_wait_ || async_thread_ == this_thread::get_id() || async_joined_)
+                return;
+            while (async_join_in_progress_) {
+                condition_.wait(lock, [this] { return async_joined_ || !async_join_in_progress_; });
+                if (async_joined_)
+                    return;
+            }
+            if (!async_thread_handle_.joinable())
+                return;
+            async_join_in_progress_ = true;
+            joiner = std::move(async_thread_handle_);
+        }
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+        try {
+#endif
+            joiner.join();
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+        } catch (...) {
+            unique_lock<mutex> lock(mutex_);
+            async_thread_handle_ = std::move(joiner);
+            async_join_in_progress_ = false;
+            lock.unlock();
+            condition_.notify_all();
+            throw;
+        }
+#endif
+        {
+            unique_lock<mutex> lock(mutex_);
+            async_joined_ = true;
+            async_join_in_progress_ = false;
+        }
+        condition_.notify_all();
+    }
+
 public:
     state()
         : error_(static_cast<future_errc>(0)), ready_(false),
           deferred_(false), deferred_started_(false),
-          async_release_wait_(false), observers_(0), async_thread_() {}
+          async_release_wait_(false), observers_(0), async_thread_(),
+          async_join_in_progress_(false), async_joined_(false) {}
 
     state(const state&) = delete;
     state& operator=(const state&) = delete;
 
-    ~state() {}
+    ~state() {
+        if (!async_thread_handle_.joinable())
+            return;
+        if (async_thread_ == this_thread::get_id())
+            async_thread_handle_.detach();
+        else
+            async_thread_handle_.join();
+    }
 
     template<typename U>
     void set_value(U&& input) {
@@ -399,6 +467,10 @@ public:
         async_thread_ = id;
     }
 
+    void attach_async_thread(thread&& worker) noexcept {
+        async_thread_handle_ = std::move(worker);
+    }
+
     void acquire_observer() noexcept {
         if (__atomic_add_fetch(&observers_, 1u, __ATOMIC_RELAXED) == 0u)
             terminate();
@@ -413,37 +485,51 @@ public:
         bool should_wait = false;
         {
             unique_lock<mutex> lock(mutex_);
-            should_wait = async_release_wait_ && !ready_ &&
-                          async_thread_ != this_thread::get_id();
+            should_wait = async_release_wait_ && async_thread_ != this_thread::get_id();
         }
         if (should_wait) wait();
     }
 
     void wait() {
         run_deferred();
-        unique_lock<mutex> lock(mutex_);
-        condition_.wait(lock, [this] { return ready_; });
+        {
+            unique_lock<mutex> lock(mutex_);
+            condition_.wait(lock, [this] { return ready_; });
+        }
+        join_async_thread();
     }
 
     template<typename Rep, typename Period>
     future_status wait_for(const chrono::duration<Rep, Period>& duration) {
-        unique_lock<mutex> lock(mutex_);
-        if (!ready_ && deferred_ && !deferred_started_)
-            return future_status::deferred;
-        return condition_.wait_for(lock, duration,
-                                   [this] { return ready_; })
-            ? future_status::ready : future_status::timeout;
+        future_status result;
+        {
+            unique_lock<mutex> lock(mutex_);
+            if (!ready_ && deferred_ && !deferred_started_)
+                return future_status::deferred;
+            result = condition_.wait_for(lock, duration, [this] { return ready_; })
+                         ? future_status::ready
+                         : future_status::timeout;
+        }
+        if (result == future_status::ready)
+            join_async_thread();
+        return result;
     }
 
     template<typename Clock, typename Duration>
     future_status wait_until(
         const chrono::time_point<Clock, Duration>& deadline) {
-        unique_lock<mutex> lock(mutex_);
-        if (!ready_ && deferred_ && !deferred_started_)
-            return future_status::deferred;
-        return condition_.wait_until(lock, deadline,
-                                     [this] { return ready_; })
-            ? future_status::ready : future_status::timeout;
+        future_status result;
+        {
+            unique_lock<mutex> lock(mutex_);
+            if (!ready_ && deferred_ && !deferred_started_)
+                return future_status::deferred;
+            result = condition_.wait_until(lock, deadline, [this] { return ready_; })
+                         ? future_status::ready
+                         : future_status::timeout;
+        }
+        if (result == future_status::ready)
+            join_async_thread();
+        return result;
     }
 
     typename conditional<is_void<T>::value, void, T>::type take() {
@@ -550,6 +636,54 @@ struct packaged_callable_impl : packaged_callable<R, Args...> {
                            std::forward<Args>(args)...);
     }
 };
+
+#if __cplusplus >= 201703L
+template<typename Signature>
+struct task_signature;
+
+template<typename R, typename... Args>
+struct task_signature<R (*)(Args...)> {
+    using type = R(Args...);
+};
+
+template<typename R, typename... Args>
+struct task_signature<R (*)(Args...) noexcept> {
+    using type = R(Args...);
+};
+
+#define RIN_FUTURE_TASK_SIGNATURE(CV, REF, NOEXCEPT_SPEC) \
+    template<typename R, typename C, typename... Args> \
+    struct task_signature<R (C::*)(Args...) CV REF NOEXCEPT_SPEC> { \
+        using type = R(Args...); \
+    }
+
+RIN_FUTURE_TASK_SIGNATURE(, , );
+RIN_FUTURE_TASK_SIGNATURE(const, , );
+RIN_FUTURE_TASK_SIGNATURE(volatile, , );
+RIN_FUTURE_TASK_SIGNATURE(const volatile, , );
+RIN_FUTURE_TASK_SIGNATURE(, &, );
+RIN_FUTURE_TASK_SIGNATURE(const, &, );
+RIN_FUTURE_TASK_SIGNATURE(volatile, &, );
+RIN_FUTURE_TASK_SIGNATURE(const volatile, &, );
+RIN_FUTURE_TASK_SIGNATURE(, &&, );
+RIN_FUTURE_TASK_SIGNATURE(const, &&, );
+RIN_FUTURE_TASK_SIGNATURE(volatile, &&, );
+RIN_FUTURE_TASK_SIGNATURE(const volatile, &&, );
+RIN_FUTURE_TASK_SIGNATURE(, , noexcept);
+RIN_FUTURE_TASK_SIGNATURE(const, , noexcept);
+RIN_FUTURE_TASK_SIGNATURE(volatile, , noexcept);
+RIN_FUTURE_TASK_SIGNATURE(const volatile, , noexcept);
+RIN_FUTURE_TASK_SIGNATURE(, &, noexcept);
+RIN_FUTURE_TASK_SIGNATURE(const, &, noexcept);
+RIN_FUTURE_TASK_SIGNATURE(volatile, &, noexcept);
+RIN_FUTURE_TASK_SIGNATURE(const volatile, &, noexcept);
+RIN_FUTURE_TASK_SIGNATURE(, &&, noexcept);
+RIN_FUTURE_TASK_SIGNATURE(const, &&, noexcept);
+RIN_FUTURE_TASK_SIGNATURE(volatile, &&, noexcept);
+RIN_FUTURE_TASK_SIGNATURE(const volatile, &&, noexcept);
+
+#undef RIN_FUTURE_TASK_SIGNATURE
+#endif
 
 } /* namespace __future_detail */
 
@@ -1103,6 +1237,18 @@ void swap(packaged_task<R(Args...)>& left,
     left.swap(right);
 }
 
+#if __cplusplus >= 201703L
+template<typename R, typename... Args>
+packaged_task(R (*)(Args...)) -> packaged_task<R(Args...)>;
+
+template<typename R, typename... Args>
+packaged_task(R (*)(Args...) noexcept) -> packaged_task<R(Args...)>;
+
+template<typename F>
+packaged_task(F) -> packaged_task<
+    typename __future_detail::task_signature<decltype(&F::operator())>::type>;
+#endif
+
 namespace __future_detail {
 
 template<typename R, typename F, typename... Args>
@@ -1135,18 +1281,7 @@ future<R> async_impl(launch policy, F&& function, Args&&... args) {
                 shared->mark_async_thread(this_thread::get_id());
                 invocation->run(*shared);
             });
-#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
-            try {
-                worker.detach();
-            } catch (...) {
-                if (worker.joinable()) {
-                    try { worker.join(); }
-                    catch (...) { terminate(); }
-                }
-            }
-#else
-            worker.detach();
-#endif
+            shared->attach_async_thread(std::move(worker));
             return future<R>(shared);
 #if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
         } catch (...) {

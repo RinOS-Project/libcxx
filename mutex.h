@@ -26,6 +26,9 @@
 
 namespace std {
 
+template<class First, class Second, class... Rest>
+void lock(First& first, Second& second, Rest&... rest);
+
 namespace detail {
 
 [[noreturn]] inline void mutex_operation_failed(int error,

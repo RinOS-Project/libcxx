@@ -25,29 +25,43 @@ namespace std {
 template<class T, class E>
 class expected;
 
+template<class E>
+class unexpected;
+
+namespace detail {
+
+template<class T>
+struct is_unexpected : false_type {};
+
+template<class E>
+struct is_unexpected<unexpected<E>> : true_type {};
+
+} /* namespace detail */
+
 /* ═══════════════════════════════════════════════════════════════
  * unexpected and unexpect
  * ═══════════════════════════════════════════════════════════════*/
 
 template<class E>
 class unexpected {
-    static_assert(is_object<E>::value && !is_array<E>::value &&
+    static_assert(is_object<E>::value && !is_const<E>::value &&
+                      !is_volatile<E>::value && !is_array<E>::value &&
                       !is_function<E>::value &&
+                      !detail::is_unexpected<E>::value &&
                       is_nothrow_destructible<E>::value,
-                  "unexpected requires a nothrow-destructible object error");
+                  "unexpected requires a valid nothrow-destructible object error");
 
     E error_;
 
 public:
     using error_type = E;
 
-    constexpr explicit unexpected(const E& error)
-        requires (is_copy_constructible<E>::value)
-        : error_(error) {}
-
-    constexpr explicit unexpected(E&& error)
-        requires (is_move_constructible<E>::value)
-        : error_(std::move(error)) {}
+    template<class Err = E>
+    constexpr explicit unexpected(Err&& error)
+        requires (!is_same<remove_cvref_t<Err>, unexpected>::value &&
+                  !is_same<remove_cvref_t<Err>, in_place_t>::value &&
+                  is_constructible<E, Err&&>::value)
+        : error_(std::forward<Err>(error)) {}
 
     template<class... Args>
     constexpr explicit unexpected(in_place_t, Args&&... args)
@@ -64,19 +78,6 @@ public:
     constexpr unexpected(unexpected&&) = default;
     constexpr unexpected& operator=(const unexpected&) = default;
     constexpr unexpected& operator=(unexpected&&) = default;
-
-    template<class G>
-    constexpr explicit(!is_convertible<const G&, E>::value)
-    unexpected(const unexpected<G>& other)
-        requires (!is_same<E, G>::value &&
-                  is_constructible<E, const G&>::value)
-        : error_(other.error()) {}
-
-    template<class G>
-    constexpr explicit(!is_convertible<G&&, E>::value)
-    unexpected(unexpected<G>&& other)
-        requires (!is_same<E, G>::value && is_constructible<E, G&&>::value)
-        : error_(std::move(other).error()) {}
 
     constexpr const E& error() const & noexcept { return error_; }
     constexpr E& error() & noexcept { return error_; }
@@ -146,11 +147,11 @@ public:
 
 namespace detail {
 
-template<class T>
+template<class T, bool = is_void<T>::value>
 struct expected_stored_value { using type = remove_cv_t<T>; };
 
-template<>
-struct expected_stored_value<void> { using type = unsigned char; };
+template<class T>
+struct expected_stored_value<T, true> { using type = unsigned char; };
 
 template<class T>
 using expected_stored_value_t = typename expected_stored_value<T>::type;
@@ -167,6 +168,10 @@ union expected_union<T, E, true> {
     E error_;
 
     constexpr expected_union() noexcept : empty_(0) {}
+    constexpr expected_union(const expected_union&) = default;
+    constexpr expected_union(expected_union&&) = default;
+    constexpr expected_union& operator=(const expected_union&) = default;
+    constexpr expected_union& operator=(expected_union&&) = default;
     constexpr ~expected_union() = default;
 };
 
@@ -177,6 +182,10 @@ union expected_union<T, E, false> {
     E error_;
 
     constexpr expected_union() noexcept : empty_(0) {}
+    constexpr expected_union(const expected_union&) = default;
+    constexpr expected_union(expected_union&&) = default;
+    constexpr expected_union& operator=(const expected_union&) = default;
+    constexpr expected_union& operator=(expected_union&&) = default;
     constexpr ~expected_union() {}
 };
 
@@ -193,6 +202,10 @@ struct expected_storage<T, E, true> {
 
     constexpr expected_storage() noexcept
         : data_(), has_value_(false), active_(false) {}
+    constexpr expected_storage(const expected_storage&) = default;
+    constexpr expected_storage(expected_storage&&) = default;
+    constexpr expected_storage& operator=(const expected_storage&) = default;
+    constexpr expected_storage& operator=(expected_storage&&) = default;
     constexpr ~expected_storage() = default;
 };
 
@@ -204,6 +217,10 @@ struct expected_storage<T, E, false> {
 
     constexpr expected_storage() noexcept
         : data_(), has_value_(false), active_(false) {}
+    constexpr expected_storage(const expected_storage&) = default;
+    constexpr expected_storage(expected_storage&&) = default;
+    constexpr expected_storage& operator=(const expected_storage&) = default;
+    constexpr expected_storage& operator=(expected_storage&&) = default;
 
     constexpr ~expected_storage() {
         if (!active_) return;
@@ -220,12 +237,6 @@ struct is_expected : false_type {};
 
 template<class T, class E>
 struct is_expected<expected<T, E>, void> : true_type {};
-
-template<class T>
-struct is_unexpected : false_type {};
-
-template<class E>
-struct is_unexpected<unexpected<E>> : true_type {};
 
 template<class T>
 struct expected_traits;
@@ -406,10 +417,13 @@ class expected : private detail::expected_storage<T, E> {
                       !is_array<T>::value && !is_function<T>::value &&
                       is_nothrow_destructible<T>::value &&
                       !is_same<remove_cv_t<T>, in_place_t>::value &&
-                      !is_same<remove_cv_t<T>, unexpect_t>::value,
+                      !is_same<remove_cv_t<T>, unexpect_t>::value &&
+                      !detail::is_unexpected<remove_cv_t<T>>::value,
                   "expected value type must be a nothrow-destructible object");
-    static_assert(is_object<E>::value && !is_array<E>::value &&
+    static_assert(is_object<E>::value && !is_const<E>::value &&
+                      !is_volatile<E>::value && !is_array<E>::value &&
                       !is_function<E>::value &&
+                      !detail::is_unexpected<E>::value &&
                       is_nothrow_destructible<E>::value,
                   "expected error type must be a nothrow-destructible object");
 
@@ -470,9 +484,15 @@ public:
         this->active_ = true;
     }
 
+    constexpr expected(const expected&)
+        requires (is_trivially_copy_constructible<T>::value &&
+                  is_trivially_copy_constructible<E>::value) = default;
+
     constexpr expected(const expected& other)
         requires (is_copy_constructible<T>::value &&
-                  is_copy_constructible<E>::value)
+                  is_copy_constructible<E>::value &&
+                  !(is_trivially_copy_constructible<T>::value &&
+                    is_trivially_copy_constructible<E>::value))
         : base() {
         construct_from(other);
     }
@@ -484,8 +504,16 @@ public:
     constexpr expected(expected&& other)
         noexcept(is_nothrow_move_constructible<T>::value &&
                  is_nothrow_move_constructible<E>::value)
+        requires (is_trivially_move_constructible<T>::value &&
+                  is_trivially_move_constructible<E>::value) = default;
+
+    constexpr expected(expected&& other)
+        noexcept(is_nothrow_move_constructible<T>::value &&
+                 is_nothrow_move_constructible<E>::value)
         requires (is_move_constructible<T>::value &&
-                  is_move_constructible<E>::value)
+                  is_move_constructible<E>::value &&
+                  !(is_trivially_move_constructible<T>::value &&
+                    is_trivially_move_constructible<E>::value))
         : base() {
         construct_from(std::move(other));
     }
@@ -501,7 +529,16 @@ public:
         requires (!is_same<expected, expected<U, G>>::value &&
                   !is_void<U>::value &&
                   is_constructible<T, const U&>::value &&
-                  is_constructible<E, const G&>::value)
+                  is_constructible<E, const G&>::value &&
+                  (is_same<remove_cv_t<T>, bool>::value ||
+                   !(is_constructible<T, expected<U, G>&>::value ||
+                     is_constructible<T, const expected<U, G>&>::value ||
+                     is_constructible<T, expected<U, G>&&>::value ||
+                     is_constructible<T, const expected<U, G>&&>::value)) &&
+                  !is_constructible<unexpected<E>, expected<U, G>&>::value &&
+                  !is_constructible<unexpected<E>, const expected<U, G>&>::value &&
+                  !is_constructible<unexpected<E>, expected<U, G>&&>::value &&
+                  !is_constructible<unexpected<E>, const expected<U, G>&&>::value)
         : base() {
         construct_from(other);
     }
@@ -513,7 +550,16 @@ public:
         requires (!is_same<expected, expected<U, G>>::value &&
                   !is_void<U>::value &&
                   is_constructible<T, U&&>::value &&
-                  is_constructible<E, G&&>::value)
+                  is_constructible<E, G&&>::value &&
+                  (is_same<remove_cv_t<T>, bool>::value ||
+                   !(is_constructible<T, expected<U, G>&>::value ||
+                     is_constructible<T, const expected<U, G>&>::value ||
+                     is_constructible<T, expected<U, G>&&>::value ||
+                     is_constructible<T, const expected<U, G>&&>::value)) &&
+                  !is_constructible<unexpected<E>, expected<U, G>&>::value &&
+                  !is_constructible<unexpected<E>, const expected<U, G>&>::value &&
+                  !is_constructible<unexpected<E>, expected<U, G>&&>::value &&
+                  !is_constructible<unexpected<E>, const expected<U, G>&&>::value)
         : base() {
         construct_from(std::move(other));
     }
@@ -521,10 +567,12 @@ public:
     template<class U = remove_cv_t<T>>
     constexpr explicit(!is_convertible<U&&, T>::value)
     expected(U&& value)
-        requires (!detail::is_expected<remove_cvref_t<U>, void>::value &&
+        requires (!is_same<remove_cvref_t<U>, expected>::value &&
                   !detail::is_unexpected<remove_cvref_t<U>>::value &&
                   !is_same<remove_cvref_t<U>, in_place_t>::value &&
                   !is_same<remove_cvref_t<U>, unexpect_t>::value &&
+                  (!is_same<remove_cv_t<T>, bool>::value ||
+                   !detail::is_expected<remove_cvref_t<U>, void>::value) &&
                   is_constructible<T, U&&>::value)
         : base() {
         construct_at(addressof(this->data_.value_),
@@ -598,11 +646,27 @@ public:
 
     constexpr ~expected() = default;
 
+    constexpr expected& operator=(const expected&)
+        requires (is_trivially_copy_constructible<T>::value &&
+                  is_trivially_copy_assignable<T>::value &&
+                  is_trivially_destructible<T>::value &&
+                  is_trivially_copy_constructible<E>::value &&
+                  is_trivially_copy_assignable<E>::value &&
+                  is_trivially_destructible<E>::value &&
+                  (is_nothrow_move_constructible<T>::value ||
+                   is_nothrow_move_constructible<E>::value)) = default;
+
     constexpr expected& operator=(const expected& other)
         requires (is_copy_constructible<T>::value &&
                   is_copy_assignable<T>::value &&
                   is_copy_constructible<E>::value &&
                   is_copy_assignable<E>::value &&
+                  !(is_trivially_copy_constructible<T>::value &&
+                    is_trivially_copy_assignable<T>::value &&
+                    is_trivially_destructible<T>::value &&
+                    is_trivially_copy_constructible<E>::value &&
+                    is_trivially_copy_assignable<E>::value &&
+                    is_trivially_destructible<E>::value) &&
                   (is_nothrow_move_constructible<T>::value ||
                    is_nothrow_move_constructible<E>::value)) {
         assign_from(other);
@@ -622,10 +686,30 @@ public:
                  is_nothrow_move_assignable<T>::value &&
                  is_nothrow_move_constructible<E>::value &&
                  is_nothrow_move_assignable<E>::value)
+        requires (is_trivially_move_constructible<T>::value &&
+                  is_trivially_move_assignable<T>::value &&
+                  is_trivially_destructible<T>::value &&
+                  is_trivially_move_constructible<E>::value &&
+                  is_trivially_move_assignable<E>::value &&
+                  is_trivially_destructible<E>::value &&
+                  (is_nothrow_move_constructible<T>::value ||
+                   is_nothrow_move_constructible<E>::value)) = default;
+
+    constexpr expected& operator=(expected&& other)
+        noexcept(is_nothrow_move_constructible<T>::value &&
+                 is_nothrow_move_assignable<T>::value &&
+                 is_nothrow_move_constructible<E>::value &&
+                 is_nothrow_move_assignable<E>::value)
         requires (is_move_constructible<T>::value &&
                   is_move_assignable<T>::value &&
                   is_move_constructible<E>::value &&
                   is_move_assignable<E>::value &&
+                  !(is_trivially_move_constructible<T>::value &&
+                    is_trivially_move_assignable<T>::value &&
+                    is_trivially_destructible<T>::value &&
+                    is_trivially_move_constructible<E>::value &&
+                    is_trivially_move_assignable<E>::value &&
+                    is_trivially_destructible<E>::value) &&
                   (is_nothrow_move_constructible<T>::value ||
                    is_nothrow_move_constructible<E>::value)) {
         assign_from(std::move(other));
@@ -642,7 +726,7 @@ public:
 
     template<class U = remove_cv_t<T>>
     constexpr expected& operator=(U&& value)
-        requires (!detail::is_expected<remove_cvref_t<U>, void>::value &&
+        requires (!is_same<remove_cvref_t<U>, expected>::value &&
                   !detail::is_unexpected<remove_cvref_t<U>>::value &&
                   is_constructible<T, U&&>::value &&
                   is_assignable<T&, U&&>::value &&
@@ -944,14 +1028,16 @@ public:
  * expected<void, E>
  * ═══════════════════════════════════════════════════════════════*/
 
-template<class E>
-class expected<void, E> : private detail::expected_storage<void, E> {
-    static_assert(is_object<E>::value && !is_array<E>::value &&
+template<class T, class E> requires (is_void<T>::value)
+class expected<T, E> : private detail::expected_storage<T, E> {
+    static_assert(is_object<E>::value && !is_const<E>::value &&
+                      !is_volatile<E>::value && !is_array<E>::value &&
                       !is_function<E>::value &&
+                      !detail::is_unexpected<E>::value &&
                       is_nothrow_destructible<E>::value,
                   "expected error type must be a nothrow-destructible object");
 
-    using base = detail::expected_storage<void, E>;
+    using base = detail::expected_storage<T, E>;
     template<class, class> friend class expected;
 
     constexpr void construct_value() noexcept {
@@ -993,7 +1079,7 @@ class expected<void, E> : private detail::expected_storage<void, E> {
     }
 
 public:
-    using value_type = void;
+    using value_type = T;
     using error_type = E;
     using unexpected_type = unexpected<E>;
     template<class U> using rebind = expected<U, E>;
@@ -1001,15 +1087,24 @@ public:
     constexpr expected() noexcept : base() { construct_value(); }
     constexpr expected(in_place_t) noexcept : expected() {}
 
+    constexpr expected(const expected&)
+        requires (is_trivially_copy_constructible<E>::value) = default;
+
     constexpr expected(const expected& other)
-        requires (is_copy_constructible<E>::value)
+        requires (is_copy_constructible<E>::value &&
+                  !is_trivially_copy_constructible<E>::value)
         : base() { construct_from(other); }
     constexpr expected(const expected&)
         requires (!is_copy_constructible<E>::value) = delete;
 
     constexpr expected(expected&& other)
         noexcept(is_nothrow_move_constructible<E>::value)
-        requires (is_move_constructible<E>::value)
+        requires (is_trivially_move_constructible<E>::value) = default;
+
+    constexpr expected(expected&& other)
+        noexcept(is_nothrow_move_constructible<E>::value)
+        requires (is_move_constructible<E>::value &&
+                  !is_trivially_move_constructible<E>::value)
         : base() { construct_from(std::move(other)); }
     constexpr expected(expected&&)
         requires (!is_move_constructible<E>::value) = delete;
@@ -1018,14 +1113,24 @@ public:
     constexpr explicit(!is_convertible<const G&, E>::value)
     expected(const expected<U, G>& other)
         requires (!is_same<expected, expected<U, G>>::value &&
-                  is_constructible<E, const G&>::value)
+                  is_void<U>::value &&
+                  is_constructible<E, const G&>::value &&
+                  !is_constructible<unexpected<E>, expected<U, G>&>::value &&
+                  !is_constructible<unexpected<E>, const expected<U, G>&>::value &&
+                  !is_constructible<unexpected<E>, expected<U, G>&&>::value &&
+                  !is_constructible<unexpected<E>, const expected<U, G>&&>::value)
         : base() { construct_from(other); }
 
     template<class U, class G>
     constexpr explicit(!is_convertible<G&&, E>::value)
     expected(expected<U, G>&& other)
         requires (!is_same<expected, expected<U, G>>::value &&
-                  is_constructible<E, G&&>::value)
+                  is_void<U>::value &&
+                  is_constructible<E, G&&>::value &&
+                  !is_constructible<unexpected<E>, expected<U, G>&>::value &&
+                  !is_constructible<unexpected<E>, const expected<U, G>&>::value &&
+                  !is_constructible<unexpected<E>, expected<U, G>&&>::value &&
+                  !is_constructible<unexpected<E>, const expected<U, G>&&>::value)
         : base() { construct_from(std::move(other)); }
 
     template<class G>
@@ -1071,9 +1176,17 @@ public:
 
     constexpr ~expected() = default;
 
+    constexpr expected& operator=(const expected&)
+        requires (is_trivially_copy_constructible<E>::value &&
+                  is_trivially_copy_assignable<E>::value &&
+                  is_trivially_destructible<E>::value) = default;
+
     constexpr expected& operator=(const expected& other)
         requires (is_copy_constructible<E>::value &&
-                  is_copy_assignable<E>::value) {
+                  is_copy_assignable<E>::value &&
+                  !(is_trivially_copy_constructible<E>::value &&
+                    is_trivially_copy_assignable<E>::value &&
+                    is_trivially_destructible<E>::value)) {
         assign_from(other);
         return *this;
     }
@@ -1081,11 +1194,21 @@ public:
         requires (!(is_copy_constructible<E>::value &&
                     is_copy_assignable<E>::value)) = delete;
 
+    constexpr expected& operator=(expected&&)
+        noexcept(is_nothrow_move_constructible<E>::value &&
+                 is_nothrow_move_assignable<E>::value)
+        requires (is_trivially_move_constructible<E>::value &&
+                  is_trivially_move_assignable<E>::value &&
+                  is_trivially_destructible<E>::value) = default;
+
     constexpr expected& operator=(expected&& other)
         noexcept(is_nothrow_move_constructible<E>::value &&
                  is_nothrow_move_assignable<E>::value)
         requires (is_move_constructible<E>::value &&
-                  is_move_assignable<E>::value) {
+                  is_move_assignable<E>::value &&
+                  !(is_trivially_move_constructible<E>::value &&
+                    is_trivially_move_assignable<E>::value &&
+                    is_trivially_destructible<E>::value)) {
         assign_from(std::move(other));
         return *this;
     }
@@ -1271,12 +1394,13 @@ constexpr bool operator==(const expected<T, E>& lhs,
                            : static_cast<bool>(lhs.error() == rhs.error());
 }
 
-template<class E, class G>
-constexpr bool operator==(const expected<void, E>& lhs,
-                          const expected<void, G>& rhs)
-    requires requires(const E& left, const G& right) {
-        { left == right } -> convertible_to<bool>;
-    }
+template<class T, class E, class U, class G>
+constexpr bool operator==(const expected<T, E>& lhs,
+                          const expected<U, G>& rhs)
+    requires (is_void<T>::value && is_void<U>::value &&
+              requires(const E& left, const G& right) {
+                  { left == right } -> convertible_to<bool>;
+              })
 {
     if (lhs.has_value() != rhs.has_value()) return false;
     return lhs.has_value() ||
