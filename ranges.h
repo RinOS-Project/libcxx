@@ -262,6 +262,17 @@ concept range = requires {
     typename detail::range_access<T>::sentinel;
 } && input_or_output_iterator<iterator_t<T>>;
 
+#if defined(RIN_LIBCXX_CXX23_DIALECT)
+template<range R, typename Allocator = allocator<byte>>
+struct elements_of {
+    [[no_unique_address]] R range;
+    [[no_unique_address]] Allocator allocator = Allocator();
+};
+
+template<range R, typename Allocator = allocator<byte>>
+elements_of(R&&, Allocator = Allocator()) -> elements_of<R&&, Allocator>;
+#endif
+
 template<typename T>
 concept input_range = range<T> &&
     input_iterator<iterator_t<T>>;

@@ -507,7 +507,7 @@ concept sized_sentinel_for = sentinel_for<S, I> &&
 
 template<typename I>
 concept input_iterator = input_or_output_iterator<I> &&
-    indirectly_readable<I> && sentinel_for<I, I> &&
+    indirectly_readable<I> &&
     detail::iterator_concept_at_least<I, input_iterator_tag>::value;
 
 template<typename Out, typename T>

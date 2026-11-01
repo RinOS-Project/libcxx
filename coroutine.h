@@ -352,24 +352,24 @@ inline constexpr bool is_coroutine_handle_v = is_coroutine_handle<T>::value;
 } /* namespace std */
 
 /* ═══════════════════════════════════════════════════════════════
- * サンプル: 基本的なジェネレータ
+ * Rin-specific teaching generator. C++23 std::generator is in <generator>.
  * ═══════════════════════════════════════════════════════════════*/
 
 #if RIN_HAS_COROUTINES
 
-namespace std {
+namespace rin {
 
 template<typename T>
 struct generator {
     struct promise_type {
         T current_value;
-        exception_ptr exception;
+        std::exception_ptr exception;
 
         /* A coroutine promise may opt into the standard allocation-failure
          * path only when its allocation function is non-throwing.  Keep the
          * generator frame on the Rin allocator and return an empty generator
          * when that allocator cannot supply a frame. */
-        static void* operator new(size_t size) noexcept {
+        static void* operator new(std::size_t size) noexcept {
             return rin_malloc(size);
         }
 
@@ -377,22 +377,23 @@ struct generator {
             rin_free(memory);
         }
 
-        static void operator delete(void* memory, size_t) noexcept {
+        static void operator delete(void* memory, std::size_t) noexcept {
             rin_free(memory);
         }
 
         static generator get_return_object_on_allocation_failure() noexcept {
-            return generator{coroutine_handle<promise_type>{}};
+            return generator{std::coroutine_handle<promise_type>{}};
         }
 
         generator get_return_object() noexcept {
-            return generator{coroutine_handle<promise_type>::from_promise(*this)};
+            return generator{
+                std::coroutine_handle<promise_type>::from_promise(*this)};
         }
 
-        suspend_always initial_suspend() noexcept { return {}; }
-        suspend_always final_suspend() noexcept { return {}; }
+        std::suspend_always initial_suspend() noexcept { return {}; }
+        std::suspend_always final_suspend() noexcept { return {}; }
 
-        suspend_always yield_value(T value) {
+        std::suspend_always yield_value(T value) {
             current_value = std::move(value);
             return {};
         }
@@ -400,16 +401,16 @@ struct generator {
         void return_void() {}
         void unhandled_exception() noexcept {
 #if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
-            exception = current_exception();
+            exception = std::current_exception();
 #else
             __builtin_trap();
 #endif
         }
     };
 
-    coroutine_handle<promise_type> handle_;
+    std::coroutine_handle<promise_type> handle_;
 
-    generator(coroutine_handle<promise_type> h) noexcept : handle_(h) {}
+    generator(std::coroutine_handle<promise_type> h) noexcept : handle_(h) {}
 
     ~generator() {
         if (handle_) {
@@ -435,14 +436,14 @@ struct generator {
 
     /* イテレータインターフェース */
     struct iterator {
-        coroutine_handle<promise_type> handle_;
+        std::coroutine_handle<promise_type> handle_;
 
         iterator& operator++() {
             handle_.resume();
             if (handle_.promise().exception) {
-                exception_ptr exception = handle_.promise().exception;
+                std::exception_ptr exception = handle_.promise().exception;
                 handle_ = nullptr;
-                rethrow_exception(exception);
+                std::rethrow_exception(exception);
             }
             if (handle_.done()) {
                 handle_ = nullptr;
@@ -462,14 +463,14 @@ struct generator {
     iterator begin() {
         if (handle_) {
             if (handle_.promise().exception) {
-                rethrow_exception(handle_.promise().exception);
+                std::rethrow_exception(handle_.promise().exception);
             }
             if (handle_.done()) {
                 return {nullptr};
             }
             handle_.resume();
             if (handle_.promise().exception) {
-                rethrow_exception(handle_.promise().exception);
+                std::rethrow_exception(handle_.promise().exception);
             }
             if (handle_.done()) {
                 return {nullptr};
@@ -483,7 +484,7 @@ struct generator {
     }
 };
 
-} /* namespace std */
+} /* namespace rin */
 
 #endif /* RIN_HAS_COROUTINES */
 

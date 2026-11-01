@@ -194,6 +194,10 @@
 #define __cpp_lib_expected                    202211L
 #define __cpp_lib_print                       202207L
 #define __cpp_lib_mdspan                      202207L
+#if (defined(__cpp_impl_coroutine) && __cpp_impl_coroutine >= 201902L) || \
+    (defined(__cpp_coroutines) && __cpp_coroutines >= 201703L)
+#define __cpp_lib_generator                   202207L
+#endif
 #define __cpp_lib_is_scoped_enum              202011L
 #if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RATIO)
 #define __cpp_lib_ratio                       202306L
