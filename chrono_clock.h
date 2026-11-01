@@ -75,36 +75,13 @@ inline bool chrono_platform_clock_read(chrono_clock_kind kind,
         return true;
     }
 
-    /* The kernel exposes the legacy gettimeofday carrier with native word
-     * fields: two 32-bit words in the IA-32 dispatcher and two 64-bit words
-     * in the x86_64 dispatcher.  Do not spell this as `long`: Win64/LLP64
-     * freestanding builds have a 32-bit long even though their syscall ABI is
-     * 64-bit, and the kernel would otherwise overwrite a short buffer. */
-#if defined(__x86_64__) || defined(_M_X64)
-    struct rin_timeval_wire {
-        unsigned long long seconds;
-        unsigned long long microseconds;
-    } value = {};
-    static_assert(sizeof(rin_timeval_wire) == 16,
-                  "x86_64 gettimeofday wire must be 16 bytes");
-#else
-    struct rin_timeval_wire {
-        unsigned long seconds;
-        unsigned long microseconds;
-    } value = {};
-    static_assert(sizeof(rin_timeval_wire) == 8,
-                  "i686 gettimeofday wire must be 8 bytes");
-#endif
-    const intptr_t result = _syscall2(
-        (uintptr_t)SYS_GETTIMEOFDAY, reinterpret_cast<uintptr_t>(&value),
-        (uintptr_t)0);
-    if (result != 0) return false;
-    if (value.seconds > static_cast<unsigned long long>(
-            numeric_limits<long long>::max()) ||
-        value.microseconds >= 1000000ULL)
-        return false;
-    sample.seconds = static_cast<long long>(value.seconds);
-    sample.nanoseconds = static_cast<long>(value.microseconds * 1000ULL);
+    /* system_clock uses a signed epoch-relative representation. The legacy
+     * gettimeofday wire stores seconds as unsigned and cannot represent a
+     * realtime value before the epoch, so read the signed time64 contract. */
+    struct timespec value = {};
+    if (::clock_gettime(CLOCK_REALTIME, &value) != 0) return false;
+    sample.seconds = static_cast<long long>(value.tv_sec);
+    sample.nanoseconds = value.tv_nsec;
     return true;
 #endif
 }
