@@ -17,6 +17,18 @@
 #include "limits.h"
 #include "system_error.h"
 
+#if defined(__LDBL_MANT_DIG__) && defined(__LDBL_MAX_EXP__) && \
+    ((__LDBL_MANT_DIG__ == 64 && __LDBL_MAX_EXP__ == 16384 && \
+      defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && \
+      defined(__ORDER_BIG_ENDIAN__) && \
+      (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__ || \
+       __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)) || \
+     (__LDBL_MANT_DIG__ == 53 && __LDBL_MAX_EXP__ == 1024))
+#define RIN_LIBCXX_LONG_DOUBLE_CHARCONV_SUPPORTED 1
+#else
+#define RIN_LIBCXX_LONG_DOUBLE_CHARCONV_SUPPORTED 0
+#endif
+
 #if __cplusplus > 202002L
 #define RIN_CHARCONV_CONSTEXPR23 constexpr
 #else
@@ -2176,17 +2188,13 @@ inline to_chars_result to_chars(char* first, char* last, double value) {
                                chars_format::general, false, 0, true);
 }
 
-#if defined(__LDBL_MANT_DIG__) && defined(__LDBL_MAX_EXP__) && \
-    ((__LDBL_MANT_DIG__ == 64 && __LDBL_MAX_EXP__ == 16384 && \
-      defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && \
-      defined(__ORDER_BIG_ENDIAN__) && \
-      (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__ || \
-       __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)) || \
-     (__LDBL_MANT_DIG__ == 53 && __LDBL_MAX_EXP__ == 1024))
+#if RIN_LIBCXX_LONG_DOUBLE_CHARCONV_SUPPORTED
 inline to_chars_result to_chars(char* first, char* last, long double value) {
     return detail::fp_to_chars(first, last, detail::fp_decode(value),
                                chars_format::general, false, 0, true);
 }
+#else
+inline to_chars_result to_chars(char*, char*, long double) = delete;
 #endif
 
 inline to_chars_result to_chars(char* first, char* last, float value,
@@ -2201,18 +2209,15 @@ inline to_chars_result to_chars(char* first, char* last, double value,
                                false, 0);
 }
 
-#if defined(__LDBL_MANT_DIG__) && defined(__LDBL_MAX_EXP__) && \
-    ((__LDBL_MANT_DIG__ == 64 && __LDBL_MAX_EXP__ == 16384 && \
-      defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && \
-      defined(__ORDER_BIG_ENDIAN__) && \
-      (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__ || \
-       __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)) || \
-     (__LDBL_MANT_DIG__ == 53 && __LDBL_MAX_EXP__ == 1024))
+#if RIN_LIBCXX_LONG_DOUBLE_CHARCONV_SUPPORTED
 inline to_chars_result to_chars(char* first, char* last, long double value,
                                 chars_format format) {
     return detail::fp_to_chars(first, last, detail::fp_decode(value), format,
                                false, 0);
 }
+#else
+inline to_chars_result to_chars(char*, char*, long double,
+                                chars_format) = delete;
 #endif
 
 inline to_chars_result to_chars(char* first, char* last, float value,
@@ -2221,18 +2226,15 @@ inline to_chars_result to_chars(char* first, char* last, float value,
                                true, precision);
 }
 
-#if defined(__LDBL_MANT_DIG__) && defined(__LDBL_MAX_EXP__) && \
-    ((__LDBL_MANT_DIG__ == 64 && __LDBL_MAX_EXP__ == 16384 && \
-      defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && \
-      defined(__ORDER_BIG_ENDIAN__) && \
-      (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__ || \
-       __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)) || \
-     (__LDBL_MANT_DIG__ == 53 && __LDBL_MAX_EXP__ == 1024))
+#if RIN_LIBCXX_LONG_DOUBLE_CHARCONV_SUPPORTED
 inline to_chars_result to_chars(char* first, char* last, long double value,
                                 chars_format format, int precision) {
     return detail::fp_to_chars(first, last, detail::fp_decode(value), format,
                                true, precision);
 }
+#else
+inline to_chars_result to_chars(char*, char*, long double,
+                                chars_format, int) = delete;
 #endif
 
 inline from_chars_result from_chars(const char* first, const char* last,
@@ -2249,19 +2251,16 @@ inline from_chars_result from_chars(const char* first, const char* last,
         : detail::fp_from_chars_decimal(first, last, value, format);
 }
 
-#if defined(__LDBL_MANT_DIG__) && defined(__LDBL_MAX_EXP__) && \
-    ((__LDBL_MANT_DIG__ == 64 && __LDBL_MAX_EXP__ == 16384 && \
-      defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && \
-      defined(__ORDER_BIG_ENDIAN__) && \
-      (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__ || \
-       __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)) || \
-     (__LDBL_MANT_DIG__ == 53 && __LDBL_MAX_EXP__ == 1024))
+#if RIN_LIBCXX_LONG_DOUBLE_CHARCONV_SUPPORTED
 inline from_chars_result from_chars(const char* first, const char* last,
                                     long double& value, chars_format format) {
     return format == chars_format::hex
         ? detail::fp_from_chars_hex(first, last, value)
         : detail::fp_from_chars_decimal(first, last, value, format);
 }
+#else
+inline from_chars_result from_chars(const char*, const char*, long double&,
+                                    chars_format) = delete;
 #endif
 
 inline from_chars_result from_chars(const char* first, const char* last,
@@ -2276,18 +2275,15 @@ inline from_chars_result from_chars(const char* first, const char* last,
                                          chars_format::general);
 }
 
-#if defined(__LDBL_MANT_DIG__) && defined(__LDBL_MAX_EXP__) && \
-    ((__LDBL_MANT_DIG__ == 64 && __LDBL_MAX_EXP__ == 16384 && \
-      defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && \
-      defined(__ORDER_BIG_ENDIAN__) && \
-      (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__ || \
-       __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)) || \
-     (__LDBL_MANT_DIG__ == 53 && __LDBL_MAX_EXP__ == 1024))
+#if RIN_LIBCXX_LONG_DOUBLE_CHARCONV_SUPPORTED
 inline from_chars_result from_chars(const char* first, const char* last,
                                     long double& value) {
     return detail::fp_from_chars_decimal(first, last, value,
                                          chars_format::general);
 }
+#else
+inline from_chars_result from_chars(const char*, const char*, long double&) =
+    delete;
 #endif
 
 inline to_chars_result to_chars(char* first, char* last, double value,
@@ -2304,32 +2300,13 @@ inline to_chars_result to_chars(char* first, char* last, double value,
 #if defined(RINCXX_STRING_H)
 namespace std {
 
-/* `long double` is a distinct standard overload even when the target uses a
- * wider x87 representation.  The representation-aware charconv owner keeps
- * six fixed fractional digits without a narrowing conversion. */
+#if RIN_LIBCXX_LONG_DOUBLE_CHARCONV_SUPPORTED
+/* Keep six fixed fractional digits without narrowing the supported ABI. */
 inline string to_string(long double value) {
     char buffer[16384];
-#if defined(__LDBL_MANT_DIG__) && defined(__LDBL_MAX_EXP__) && \
-    ((__LDBL_MANT_DIG__ == 64 && __LDBL_MAX_EXP__ == 16384 && \
-      defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && \
-      defined(__ORDER_BIG_ENDIAN__) && \
-      (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__ || \
-       __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)) || \
-     (__LDBL_MANT_DIG__ == 53 && __LDBL_MAX_EXP__ == 1024))
-    /* The representation-aware overload is present only for ABIs whose
-     * payload decoder is implemented above. */
     const to_chars_result converted =
         std::to_chars(buffer, buffer + sizeof(buffer), value,
                       chars_format::fixed, 6);
-#else
-    /* Keep <string> well-formed on an unknown long-double ABI.  This is a
-     * bounded compatibility fallback, not an implementation of that ABI's
-     * long-double charconv contract; the value is deliberately narrowed and
-     * the unsupported ABI remains tracked in TODO.md. */
-    const to_chars_result converted =
-        std::to_chars(buffer, buffer + sizeof(buffer),
-                      static_cast<double>(value), chars_format::fixed, 6);
-#endif
     if (converted.ec != errc{}) return string();
     return string(buffer, static_cast<size_t>(converted.ptr - buffer));
 }
@@ -2337,6 +2314,10 @@ inline string to_string(long double value) {
 inline wstring to_wstring(long double value) {
     return __detail::narrow_to_wstring(to_string(value));
 }
+#else
+inline string to_string(long double) = delete;
+inline wstring to_wstring(long double) = delete;
+#endif
 
 } /* namespace std */
 #endif
