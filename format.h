@@ -173,6 +173,9 @@ constexpr bool validate_literal_string_spec(const CharT* spec, size_t length,
         while (cursor < length && format_spec_is_digit(spec[cursor])) ++cursor;
     }
     if (cursor < length && spec[cursor] == static_cast<CharT>('s')) ++cursor;
+#if __cplusplus > 202002L
+    if (cursor < length && spec[cursor] == static_cast<CharT>('?')) ++cursor;
+#endif
     if (allow_character && cursor < length &&
         spec[cursor] == static_cast<CharT>('c')) {
         ++cursor;
@@ -1464,12 +1467,166 @@ template<> struct formatter<long double, wchar_t> : detail::float_formatter<wcha
 
 namespace detail {
 
+#if __cplusplus > 202002L
+template<typename CharT>
+constexpr bool format_debug_nonprinting(uint32_t value) {
+    if (value <= 0x1fu || (value >= 0x7fu && value <= 0x9fu)) return true;
+    if (value == 0x00adu || value == 0x034fu || value == 0x061cu ||
+        value == 0x115fu || value == 0x1160u || value == 0x1680u ||
+        value == 0x17b4u || value == 0x17b5u || value == 0x180eu ||
+        value == 0x200bu || value == 0x200cu || value == 0x200du ||
+        value == 0x2028u || value == 0x2029u || value == 0x202fu ||
+        value == 0x205fu || value == 0x3000u || value == 0xfeffu ||
+        value == 0xfff9u || value == 0xfffau || value == 0xfffbu ||
+        value == 0x3164u || value == 0xffa0u) return true;
+    return (value >= 0x0300u && value <= 0x036fu) ||
+           (value >= 0x0483u && value <= 0x0489u) ||
+           (value >= 0x0591u && value <= 0x05bdu) ||
+           (value >= 0x0610u && value <= 0x061au) ||
+           (value >= 0x064bu && value <= 0x065fu) ||
+           (value >= 0x06d6u && value <= 0x06edu) ||
+           (value >= 0x0900u && value <= 0x0903u) ||
+           (value >= 0x093au && value <= 0x094fu) ||
+           (value >= 0x1ab0u && value <= 0x1affu) ||
+           (value >= 0x1dc0u && value <= 0x1dffu) ||
+           (value >= 0x2000u && value <= 0x200au) ||
+           (value >= 0x202au && value <= 0x202eu) ||
+           (value >= 0x2060u && value <= 0x206fu) ||
+           (value >= 0x20d0u && value <= 0x20ffu) ||
+           (value >= 0xfe00u && value <= 0xfe0fu) ||
+           (value >= 0xe0100u && value <= 0xe01efu) ||
+           (value >= 0xe0000u && value <= 0xe0fffu);
+}
+
+template<typename CharT>
+void format_debug_append_hex(basic_string<CharT>& output, uint32_t value,
+                             bool byte_escape = false) {
+    static constexpr char digits[] = "0123456789abcdef";
+    char buffer[8];
+    size_t count = 0u;
+    do {
+        buffer[count++] = digits[value & 0xfu];
+        value >>= 4u;
+    } while (value != 0u);
+    output.push_back(static_cast<CharT>('\\'));
+    output.push_back(static_cast<CharT>(byte_escape ? 'x' : 'u'));
+    output.push_back(static_cast<CharT>('{'));
+    while (count != 0u) output.push_back(static_cast<CharT>(buffer[--count]));
+    output.push_back(static_cast<CharT>('}'));
+}
+
+template<typename CharT>
+basic_string<CharT> format_debug_escape(const CharT* data, size_t size,
+                                        bool character = false) {
+    basic_string<CharT> output;
+    const CharT quote = static_cast<CharT>(character ? '\'' : '"');
+    if (!data && size != 0u) format_fail();
+    output.push_back(quote);
+    for (size_t index = 0u; index < size;) {
+        uint32_t code_point;
+        size_t units = 1u;
+        bool invalid_code_unit = false;
+        if constexpr (is_same_v<CharT, char>) {
+            const auto first = static_cast<unsigned char>(data[index]);
+            code_point = first;
+            if (first >= 0x80u) {
+                if (first >= 0xc2u && first <= 0xdfu && index + 1u < size &&
+                    (static_cast<unsigned char>(data[index + 1u]) & 0xc0u) == 0x80u) {
+                    code_point = ((first & 0x1fu) << 6u) |
+                        (static_cast<unsigned char>(data[index + 1u]) & 0x3fu);
+                    units = 2u;
+                } else if (first >= 0xe0u && first <= 0xefu && index + 2u < size) {
+                    const auto second = static_cast<unsigned char>(data[index + 1u]);
+                    const auto third = static_cast<unsigned char>(data[index + 2u]);
+                    if ((second & 0xc0u) == 0x80u && (third & 0xc0u) == 0x80u &&
+                        !(first == 0xe0u && second < 0xa0u) &&
+                        !(first == 0xedu && second >= 0xa0u)) {
+                        code_point = ((first & 0x0fu) << 12u) |
+                            ((second & 0x3fu) << 6u) | (third & 0x3fu);
+                        units = 3u;
+                    }
+                } else if (first >= 0xf0u && first <= 0xf4u && index + 3u < size) {
+                    const auto second = static_cast<unsigned char>(data[index + 1u]);
+                    const auto third = static_cast<unsigned char>(data[index + 2u]);
+                    const auto fourth = static_cast<unsigned char>(data[index + 3u]);
+                    if ((second & 0xc0u) == 0x80u && (third & 0xc0u) == 0x80u &&
+                        (fourth & 0xc0u) == 0x80u &&
+                        !(first == 0xf0u && second < 0x90u) &&
+                        !(first == 0xf4u && second >= 0x90u)) {
+                        code_point = ((first & 0x07u) << 18u) |
+                            ((second & 0x3fu) << 12u) |
+                            ((third & 0x3fu) << 6u) | (fourth & 0x3fu);
+                        units = 4u;
+                    }
+                }
+                if (units == 1u) {
+                    format_debug_append_hex(output, first, true);
+                    ++index;
+                    continue;
+                }
+            }
+        } else {
+            using unsigned_char = make_unsigned_t<CharT>;
+            code_point = static_cast<uint32_t>(static_cast<unsigned_char>(data[index]));
+            if constexpr (sizeof(CharT) == 2u) {
+                if (code_point >= 0xd800u && code_point <= 0xdbffu) {
+                    if (index + 1u < size) {
+                        const uint32_t low = static_cast<uint32_t>(
+                            static_cast<unsigned_char>(data[index + 1u]));
+                        if (low >= 0xdc00u && low <= 0xdfffu) {
+                            code_point = 0x10000u + ((code_point - 0xd800u) << 10u) +
+                                         (low - 0xdc00u);
+                            units = 2u;
+                        } else {
+                            invalid_code_unit = true;
+                        }
+                    } else {
+                        invalid_code_unit = true;
+                    }
+                } else if (code_point >= 0xdc00u && code_point <= 0xdfffu) {
+                    invalid_code_unit = true;
+                }
+            } else if (code_point > 0x10ffffu ||
+                       (code_point >= 0xd800u && code_point <= 0xdfffu)) {
+                invalid_code_unit = true;
+            }
+        }
+
+        if (invalid_code_unit) {
+            format_debug_append_hex(output, code_point);
+            index += units;
+            continue;
+        }
+
+        if (code_point == '\t' || code_point == '\n' || code_point == '\r') {
+            output.push_back(static_cast<CharT>('\\'));
+            output.push_back(static_cast<CharT>(code_point == '\t' ? 't' :
+                                                 code_point == '\n' ? 'n' : 'r'));
+        } else if (code_point == static_cast<uint32_t>(quote) || code_point == '\\') {
+            output.push_back(static_cast<CharT>('\\'));
+            for (size_t unit = 0u; unit < units; ++unit)
+                output.push_back(data[index + unit]);
+        } else if (format_debug_nonprinting<CharT>(code_point)) {
+            format_debug_append_hex(output, code_point);
+        } else {
+            for (size_t unit = 0u; unit < units; ++unit)
+                output.push_back(data[index + unit]);
+        }
+        index += units;
+    }
+    output.push_back(quote);
+    return output;
+}
+#endif
+
 template<typename CharT>
 struct basic_string_formatter {
     size_t width_ = 0;
     size_t precision_ = static_cast<size_t>(-1);
     CharT fill_ = CharT(' ');
     char align_ = '<';
+    bool debug_ = false;
+    bool debug_character_ = false;
 
     template<typename ParseContext>
     constexpr auto parse(ParseContext& ctx) {
@@ -1504,14 +1661,39 @@ struct basic_string_formatter {
         }
 
         if (it != end && *it == CharT('s')) ++it;
+#if __cplusplus > 202002L
+        if (it != end && *it == CharT('?')) {
+            debug_ = true;
+            ++it;
+        }
+#endif
         return it;
     }
+
+#if __cplusplus > 202002L
+    constexpr void set_debug_format(bool character = false) {
+        debug_ = true;
+        debug_character_ = character;
+    }
+#endif
 
     template<typename FormatContext>
     auto format_view(const CharT* data, size_t size, FormatContext& ctx) {
         auto out = ctx.out();
         const size_t shown = precision_ < size ? precision_ : size;
-        const size_t padding = width_ > shown ? width_ - shown : 0;
+#if __cplusplus > 202002L
+        basic_string<CharT> escaped;
+        if (debug_) {
+            escaped = format_debug_escape(data, shown, debug_character_);
+            data = escaped.data();
+            size = escaped.size();
+        } else {
+            size = shown;
+        }
+#else
+        size = shown;
+#endif
+        const size_t padding = width_ > size ? width_ - size : 0;
         size_t left_padding = 0;
         size_t right_padding = 0;
 
@@ -1522,7 +1704,7 @@ struct basic_string_formatter {
         } else left_padding = padding;
 
         for (size_t i = 0; i < left_padding; ++i) *out++ = fill_;
-        for (size_t i = 0; i < shown; ++i) *out++ = data[i];
+        for (size_t i = 0; i < size; ++i) *out++ = data[i];
         for (size_t i = 0; i < right_padding; ++i) *out++ = fill_;
 
         return out;
@@ -1607,8 +1789,19 @@ struct formatter<char, char> {
                 return end;
             }
         }
-        return string_formatter_.parse(ctx);
+        auto result = string_formatter_.parse(ctx);
+#if __cplusplus > 202002L
+        if (result == end && begin != end && *(end - 1) == '?')
+            string_formatter_.set_debug_format(true);
+#endif
+        return result;
     }
+
+#if __cplusplus > 202002L
+    constexpr void set_debug_format() {
+        string_formatter_.set_debug_format(true);
+    }
+#endif
 
     template<typename FormatContext>
     auto format(char c, FormatContext& ctx) {
@@ -1803,17 +1996,27 @@ struct format_string_value {
  * runtime argument store never has to know the object's size or layout. */
 struct format_custom_value {
     const void* object;
-    void (*format)(const void*, string_view, format_context&);
+    void* mutable_object;
+    void (*format)(const void*, void*, string_view, format_context&);
 };
 
 template<typename T>
-inline void format_custom_dispatch(const void* object, string_view spec,
+struct format_mutable_custom : false_type {};
+
+template<typename T>
+inline void format_custom_dispatch(const void* object, void* mutable_object,
+                                   string_view spec,
                                    format_context& context) {
     if (!object) format_fail();
     formatter<T, char> selected;
     format_parse_context parse_context(spec);
     if (selected.parse(parse_context) != parse_context.end()) format_fail();
-    (void)selected.format(*static_cast<const T*>(object), context);
+    if constexpr (format_mutable_custom<T>::value) {
+        if (!mutable_object) format_fail();
+        (void)selected.format(*static_cast<T*>(mutable_object), context);
+    } else {
+        (void)selected.format(*static_cast<const T*>(object), context);
+    }
 }
 
 } /* namespace detail */
@@ -1992,8 +2195,11 @@ public:
     static basic_format_arg make(T&& v) {
         basic_format_arg arg;
         arg.type_ = detail::format_arg_type::custom_type;
-        arg.value_.custom_value = {
-            static_cast<const void*>(&v), &detail::format_custom_dispatch<U>};
+        void* mutable_object = nullptr;
+        if constexpr (!is_const<remove_reference_t<T>>::value)
+            mutable_object = const_cast<void*>(static_cast<const void*>(&v));
+        arg.value_.custom_value = {static_cast<const void*>(&v), mutable_object,
+                                   &detail::format_custom_dispatch<U>};
         return arg;
     }
 
@@ -2006,7 +2212,9 @@ public:
             !value_.custom_value.object || !value_.custom_value.format) {
             detail::format_fail();
         }
-        value_.custom_value.format(value_.custom_value.object, spec, context);
+        value_.custom_value.format(value_.custom_value.object,
+                                  value_.custom_value.mutable_object,
+                                  spec, context);
     }
 
     template<typename Visitor>
@@ -2166,8 +2374,19 @@ struct formatter<wchar_t, wchar_t> {
                 return integer_formatter_.parse(ctx);
             }
         }
-        return string_formatter_.parse(ctx);
+        auto result = string_formatter_.parse(ctx);
+#if __cplusplus > 202002L
+        if (result == end && begin != end && *(end - 1) == L'?')
+            string_formatter_.set_debug_format(true);
+#endif
+        return result;
     }
+
+#if __cplusplus > 202002L
+    constexpr void set_debug_format() {
+        string_formatter_.set_debug_format(true);
+    }
+#endif
 
     template<typename FormatContext>
     auto format(wchar_t c, FormatContext& ctx) {
@@ -2281,7 +2500,8 @@ namespace detail {
  * custom path. */
 struct wide_format_custom_value {
     const void* object;
-    void (*format)(const void*, wstring_view, wformat_context&);
+    void* mutable_object;
+    void (*format)(const void*, void*, wstring_view, wformat_context&);
 };
 
 enum class wide_format_arg_type : unsigned char {
@@ -2303,13 +2523,19 @@ enum class wide_format_arg_type : unsigned char {
 
 template<typename T>
 inline void wide_format_custom_dispatch(const void* object,
+                                        void* mutable_object,
                                         wstring_view spec,
                                         wformat_context& context) {
     if (!object) format_fail();
     formatter<T, wchar_t> selected;
     wformat_parse_context parse_context(spec);
     if (selected.parse(parse_context) != parse_context.end()) format_fail();
-    (void)selected.format(*static_cast<const T*>(object), context);
+    if constexpr (format_mutable_custom<T>::value) {
+        if (!mutable_object) format_fail();
+        (void)selected.format(*static_cast<T*>(mutable_object), context);
+    } else {
+        (void)selected.format(*static_cast<const T*>(object), context);
+    }
 }
 
 } /* namespace detail */
@@ -2467,8 +2693,11 @@ public:
     static wide_format_arg make(T&& value) {
         wide_format_arg arg;
         arg.type_ = detail::wide_format_arg_type::custom_type;
+        void* mutable_object = nullptr;
+        if constexpr (!is_const<remove_reference_t<T>>::value)
+            mutable_object = const_cast<void*>(static_cast<const void*>(&value));
         arg.value_.custom_value = {
-            static_cast<const void*>(&value),
+            static_cast<const void*>(&value), mutable_object,
             &detail::wide_format_custom_dispatch<U>};
         return arg;
     }
@@ -2482,7 +2711,9 @@ public:
             !value_.custom_value.format) {
             detail::format_fail();
         }
-        value_.custom_value.format(value_.custom_value.object, spec, context);
+        value_.custom_value.format(value_.custom_value.object,
+                                  value_.custom_value.mutable_object,
+                                  spec, context);
     }
 
     template<typename Visitor>
@@ -3493,6 +3724,10 @@ format_to_n_result<OutputIt> format_to_n(
 }
 
 } /* namespace std */
+
+#if __cplusplus > 202002L
+#include "format_ranges.h"
+#endif
 
 #endif /* __cplusplus >= 202002L */
 
