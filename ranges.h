@@ -6805,6 +6805,15 @@ inline constexpr bool enable_borrowed_range<views::adjacent_transform_view<V, F>
 
 namespace detail {
 
+template<typename R>
+concept legacy_input_iterator_range = ranges::common_range<R> &&
+    requires {
+        typename iterator_traits<ranges::iterator_t<R>>::iterator_category;
+    } &&
+    derived_from<
+        typename iterator_traits<ranges::iterator_t<R>>::iterator_category,
+        input_iterator_tag>;
+
 template<typename Container, typename Ref>
 concept container_appendable = requires(Container& container, Ref&& ref) {
     requires (
@@ -6835,7 +6844,7 @@ concept container_from_range_constructible =
     requires(R&& range) {
         Container(from_range, std::forward<R>(range));
     } ||
-    (ranges::common_range<R> && requires(R&& range) {
+    (legacy_input_iterator_range<R> && requires(R&& range) {
         Container(ranges::begin(range), ranges::end(range));
     }) ||
     (default_initializable<Container> &&
@@ -6857,7 +6866,8 @@ concept container_from_range_with_args =
         Container(from_range, std::forward<R>(range),
                   std::forward<Args>(args)...);
     } ||
-    (ranges::common_range<R> && requires(R&& range, Args&&... args) {
+    (legacy_input_iterator_range<R> &&
+     requires(R&& range, Args&&... args) {
         Container(ranges::begin(range), ranges::end(range),
                   std::forward<Args>(args)...);
     }) ||
