@@ -19,6 +19,7 @@
 #include "functional.h"
 #include "compare.h"
 #include "tuple.h"
+#include "optional.h"
 
 namespace std {
 
@@ -5100,12 +5101,272 @@ public:
     }
 };
 
+/* A single-pass source cannot form a chunk by advancing a copy of its
+ * iterator: copies of an input iterator may share and consume the same
+ * stream. Keep the cursor and the current chunk budget in the view itself;
+ * both the outer chunk iterator and the inner chunk range refer to that
+ * single cursor. */
+template<typename V>
+    requires input_range<V> && (!forward_range<V>)
+class chunk_view<V> : public view_interface<chunk_view<V>> {
+    using base_iterator = iterator_t<V>;
+    using base_sentinel = sentinel_t<V>;
+
+    V base_;
+    size_t count_ = 0u;
+    optional<base_iterator> current_;
+    size_t remainder_ = 0u;
+
+    class inner_iterator {
+        chunk_view* parent_;
+
+    public:
+        using iterator_concept = input_iterator_tag;
+        using iterator_category = input_iterator_tag;
+        using value_type = range_value_t<V>;
+        using difference_type = range_difference_t<V>;
+        using reference = range_reference_t<V>;
+
+        constexpr explicit inner_iterator(chunk_view& parent) noexcept
+            : parent_(&parent) {}
+
+        constexpr const base_iterator& base() const { return *parent_->current_; }
+
+        constexpr reference operator*() const {
+            return **parent_->current_;
+        }
+
+        constexpr inner_iterator& operator++() {
+            if (!parent_ || !parent_->current_ ||
+                parent_->remainder_ == 0u)
+                return *this;
+            ++*parent_->current_;
+            if (*parent_->current_ == ranges::end(parent_->base_))
+                parent_->remainder_ = 0u;
+            else
+                --parent_->remainder_;
+            return *this;
+        }
+
+        constexpr void operator++(int) { ++*this; }
+
+        friend constexpr bool operator==(const inner_iterator& iterator,
+                                         default_sentinel_t) {
+            return !iterator.parent_ || !iterator.parent_->current_ ||
+                   iterator.parent_->remainder_ == 0u;
+        }
+
+        friend constexpr bool operator==(default_sentinel_t sentinel,
+                                         const inner_iterator& iterator) {
+            return iterator == sentinel;
+        }
+
+        friend constexpr difference_type operator-(
+            default_sentinel_t,
+            const inner_iterator& iterator)
+            requires sized_sentinel_for<base_sentinel, base_iterator> {
+            if (!iterator.parent_ || !iterator.parent_->current_ ||
+                iterator.parent_->remainder_ == 0u)
+                return 0;
+            const difference_type distance =
+                ranges::end(iterator.parent_->base_) -
+                *iterator.parent_->current_;
+            const size_t available = distance > 0
+                ? static_cast<size_t>(distance) : 0u;
+            return static_cast<difference_type>(
+                available < iterator.parent_->remainder_
+                    ? available : iterator.parent_->remainder_);
+        }
+
+        friend constexpr difference_type operator-(
+            const inner_iterator& iterator, default_sentinel_t sentinel)
+            requires sized_sentinel_for<base_sentinel, base_iterator> {
+            return -(sentinel - iterator);
+        }
+
+        friend constexpr iter_rvalue_reference_t<base_iterator> iter_move(
+            const inner_iterator& iterator)
+            noexcept(noexcept(ranges::iter_move(
+                *iterator.parent_->current_))) {
+            return ranges::iter_move(*iterator.parent_->current_);
+        }
+
+        friend constexpr void iter_swap(const inner_iterator& left,
+                                        const inner_iterator& right)
+            noexcept(noexcept(ranges::iter_swap(
+                *left.parent_->current_, *right.parent_->current_)))
+            requires indirectly_swappable<base_iterator> {
+            ranges::iter_swap(*left.parent_->current_,
+                              *right.parent_->current_);
+        }
+    };
+
+    class chunk_range : public view_interface<chunk_range> {
+        chunk_view* parent_;
+
+    public:
+        constexpr explicit chunk_range(chunk_view& parent) noexcept
+            : parent_(&parent) {}
+
+        constexpr inner_iterator begin() const noexcept {
+            return inner_iterator(*parent_);
+        }
+
+        constexpr default_sentinel_t end() const noexcept {
+            return default_sentinel;
+        }
+
+        constexpr size_t size() const
+            requires sized_sentinel_for<base_sentinel, base_iterator> {
+            if (!parent_->current_ || parent_->remainder_ == 0u) return 0u;
+            const auto distance = ranges::end(parent_->base_) -
+                                  *parent_->current_;
+            const size_t available = distance > 0
+                ? static_cast<size_t>(distance) : 0u;
+            return available < parent_->remainder_
+                ? available : parent_->remainder_;
+        }
+    };
+
+    class outer_iterator {
+        chunk_view* parent_;
+
+    public:
+        using iterator_concept = input_iterator_tag;
+        using iterator_category = input_iterator_tag;
+        using value_type = chunk_range;
+        using difference_type = range_difference_t<V>;
+
+        constexpr outer_iterator() noexcept : parent_(nullptr) {}
+        constexpr explicit outer_iterator(chunk_view& parent) noexcept
+            : parent_(&parent) {}
+
+        constexpr value_type operator*() const { return value_type(*parent_); }
+
+        constexpr outer_iterator& operator++() {
+            if (!parent_ || !parent_->current_) return *this;
+            while (parent_->remainder_ != 0u &&
+                   *parent_->current_ != ranges::end(parent_->base_)) {
+                ++*parent_->current_;
+                --parent_->remainder_;
+            }
+            parent_->remainder_ = parent_->count_;
+            return *this;
+        }
+
+        constexpr void operator++(int) { ++*this; }
+
+        friend constexpr bool operator==(const outer_iterator& iterator,
+                                         default_sentinel_t) {
+            return !iterator.parent_ || !iterator.parent_->current_ ||
+                   (*iterator.parent_->current_ ==
+                        ranges::end(iterator.parent_->base_) &&
+                    iterator.parent_->remainder_ != 0u);
+        }
+
+        friend constexpr bool operator==(default_sentinel_t sentinel,
+                                         const outer_iterator& iterator) {
+            return iterator == sentinel;
+        }
+
+        friend constexpr difference_type operator-(
+            default_sentinel_t,
+            const outer_iterator& iterator)
+            requires sized_sentinel_for<base_sentinel, base_iterator> {
+            if (!iterator.parent_ || !iterator.parent_->current_ ||
+                iterator.parent_->count_ == 0u)
+                return 0;
+            const difference_type signed_distance =
+                ranges::end(iterator.parent_->base_) -
+                *iterator.parent_->current_;
+            const size_t distance = signed_distance > 0
+                ? static_cast<size_t>(signed_distance) : 0u;
+            const size_t remainder = iterator.parent_->remainder_;
+            const size_t count = iterator.parent_->count_;
+            if (distance < remainder)
+                return distance == 0u ? 0 : 1;
+            if (count == 0u) return 0;
+            const size_t after_first = distance - remainder;
+            return static_cast<difference_type>(
+                after_first / count +
+                (after_first % count != 0u ? 1u : 0u) + 1u);
+        }
+
+        friend constexpr difference_type operator-(
+            const outer_iterator& iterator, default_sentinel_t sentinel)
+            requires sized_sentinel_for<base_sentinel, base_iterator> {
+            return -(sentinel - iterator);
+        }
+    };
+
+public:
+    chunk_view() requires default_initializable<V> = default;
+
+    constexpr chunk_view(V base, size_t count)
+        : base_(std::move(base)), count_(count) {}
+
+    constexpr chunk_view(const chunk_view& other)
+        requires copy_constructible<V>
+        : base_(other.base_), count_(other.count_) {}
+
+    constexpr chunk_view(const chunk_view&)
+        requires (!copy_constructible<V>) = delete;
+
+    constexpr chunk_view(chunk_view&&) = default;
+
+    constexpr chunk_view& operator=(const chunk_view& other)
+        requires copyable<V> {
+        if (this == &other) return *this;
+        current_.reset();
+        remainder_ = 0u;
+        base_ = other.base_;
+        count_ = other.count_;
+        return *this;
+    }
+
+    constexpr chunk_view& operator=(const chunk_view&)
+        requires (!copyable<V>) = delete;
+
+    constexpr chunk_view& operator=(chunk_view&&) = default;
+
+    constexpr V base() const& requires copy_constructible<V> { return base_; }
+    constexpr V base() && { return std::move(base_); }
+
+    constexpr outer_iterator begin() {
+        if (count_ == 0u) {
+            current_.reset();
+            remainder_ = 0u;
+        } else {
+            current_.emplace(ranges::begin(base_));
+            remainder_ = count_;
+        }
+        return outer_iterator(*this);
+    }
+
+    constexpr default_sentinel_t end() const noexcept {
+        return default_sentinel;
+    }
+
+    constexpr size_t size() requires sized_range<V> {
+        if (count_ == 0u) return 0u;
+        const size_t n = static_cast<size_t>(ranges::size(base_));
+        return n / count_ + (n % count_ != 0u ? 1u : 0u);
+    }
+
+    constexpr size_t size() const requires sized_range<const V> {
+        if (count_ == 0u) return 0u;
+        const size_t n = static_cast<size_t>(
+            ranges::size(std::as_const(base_)));
+        return n / count_ + (n % count_ != 0u ? 1u : 0u);
+    }
+};
+
 template<typename R>
 chunk_view(R&&, size_t) -> chunk_view<owning_view<R>>;
 
 template<typename V>
 inline constexpr bool enable_borrowed_range<chunk_view<V>> =
-    borrowed_range<V>;
+    forward_range<V> && borrowed_range<V>;
 #endif
 
 #if __cplusplus > 202002L
