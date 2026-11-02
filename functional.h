@@ -13,6 +13,7 @@
 #include "hash_integral.h"
 #include "exception.h"
 #include "new.h"
+#include "initializer_list.h"
 #include "memory.h"
 #include "typeinfo.h"
 #include "pointer_order.h"
@@ -751,6 +752,30 @@ struct move_only_function_target<2, F> { using type = F&&; };
 template<typename F>
 struct move_only_function_target<3, F> { using type = const F&&; };
 
+template<typename R, int CvRefMode, int InvMode, bool NoexceptSignature,
+         typename F, typename... Args>
+struct move_only_function_is_callable_from
+    : integral_constant<bool,
+          NoexceptSignature
+              ? (is_nothrow_invocable_r<
+                     R, typename move_only_function_target<
+                            CvRefMode, F>::type, Args...>::value &&
+                 is_nothrow_invocable_r<
+                     R, typename move_only_function_target<
+                            InvMode, F>::type, Args...>::value)
+              : (is_invocable_r<
+                     R, typename move_only_function_target<
+                            CvRefMode, F>::type, Args...>::value &&
+                 is_invocable_r<
+                     R, typename move_only_function_target<
+                            InvMode, F>::type, Args...>::value)> {};
+
+template<typename T>
+struct is_in_place_type_tag : false_type {};
+
+template<typename T>
+struct is_in_place_type_tag<in_place_type_t<T>> : true_type {};
+
 template<int Mode, typename F, typename... CallArgs>
 decltype(auto) move_only_function_invoke(F& function,
                                          CallArgs&&... args) {
@@ -768,12 +793,18 @@ decltype(auto) move_only_function_invoke(F& function,
     }
 }
 
-template<typename R, int Mode, bool NoexceptSignature, typename Owner,
-         typename... Args>
+template<typename R, int Mode, int CvRefMode, bool NoexceptSignature,
+         typename Owner, typename... Args>
 class move_only_function_storage {
+    static constexpr size_t inline_storage_size = 3 * sizeof(void*);
+    using inline_storage_type = aligned_storage_t<
+        inline_storage_size, alignof(max_align_t)>;
+
     struct callable_base {
         virtual ~callable_base() = default;
         virtual R invoke(Args&&... args) = 0;
+        virtual callable_base* move_inline(void* storage) noexcept = 0;
+        virtual void destroy(bool local) noexcept = 0;
     };
 
     template<typename F>
@@ -793,34 +824,123 @@ class move_only_function_storage {
                     function_, std::forward<Args>(args)...);
             }
         }
+
+        static constexpr bool fits_inline() noexcept {
+            return sizeof(callable) <= inline_storage_size &&
+                alignof(callable) <= alignof(inline_storage_type) &&
+                is_nothrow_move_constructible<F>::value;
+        }
+
+        callable_base* move_inline(void* storage) noexcept override {
+            return new (storage) callable(std::move(function_));
+        }
+
+        void destroy(bool local) noexcept override {
+            if (local) {
+                this->~callable();
+            } else {
+                delete this;
+            }
+        }
     };
 
     callable_base* callable_;
+    bool local_;
+    inline_storage_type storage_;
+
+    template<typename F, typename... CtorArgs>
+    void construct(CtorArgs&&... args) {
+        if constexpr (callable<F>::fits_inline()) {
+            callable_ = new (&storage_)
+                callable<F>(std::forward<CtorArgs>(args)...);
+            local_ = true;
+        } else {
+            callable_ = new callable<F>(
+                std::forward<CtorArgs>(args)...);
+            local_ = false;
+        }
+    }
 
     void destroy() noexcept {
-        delete callable_;
+        if (callable_) {
+            callable_->destroy(local_);
+        }
         callable_ = nullptr;
+        local_ = false;
+    }
+
+    void take_from(move_only_function_storage& other) noexcept {
+        if (!other.callable_) {
+            callable_ = nullptr;
+            local_ = false;
+            return;
+        }
+
+        if (other.local_) {
+            callable_ = other.callable_->move_inline(&storage_);
+            local_ = true;
+            other.callable_->destroy(true);
+        } else {
+            callable_ = other.callable_;
+            local_ = false;
+        }
+        other.callable_ = nullptr;
+        other.local_ = false;
     }
 
 public:
     using result_type = R;
 
-    move_only_function_storage() noexcept : callable_(nullptr) {}
-    move_only_function_storage(nullptr_t) noexcept : callable_(nullptr) {}
+    move_only_function_storage() noexcept
+        : callable_(nullptr), local_(false), storage_{} {}
+    move_only_function_storage(nullptr_t) noexcept
+        : callable_(nullptr), local_(false), storage_{} {}
 
     template<typename F,
              typename = enable_if_t<
-                 !is_same<decay_t<F>, Owner>::value &&
-                 is_invocable_r<R, typename move_only_function_target<
-                     Mode, decay_t<F>>::type, Args...>::value &&
-                 (!NoexceptSignature ||
-                  is_nothrow_invocable_r<R, typename move_only_function_target<
-                      Mode, decay_t<F>>::type, Args...>::value)>>
-    explicit move_only_function_storage(F&& function) : callable_(nullptr) {
-        if (!detail::functional_is_null_target<decay_t<F>>(function)) {
-            callable_ = new callable<decay_t<F>>(
-                std::forward<F>(function));
+                 !is_same<remove_cvref_t<F>, Owner>::value &&
+                 !is_in_place_type_tag<remove_cvref_t<F>>::value &&
+                 is_constructible<decay_t<F>, F>::value &&
+                 move_only_function_is_callable_from<
+                     R, CvRefMode, Mode, NoexceptSignature,
+                     decay_t<F>, Args...>::value>>
+    explicit move_only_function_storage(F&& function)
+        : callable_(nullptr), local_(false), storage_{} {
+        using target_type = decay_t<F>;
+        if (!detail::functional_is_null_target<target_type>(function)) {
+            construct<target_type>(std::forward<F>(function));
         }
+    }
+
+    template<typename T, typename... CtorArgs,
+             typename target_type = decay_t<T>,
+             typename = enable_if_t<
+                 is_same<target_type, T>::value &&
+                 is_constructible<target_type, CtorArgs...>::value &&
+                 move_only_function_is_callable_from<
+                     R, CvRefMode, Mode, NoexceptSignature,
+                     target_type, Args...>::value>>
+    explicit move_only_function_storage(
+        in_place_type_t<T>, CtorArgs&&... args)
+        : callable_(nullptr), local_(false), storage_{} {
+        construct<target_type>(std::forward<CtorArgs>(args)...);
+    }
+
+    template<typename T, typename U, typename... CtorArgs,
+             typename target_type = decay_t<T>,
+             typename = enable_if_t<
+                 is_same<target_type, T>::value &&
+                 is_constructible<target_type, initializer_list<U>&,
+                                  CtorArgs...>::value &&
+                 move_only_function_is_callable_from<
+                     R, CvRefMode, Mode, NoexceptSignature,
+                     target_type, Args...>::value>>
+    explicit move_only_function_storage(
+        in_place_type_t<T>, initializer_list<U> init_list,
+        CtorArgs&&... args)
+        : callable_(nullptr), local_(false), storage_{} {
+        construct<target_type>(init_list,
+                               std::forward<CtorArgs>(args)...);
     }
 
     move_only_function_storage(const move_only_function_storage&) = delete;
@@ -828,15 +948,14 @@ public:
         const move_only_function_storage&) = delete;
 
     move_only_function_storage(move_only_function_storage&& other) noexcept
-        : callable_(other.callable_) {
-        other.callable_ = nullptr;
+        : callable_(nullptr), local_(false), storage_{} {
+        take_from(other);
     }
 
     Owner& operator=(move_only_function_storage&& other) noexcept {
         if (this != &other) {
             destroy();
-            callable_ = other.callable_;
-            other.callable_ = nullptr;
+            take_from(other);
         }
         return static_cast<Owner&>(*this);
     }
@@ -850,12 +969,12 @@ public:
 
     template<typename F,
              typename = enable_if_t<
-                 !is_same<decay_t<F>, Owner>::value &&
-                 is_invocable_r<R, typename move_only_function_target<
-                     Mode, decay_t<F>>::type, Args...>::value &&
-                 (!NoexceptSignature ||
-                  is_nothrow_invocable_r<R, typename move_only_function_target<
-                      Mode, decay_t<F>>::type, Args...>::value)>>
+                 !is_same<remove_cvref_t<F>, Owner>::value &&
+                 !is_in_place_type_tag<remove_cvref_t<F>>::value &&
+                 is_constructible<decay_t<F>, F>::value &&
+                 move_only_function_is_callable_from<
+                     R, CvRefMode, Mode, NoexceptSignature,
+                     decay_t<F>, Args...>::value>>
     Owner& operator=(F&& function) {
         move_only_function_storage replacement(std::forward<F>(function));
         swap(replacement);
@@ -863,9 +982,10 @@ public:
     }
 
     void swap(move_only_function_storage& other) noexcept {
-        callable_base* temporary = callable_;
-        callable_ = other.callable_;
-        other.callable_ = temporary;
+        move_only_function_storage temporary;
+        temporary.take_from(*this);
+        take_from(other);
+        other.take_from(temporary);
     }
 
     explicit operator bool() const noexcept { return callable_ != nullptr; }
@@ -879,11 +999,11 @@ public:
 template<typename Signature, typename Owner>
 class move_only_function_signature;
 
-#define RIN_MOVE_ONLY_FUNCTION_SIGNATURE(SIGNATURE, MODE, NOEXCEPT_SPEC, QUALIFIER) \
+#define RIN_MOVE_ONLY_FUNCTION_SIGNATURE(SIGNATURE, MODE, CVREF_MODE, NOEXCEPT_SPEC, QUALIFIER) \
 template<typename R, typename... Args, typename Owner> \
 class move_only_function_signature<SIGNATURE, Owner> \
-    : public move_only_function_storage<R, MODE, NOEXCEPT_SPEC, Owner, Args...> { \
-    using base = move_only_function_storage<R, MODE, NOEXCEPT_SPEC, Owner, Args...>; \
+    : public move_only_function_storage<R, MODE, CVREF_MODE, NOEXCEPT_SPEC, Owner, Args...> { \
+    using base = move_only_function_storage<R, MODE, CVREF_MODE, NOEXCEPT_SPEC, Owner, Args...>; \
 public: \
     using base::base; \
     using base::operator=; \
@@ -892,18 +1012,18 @@ public: \
     } \
 };
 
-RIN_MOVE_ONLY_FUNCTION_SIGNATURE(R(Args...), 0, false, )
-RIN_MOVE_ONLY_FUNCTION_SIGNATURE(R(Args...) const, 1, false, const)
-RIN_MOVE_ONLY_FUNCTION_SIGNATURE(R(Args...) &, 0, false, &)
-RIN_MOVE_ONLY_FUNCTION_SIGNATURE(R(Args...) const &, 1, false, const &)
-RIN_MOVE_ONLY_FUNCTION_SIGNATURE(R(Args...) &&, 2, false, &&)
-RIN_MOVE_ONLY_FUNCTION_SIGNATURE(R(Args...) const &&, 3, false, const &&)
-RIN_MOVE_ONLY_FUNCTION_SIGNATURE(R(Args...) noexcept, 0, true, noexcept)
-RIN_MOVE_ONLY_FUNCTION_SIGNATURE(R(Args...) const noexcept, 1, true, const noexcept)
-RIN_MOVE_ONLY_FUNCTION_SIGNATURE(R(Args...) & noexcept, 0, true, & noexcept)
-RIN_MOVE_ONLY_FUNCTION_SIGNATURE(R(Args...) const & noexcept, 1, true, const & noexcept)
-RIN_MOVE_ONLY_FUNCTION_SIGNATURE(R(Args...) && noexcept, 2, true, && noexcept)
-RIN_MOVE_ONLY_FUNCTION_SIGNATURE(R(Args...) const && noexcept, 3, true, const && noexcept)
+RIN_MOVE_ONLY_FUNCTION_SIGNATURE(R(Args...), 0, 2, false, )
+RIN_MOVE_ONLY_FUNCTION_SIGNATURE(R(Args...) const, 1, 3, false, const)
+RIN_MOVE_ONLY_FUNCTION_SIGNATURE(R(Args...) &, 0, 0, false, &)
+RIN_MOVE_ONLY_FUNCTION_SIGNATURE(R(Args...) const &, 1, 1, false, const &)
+RIN_MOVE_ONLY_FUNCTION_SIGNATURE(R(Args...) &&, 2, 2, false, &&)
+RIN_MOVE_ONLY_FUNCTION_SIGNATURE(R(Args...) const &&, 3, 3, false, const &&)
+RIN_MOVE_ONLY_FUNCTION_SIGNATURE(R(Args...) noexcept, 0, 2, true, noexcept)
+RIN_MOVE_ONLY_FUNCTION_SIGNATURE(R(Args...) const noexcept, 1, 3, true, const noexcept)
+RIN_MOVE_ONLY_FUNCTION_SIGNATURE(R(Args...) & noexcept, 0, 0, true, & noexcept)
+RIN_MOVE_ONLY_FUNCTION_SIGNATURE(R(Args...) const & noexcept, 1, 1, true, const & noexcept)
+RIN_MOVE_ONLY_FUNCTION_SIGNATURE(R(Args...) && noexcept, 2, 2, true, && noexcept)
+RIN_MOVE_ONLY_FUNCTION_SIGNATURE(R(Args...) const && noexcept, 3, 3, true, const && noexcept)
 
 #undef RIN_MOVE_ONLY_FUNCTION_SIGNATURE
 
