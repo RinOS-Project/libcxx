@@ -3198,169 +3198,523 @@ inline constexpr bool enable_borrowed_range<as_const_view<V>> =
  * zip_view - ???????????????
  * ???????????????????????????????????????????????????????????????*/
 
-template<typename V1, typename V2>
-    requires input_range<V1> && input_range<V2>
-class zip_view : public view_interface<zip_view<V1, V2>> {
-    using I1 = iterator_t<V1>;
-    using I2 = iterator_t<V2>;
-    using S1 = sentinel_t<V1>;
-    using S2 = sentinel_t<V2>;
+template<typename R>
+concept zip_simple_view = view<R> && range<const R> &&
+    same_as<iterator_t<R>, iterator_t<const R>> &&
+    same_as<sentinel_t<R>, sentinel_t<const R>>;
 
-    template<typename B1, typename B2>
-    struct sentinel;
+template<bool Const, typename R>
+using zip_maybe_const_t = conditional_t<Const, const R, R>;
 
-    template<typename B1, typename B2>
-    struct iterator {
-        using I1 = iterator_t<B1>;
-        using I2 = iterator_t<B2>;
-        using reference = pair<iter_reference_t<I1>, iter_reference_t<I2>>;
-        using value_type = remove_cvref_t<reference>;
-        using difference_type = common_type_t<iter_difference_t<I1>,
-                                              iter_difference_t<I2>>;
+template<bool Const, typename... Views>
+concept zip_all_forward =
+    (forward_range<zip_maybe_const_t<Const, Views>> && ...);
+
+template<bool Const, typename... Views>
+concept zip_all_bidirectional =
+    (bidirectional_range<zip_maybe_const_t<Const, Views>> && ...);
+
+template<bool Const, typename... Views>
+concept zip_all_random_access =
+    (random_access_range<zip_maybe_const_t<Const, Views>> && ...);
+
+template<typename... Views>
+concept zip_is_common =
+    (sizeof...(Views) == 1u && (common_range<Views> && ...)) ||
+    (!(bidirectional_range<Views> && ...) && (common_range<Views> && ...)) ||
+    ((random_access_range<Views> && ...) && (sized_range<Views> && ...));
+
+template<bool Enabled>
+struct zip_iterator_category_base {};
+
+template<>
+struct zip_iterator_category_base<true> {
+    using iterator_category = input_iterator_tag;
+};
+
+template<typename... Views>
+    requires (sizeof...(Views) > 0u) && (view<Views> && ...) &&
+             (input_range<Views> && ...)
+class zip_view : public view_interface<zip_view<Views...>> {
+    tuple<Views...> views_;
+
+    template<bool Const>
+    class iterator;
+
+    template<bool Const>
+    class sentinel;
+
+    template<size_t Index, bool Const>
+    using base_type = tuple_element_t<Index, tuple<
+        zip_maybe_const_t<Const, Views>...>>;
+
+    template<bool Const>
+    class iterator : public zip_iterator_category_base<
+                         zip_all_forward<Const, Views...>> {
+        using iterator_tuple = tuple<
+            iterator_t<zip_maybe_const_t<Const, Views>>...>;
+
+        iterator_tuple current_;
+
+        template<size_t... Indices>
+        constexpr auto dereference(index_sequence<Indices...>) const {
+            return tuple<range_reference_t<base_type<Indices, Const>>...>(
+                *get<Indices>(current_)...);
+        }
+
+        template<size_t... Indices>
+        constexpr void increment(index_sequence<Indices...>) {
+            (++get<Indices>(current_), ...);
+        }
+
+        template<size_t... Indices>
+        constexpr void decrement(index_sequence<Indices...>) {
+            (--get<Indices>(current_), ...);
+        }
+
+        template<size_t... Indices>
+        constexpr void advance(difference_type offset,
+                               index_sequence<Indices...>) {
+            ((get<Indices>(current_) += static_cast<iter_difference_t<
+                  iterator_t<base_type<Indices, Const>>>>(offset)), ...);
+        }
+
+        template<size_t... Indices>
+        constexpr void retreat(difference_type offset,
+                               index_sequence<Indices...>) {
+            ((get<Indices>(current_) -= static_cast<iter_difference_t<
+                  iterator_t<base_type<Indices, Const>>>>(offset)), ...);
+        }
+
+        template<size_t... Indices>
+        constexpr auto subscript(difference_type offset,
+                                 index_sequence<Indices...>) const {
+            return tuple<range_reference_t<base_type<Indices, Const>>...>(
+                get<Indices>(current_)[static_cast<iter_difference_t<
+                    iterator_t<base_type<Indices, Const>>>>(offset)]...);
+        }
+
+        template<size_t... Indices>
+        static constexpr bool equal_any(const iterator& left,
+                                        const iterator& right,
+                                        index_sequence<Indices...>) {
+            return ((get<Indices>(left.current_) ==
+                     get<Indices>(right.current_)) || ...);
+        }
+
+        template<size_t... Indices>
+        static constexpr auto iter_move_tuple(
+            const iterator& value, index_sequence<Indices...>)
+            noexcept((noexcept(ranges::iter_move(
+                          get<Indices>(value.current_))) && ...) &&
+                     (is_nothrow_move_constructible_v<
+                          iter_rvalue_reference_t<iterator_t<
+                              base_type<Indices, Const>>>> && ...)) {
+            return tuple<iter_rvalue_reference_t<iterator_t<
+                base_type<Indices, Const>>>...>(
+                    ranges::iter_move(get<Indices>(value.current_))...);
+        }
+
+        template<size_t... Indices>
+        static constexpr void iter_swap_tuple(
+            const iterator& left, const iterator& right,
+            index_sequence<Indices...>)
+            noexcept((noexcept(ranges::iter_swap(
+                get<Indices>(left.current_),
+                get<Indices>(right.current_))) && ...)) {
+            (ranges::iter_swap(get<Indices>(left.current_),
+                               get<Indices>(right.current_)), ...);
+        }
+
+        using unsigned_difference_type = make_unsigned_t<difference_type>;
+
+        static constexpr unsigned_difference_type magnitude(
+            difference_type value) {
+            return value < 0
+                       ? unsigned_difference_type(0) -
+                             static_cast<unsigned_difference_type>(value)
+                       : static_cast<unsigned_difference_type>(value);
+        }
+
+        static constexpr difference_type closer_distance(
+            difference_type left, difference_type right) {
+            return magnitude(right) < magnitude(left) ? right : left;
+        }
+
+        template<size_t... Indices>
+        static constexpr difference_type iterator_distance(
+            const iterator& left, const iterator& right,
+            index_sequence<Indices...>) {
+            difference_type result = static_cast<difference_type>(
+                get<0>(left.current_) - get<0>(right.current_));
+            ((result = closer_distance(
+                  result, static_cast<difference_type>(
+                              get<Indices + 1u>(left.current_) -
+                              get<Indices + 1u>(right.current_)))), ...);
+            return result;
+        }
+
+        template<bool>
+        friend class iterator;
+        template<bool>
+        friend class sentinel;
+
+    public:
+        using iterator_concept = conditional_t<
+            zip_all_random_access<Const, Views...>, random_access_iterator_tag,
+            conditional_t<
+                zip_all_bidirectional<Const, Views...>,
+                bidirectional_iterator_tag,
+                conditional_t<zip_all_forward<Const, Views...>,
+                              forward_iterator_tag, input_iterator_tag>>>;
+        using difference_type = common_type_t<
+            range_difference_t<zip_maybe_const_t<Const, Views>>...>;
+        using value_type = tuple<
+            range_value_t<zip_maybe_const_t<Const, Views>>...>;
+        using reference = tuple<
+            range_reference_t<zip_maybe_const_t<Const, Views>>...>;
         using pointer = void;
-        using iterator_category = input_iterator_tag;
-        I1 first_;
-        I2 second_;
 
         constexpr iterator() = default;
-        constexpr iterator(I1 first, I2 second)
-            : first_(first), second_(second) {}
+        constexpr explicit iterator(iterator_tuple current)
+            : current_(std::move(current)) {}
+
+        template<bool OtherConst>
+        constexpr iterator(iterator<OtherConst> other)
+            requires Const && (!OtherConst) &&
+                     (convertible_to<iterator_t<Views>,
+                                     iterator_t<const Views>> && ...)
+            : current_(std::move(other.current_)) {}
 
         constexpr auto operator*() const {
-            return std::pair<decltype(*first_), decltype(*second_)>(
-                *first_, *second_);
+            return dereference(make_index_sequence<sizeof...(Views)>{});
         }
 
         constexpr iterator& operator++() {
-            ++first_;
-            ++second_;
+            increment(make_index_sequence<sizeof...(Views)>{});
             return *this;
         }
 
-        constexpr iterator operator++(int) {
+        constexpr void operator++(int) { ++*this; }
+
+        constexpr iterator operator++(int)
+            requires zip_all_forward<Const, Views...> {
             auto copy = *this;
             ++*this;
             return copy;
         }
 
+        constexpr iterator& operator--()
+            requires zip_all_bidirectional<Const, Views...> {
+            decrement(make_index_sequence<sizeof...(Views)>{});
+            return *this;
+        }
+
+        constexpr iterator operator--(int)
+            requires zip_all_bidirectional<Const, Views...> {
+            auto copy = *this;
+            --*this;
+            return copy;
+        }
+
+        constexpr iterator& operator+=(difference_type offset)
+            requires zip_all_random_access<Const, Views...> {
+            advance(offset, make_index_sequence<sizeof...(Views)>{});
+            return *this;
+        }
+
+        constexpr iterator& operator-=(difference_type offset)
+            requires zip_all_random_access<Const, Views...> {
+            retreat(offset, make_index_sequence<sizeof...(Views)>{});
+            return *this;
+        }
+
+        constexpr auto operator[](difference_type offset) const
+            requires zip_all_random_access<Const, Views...> {
+            return subscript(offset, make_index_sequence<sizeof...(Views)>{});
+        }
+
         friend constexpr bool operator==(const iterator& left,
-                                         const iterator& right) {
-            return left.first_ == right.first_ &&
-                   left.second_ == right.second_;
+                                         const iterator& right)
+            requires (equality_comparable<iterator_t<
+                          zip_maybe_const_t<Const, Views>>> && ...) {
+            if constexpr (zip_all_bidirectional<Const, Views...>)
+                return left.current_ == right.current_;
+            else
+                return equal_any(left, right,
+                                 make_index_sequence<sizeof...(Views)>{});
         }
 
-        friend constexpr bool operator!=(const iterator& left,
-                                         const iterator& right) {
-            return !(left == right);
+        friend constexpr auto operator<=>(const iterator& left,
+                                          const iterator& right)
+            requires zip_all_random_access<Const, Views...> {
+            return left.current_ <=> right.current_;
         }
 
-        template<typename S,
-                 enable_if_t<is_same_v<S, sentinel<B1, B2>>, int> = 0>
-        friend constexpr bool operator==(const iterator& value,
-                                         const S& bound) {
-            return value.first_ == bound.first_ ||
-                   value.second_ == bound.second_;
+        friend constexpr iterator operator+(
+            const iterator& value, difference_type offset)
+            requires zip_all_random_access<Const, Views...> {
+            auto result = value;
+            result += offset;
+            return result;
         }
 
-        template<typename S,
-                 enable_if_t<is_same_v<S, sentinel<B1, B2>>, int> = 0>
-        friend constexpr bool operator==(const S& bound,
-                                         const iterator& value) {
-            return value == bound;
+        friend constexpr iterator operator+(
+            difference_type offset, const iterator& value)
+            requires zip_all_random_access<Const, Views...> {
+            return value + offset;
         }
 
-        template<typename S,
-                 enable_if_t<is_same_v<S, sentinel<B1, B2>>, int> = 0>
-        friend constexpr bool operator!=(const iterator& value,
-                                         const S& bound) {
-            return !(value == bound);
+        friend constexpr iterator operator-(
+            const iterator& value, difference_type offset)
+            requires zip_all_random_access<Const, Views...> {
+            auto result = value;
+            result -= offset;
+            return result;
         }
 
-        template<typename S,
-                 enable_if_t<is_same_v<S, sentinel<B1, B2>>, int> = 0>
-        friend constexpr bool operator!=(const S& bound,
-                                         const iterator& value) {
-            return !(value == bound);
+        friend constexpr difference_type operator-(
+            const iterator& left, const iterator& right)
+            requires (sized_sentinel_for<
+                          iterator_t<zip_maybe_const_t<Const, Views>>,
+                          iterator_t<zip_maybe_const_t<Const, Views>>> && ...) {
+            return iterator_distance(
+                left, right,
+                make_index_sequence<sizeof...(Views) - 1u>{});
+        }
+
+        friend constexpr auto iter_move(const iterator& value)
+            noexcept(noexcept(iter_move_tuple(
+                value, make_index_sequence<sizeof...(Views)>{}))) {
+            return iter_move_tuple(
+                value, make_index_sequence<sizeof...(Views)>{});
+        }
+
+        friend constexpr void iter_swap(const iterator& left,
+                                        const iterator& right)
+            noexcept(noexcept(iter_swap_tuple(
+                left, right, make_index_sequence<sizeof...(Views)>{})))
+            requires (indirectly_swappable<iterator_t<
+                          zip_maybe_const_t<Const, Views>>> && ...) {
+            iter_swap_tuple(left, right,
+                            make_index_sequence<sizeof...(Views)>{});
         }
     };
 
-    template<typename B1, typename B2>
-    struct sentinel {
-        using S1 = sentinel_t<B1>;
-        using S2 = sentinel_t<B2>;
-        S1 first_;
-        S2 second_;
+    template<bool Const>
+    class sentinel {
+        using sentinel_tuple = tuple<
+            sentinel_t<zip_maybe_const_t<Const, Views>>...>;
+        sentinel_tuple ends_;
 
+        template<bool OtherConst, size_t... Indices>
+        static constexpr bool at_end(
+            const iterator<OtherConst>& value, const sentinel& bound,
+            index_sequence<Indices...>) {
+            return ((get<Indices>(value.current_) ==
+                     get<Indices>(bound.ends_)) || ...);
+        }
+
+        template<bool OtherConst, size_t... Indices>
+        static constexpr auto distance_min(
+            const iterator<OtherConst>& value, const sentinel& bound,
+            index_sequence<Indices...>) {
+            using difference_type = common_type_t<
+                range_difference_t<zip_maybe_const_t<OtherConst, Views>>...>;
+            using unsigned_difference_type = make_unsigned_t<difference_type>;
+            const auto magnitude = [](difference_type distance) {
+                return distance < 0
+                           ? unsigned_difference_type(0) -
+                                 static_cast<unsigned_difference_type>(distance)
+                           : static_cast<unsigned_difference_type>(distance);
+            };
+            difference_type result = static_cast<difference_type>(
+                get<0>(value.current_) - get<0>(bound.ends_));
+            (([&] {
+                const difference_type distance = static_cast<difference_type>(
+                    get<Indices + 1u>(value.current_) -
+                    get<Indices + 1u>(bound.ends_));
+                if (magnitude(distance) < magnitude(result)) result = distance;
+            }()), ...);
+            return result;
+        }
+
+        template<bool>
+        friend class sentinel;
+
+    public:
         constexpr sentinel() = default;
-        constexpr sentinel(S1 first, S2 second)
-            : first_(first), second_(second) {}
+        constexpr explicit sentinel(sentinel_tuple ends)
+            : ends_(std::move(ends)) {}
+
+        template<bool OtherConst>
+        constexpr sentinel(sentinel<OtherConst> other)
+            requires Const && (!OtherConst) &&
+                     (convertible_to<sentinel_t<Views>,
+                                     sentinel_t<const Views>> && ...)
+            : ends_(std::move(other.ends_)) {}
+
+        template<bool OtherConst>
+            requires (sentinel_for<
+                          sentinel_t<zip_maybe_const_t<Const, Views>>,
+                          iterator_t<zip_maybe_const_t<OtherConst, Views>>> && ...)
+        friend constexpr bool operator==(const iterator<OtherConst>& value,
+                                         const sentinel& bound) {
+            return at_end(value, bound,
+                          make_index_sequence<sizeof...(Views)>{});
+        }
+
+        template<bool OtherConst>
+            requires (sized_sentinel_for<
+                          sentinel_t<zip_maybe_const_t<Const, Views>>,
+                          iterator_t<zip_maybe_const_t<OtherConst, Views>>> && ...)
+        friend constexpr common_type_t<
+            range_difference_t<zip_maybe_const_t<OtherConst, Views>>...>
+        operator-(const iterator<OtherConst>& value, const sentinel& bound) {
+            return distance_min(
+                value, bound,
+                make_index_sequence<sizeof...(Views) - 1u>{});
+        }
+
+        template<bool OtherConst>
+            requires (sized_sentinel_for<
+                          sentinel_t<zip_maybe_const_t<Const, Views>>,
+                          iterator_t<zip_maybe_const_t<OtherConst, Views>>> && ...)
+        friend constexpr common_type_t<
+            range_difference_t<zip_maybe_const_t<OtherConst, Views>>...>
+        operator-(const sentinel& bound, const iterator<OtherConst>& value) {
+            return -distance_min(
+                value, bound,
+                make_index_sequence<sizeof...(Views) - 1u>{});
+        }
     };
 
-    V1 first_;
-    V2 second_;
-
-public:
-    zip_view() = default;
-    constexpr zip_view(V1 first, V2 second)
-        : first_(std::move(first)), second_(std::move(second)) {}
-
-    constexpr V1 base1() const& { return first_; }
-    constexpr V1 base1() && { return std::move(first_); }
-    constexpr V2 base2() const& { return second_; }
-    constexpr V2 base2() && { return std::move(second_); }
-
-    constexpr auto begin() {
-        return iterator<V1, V2>(ranges::begin(first_), ranges::begin(second_));
+    template<size_t... Indices>
+    constexpr auto begin_impl(index_sequence<Indices...>) {
+        return iterator<false>(
+            tuple<iterator_t<Views>...>(
+                ranges::begin(get<Indices>(views_))...));
     }
 
-    constexpr auto end() {
-        return sentinel<V1, V2>(ranges::end(first_), ranges::end(second_));
+    template<size_t... Indices>
+    constexpr auto end_tuple_impl(index_sequence<Indices...>) {
+        return tuple<iterator_t<Views>...>(
+            ranges::end(get<Indices>(views_))...);
+    }
+
+    template<size_t... Indices>
+    constexpr auto sentinel_impl(index_sequence<Indices...>) {
+        return sentinel<false>(
+            tuple<sentinel_t<Views>...>(
+                ranges::end(get<Indices>(views_))...));
+    }
+
+    template<size_t... Indices>
+    constexpr auto begin_const_impl(index_sequence<Indices...>) const {
+        return iterator<true>(
+            tuple<iterator_t<const Views>...>(
+                ranges::begin(get<Indices>(views_))...));
+    }
+
+    template<size_t... Indices>
+    constexpr auto end_const_tuple_impl(index_sequence<Indices...>) const {
+        return tuple<iterator_t<const Views>...>(
+            ranges::end(get<Indices>(views_))...);
+    }
+
+    template<size_t... Indices>
+    constexpr auto sentinel_const_impl(index_sequence<Indices...>) const {
+        return sentinel<true>(
+            tuple<sentinel_t<const Views>...>(
+                ranges::end(get<Indices>(views_))...));
+    }
+
+    template<size_t... Indices>
+    constexpr auto size_impl(index_sequence<Indices...>) {
+        using size_type = common_type_t<
+            decltype(ranges::size(get<Indices>(views_)))...>;
+        size_type result = static_cast<size_type>(ranges::size(get<0>(views_)));
+        ((result = static_cast<size_type>(ranges::size(get<Indices>(views_))) <
+                       result
+                       ? static_cast<size_type>(
+                             ranges::size(get<Indices>(views_)))
+                       : result), ...);
+        return result;
+    }
+
+    template<size_t... Indices>
+    constexpr auto size_impl(index_sequence<Indices...>) const {
+        using size_type = common_type_t<
+            decltype(ranges::size(get<Indices>(views_)))...>;
+        size_type result = static_cast<size_type>(ranges::size(get<0>(views_)));
+        ((result = static_cast<size_type>(ranges::size(get<Indices>(views_))) <
+                       result
+                       ? static_cast<size_type>(
+                             ranges::size(get<Indices>(views_)))
+                       : result), ...);
+        return result;
+    }
+
+public:
+    constexpr zip_view()
+        requires (default_initializable<Views> && ...) = default;
+
+    constexpr explicit zip_view(Views... views)
+        : views_(std::move(views)...) {}
+
+    constexpr auto begin()
+        requires (!(zip_simple_view<Views> && ...)) {
+        return begin_impl(make_index_sequence<sizeof...(Views)>{});
     }
 
     constexpr auto begin() const
-        requires input_range<const V1> && input_range<const V2> {
-        return iterator<const V1, const V2>(
-            ranges::begin(std::as_const(first_)),
-            ranges::begin(std::as_const(second_)));
+        requires (range<const Views> && ...) {
+        return begin_const_impl(make_index_sequence<sizeof...(Views)>{});
+    }
+
+    constexpr auto end()
+        requires (!(zip_simple_view<Views> && ...)) {
+        if constexpr (!zip_is_common<Views...>) {
+            return sentinel_impl(make_index_sequence<sizeof...(Views)>{});
+        } else if constexpr ((random_access_range<Views> && ...)) {
+            using difference_type = iter_difference_t<iterator<false>>;
+            return begin() + static_cast<difference_type>(size());
+        } else {
+            return iterator<false>(
+                end_tuple_impl(make_index_sequence<sizeof...(Views)>{}));
+        }
     }
 
     constexpr auto end() const
-        requires input_range<const V1> && input_range<const V2> {
-        return sentinel<const V1, const V2>(
-            ranges::end(std::as_const(first_)),
-            ranges::end(std::as_const(second_)));
+        requires (range<const Views> && ...) {
+        if constexpr (!zip_is_common<const Views...>) {
+            return sentinel_const_impl(make_index_sequence<sizeof...(Views)>{});
+        } else if constexpr ((random_access_range<const Views> && ...)) {
+            using difference_type = iter_difference_t<iterator<true>>;
+            return begin() + static_cast<difference_type>(size());
+        } else {
+            return iterator<true>(
+                end_const_tuple_impl(make_index_sequence<sizeof...(Views)>{}));
+        }
     }
 
-    constexpr auto size() requires sized_range<V1> && sized_range<V2> {
-        using size_type = common_type_t<
-            decltype(ranges::size(first_)),
-            decltype(ranges::size(second_))>;
-        const size_type first_size =
-            static_cast<size_type>(ranges::size(first_));
-        const size_type second_size =
-            static_cast<size_type>(ranges::size(second_));
-        return first_size < second_size ? first_size : second_size;
+    constexpr auto size()
+        requires (sized_range<Views> && ...) {
+        return size_impl(make_index_sequence<sizeof...(Views)>{});
     }
 
     constexpr auto size() const
-        requires sized_range<const V1> && sized_range<const V2> {
-        using size_type = common_type_t<
-            decltype(ranges::size(std::as_const(first_))),
-            decltype(ranges::size(std::as_const(second_)))>;
-        const size_type first_size = static_cast<size_type>(
-            ranges::size(std::as_const(first_)));
-        const size_type second_size = static_cast<size_type>(
-            ranges::size(std::as_const(second_)));
-        return first_size < second_size ? first_size : second_size;
+        requires (sized_range<const Views> && ...) {
+        return size_impl(make_index_sequence<sizeof...(Views)>{});
     }
 };
 
-template<typename R1, typename R2>
-zip_view(R1&&, R2&&) -> zip_view<owning_view<R1>, owning_view<R2>>;
+template<typename... Rs>
+zip_view(Rs&&...) -> zip_view<views::all_t<Rs>...>;
 
-template<typename V1, typename V2>
-inline constexpr bool enable_borrowed_range<zip_view<V1, V2>> =
-    borrowed_range<V1> && borrowed_range<V2>;
+template<typename... Views>
+inline constexpr bool enable_borrowed_range<zip_view<Views...>> =
+    (borrowed_range<Views> && ...);
 
 /* ???????????????????????????????????????????????????????????????
  * zip_transform_view - ?????? callable ?????
@@ -3837,20 +4191,7 @@ inline constexpr bool enable_borrowed_range<
 
 
 
-/* zip and zip_transform share the same shortest-range cursor.  This identity
- * callable exposes the dereferenced tuple directly, preserving mutable
- * references without adding another iterator implementation. */
-struct zip_view_variadic_identity {
-    template<typename... Elements>
-    constexpr auto operator()(Elements&&... elements) const {
-        return tuple<decltype((elements))...>(
-            std::forward<Elements>(elements)...);
-    }
-};
 
-template<typename... Vs>
-using zip_view_variadic =
-    zip_transform_view_variadic<zip_view_variadic_identity, Vs...>;
 
 /* ???????????????????????????????????????????????????????????????
  * pairwise_view - ????????????
@@ -6968,34 +7309,16 @@ concept zip_transform_viewable = (zip_viewable<Rs> && ...) &&
 
 
 struct zip_fn {
-    template<typename R1, typename R2>
-        requires zip_viewable<R1> && zip_viewable<R2>
-    constexpr auto operator()(R1&& first, R2&& second) const {
-        auto first_view = all(std::forward<R1>(first));
-        auto second_view = all(std::forward<R2>(second));
-        return zip_view<decltype(first_view), decltype(second_view)>(
-            std::move(first_view), std::move(second_view));
+    constexpr auto operator()() const {
+        return empty(tuple<>{});
     }
 
-#if __cplusplus > 202002L
-    template<typename R1, typename R2, typename... Rs>
-        requires (zip_viewable<R1> && zip_viewable<R2> && (zip_viewable<Rs> && ...))
-    constexpr auto operator()(R1&& first, R2&& second,
-                              Rs&&... rest) const {
-        auto first_view = all(std::forward<R1>(first));
-        auto second_view = all(std::forward<R2>(second));
-        auto rest_views = tuple<decltype(all(std::forward<Rs>(rest)))...>(
-            all(std::forward<Rs>(rest))...);
-        return zip_view_variadic<
-            decltype(first_view), decltype(second_view),
-            decltype(all(std::forward<Rs>(rest)))...>(
-            tuple_cat(
-                tuple<decltype(first_view), decltype(second_view)>(
-                    std::move(first_view), std::move(second_view)),
-                std::move(rest_views)),
-            zip_view_variadic_identity{});
+    template<typename... Rs>
+        requires (sizeof...(Rs) > 0u) && (zip_viewable<Rs> && ...)
+    constexpr auto operator()(Rs&&... ranges) const {
+        return zip_view<decltype(all(std::forward<Rs>(ranges)))...>(
+            all(std::forward<Rs>(ranges))...);
     }
-#endif
 };
 inline constexpr zip_fn zip{};
 
