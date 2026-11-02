@@ -4981,6 +4981,7 @@ class chunk_view : public view_interface<chunk_view<V>> {
 
     template<typename BI, typename BS>
     struct iterator_impl {
+        using iterator_concept = forward_iterator_tag;
         using iterator_category = input_iterator_tag;
         using value_type = subrange<BI, BS>;
         using difference_type = iter_difference_t<BI>;
@@ -4989,8 +4990,8 @@ class chunk_view : public view_interface<chunk_view<V>> {
 
         BI current_;
         BS end_;
-        size_t count_;
-        bool empty_;
+        size_t count_ = 0u;
+        bool empty_ = true;
 
         iterator_impl() = default;
         constexpr iterator_impl(BI current, BS end, size_t count, bool empty)
@@ -5118,14 +5119,17 @@ class chunk_view<V> : public view_interface<chunk_view<V>> {
     size_t remainder_ = 0u;
 
     class inner_iterator {
-        chunk_view* parent_;
+        chunk_view* parent_ = nullptr;
 
     public:
         using iterator_concept = input_iterator_tag;
         using iterator_category = input_iterator_tag;
+        using pointer = void;
+        using reference = range_reference_t<V>;
         using value_type = range_value_t<V>;
         using difference_type = range_difference_t<V>;
-        using reference = range_reference_t<V>;
+
+        constexpr inner_iterator() noexcept = default;
 
         constexpr explicit inner_iterator(chunk_view& parent) noexcept
             : parent_(&parent) {}
@@ -5234,7 +5238,9 @@ class chunk_view<V> : public view_interface<chunk_view<V>> {
     public:
         using iterator_concept = input_iterator_tag;
         using iterator_category = input_iterator_tag;
+        using pointer = void;
         using value_type = chunk_range;
+        using reference = value_type;
         using difference_type = range_difference_t<V>;
 
         constexpr outer_iterator() noexcept : parent_(nullptr) {}
