@@ -45,6 +45,11 @@
 #else
 #define __cpp_lib_to_chars 201611L
 #endif
+#if __cplusplus > 202002L
+#ifndef __cpp_lib_constexpr_charconv
+#define __cpp_lib_constexpr_charconv 202207L
+#endif
+#endif
 
 namespace std {
 
