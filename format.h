@@ -38,6 +38,31 @@ public:
 template<typename T, typename CharT>
 struct formatter;
 
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_PRINT)
+/* P3107 permits direct stream output for formatters that cannot introduce
+ * lock-order inversions. Built-in numeric and pointer formatters are library
+ * controlled and never invoke user code. */
+template<class T>
+inline constexpr bool enable_nonlocking_formatter_optimization =
+    is_arithmetic<T>::value || is_pointer<T>::value;
+
+template<class Traits>
+inline constexpr bool enable_nonlocking_formatter_optimization<
+    basic_string_view<char, Traits>> = true;
+
+template<class Traits>
+inline constexpr bool enable_nonlocking_formatter_optimization<
+    basic_string_view<wchar_t, Traits>> = true;
+
+template<class Traits, class Allocator>
+inline constexpr bool enable_nonlocking_formatter_optimization<
+    basic_string<char, Traits, Allocator>> = true;
+
+template<class Traits, class Allocator>
+inline constexpr bool enable_nonlocking_formatter_optimization<
+    basic_string<wchar_t, Traits, Allocator>> = true;
+#endif
+
 template<typename CharT>
 class basic_format_parse_context;
 

@@ -56,6 +56,71 @@ public:
     }
 };
 
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_PRINT)
+class print_file_output_iterator {
+    FILE* stream_;
+
+public:
+    using iterator_category = output_iterator_tag;
+    using value_type = void;
+    using difference_type = ptrdiff_t;
+    using pointer = void;
+    using reference = void;
+
+    explicit print_file_output_iterator(FILE* stream) : stream_(stream) {}
+
+    print_file_output_iterator& operator=(char character) {
+        errno = 0;
+#if defined(_MSC_VER) && !defined(RIN_FREESTANDING)
+        if (_putc_nolock(static_cast<unsigned char>(character), stream_) == EOF)
+#else
+        if (::putc_unlocked(static_cast<unsigned char>(character), stream_) == EOF)
+#endif
+            print_output_failed(errno);
+        return *this;
+    }
+
+    print_file_output_iterator& operator*() { return *this; }
+    print_file_output_iterator& operator++() { return *this; }
+    print_file_output_iterator operator++(int) { return *this; }
+};
+
+inline void print_vformat_direct(FILE* stream, string_view format,
+                                 format_args args) {
+    print_file_lock lock(stream);
+    print_file_output_iterator output(stream);
+    (void)std::vformat_to(output, format, args);
+}
+
+template<class... Args>
+inline constexpr bool print_args_nonlocking =
+    (enable_nonlocking_formatter_optimization<remove_cvref_t<Args>> && ...);
+
+template<class... Args>
+inline void print_format_direct(FILE* stream,
+                                format_string<Args...> format,
+                                Args&&... args) {
+    auto arg_array = make_format_args<format_context>(
+        std::forward<Args>(args)...);
+    print_vformat_direct(
+        stream, format.get(),
+        format_args(arg_array.data(), arg_array.size()));
+}
+
+template<class... Args>
+inline void println_format_direct(FILE* stream,
+                                  format_string<Args...> format,
+                                  Args&&... args) {
+    print_file_lock lock(stream);
+    auto arg_array = make_format_args<format_context>(
+        std::forward<Args>(args)...);
+    print_file_output_iterator output(stream);
+    (void)std::vformat_to(
+        output, format.get(), format_args(arg_array.data(), arg_array.size()));
+    output = '\n';
+}
+#endif
+
 inline void print_write(FILE* stream, string_view output) {
     print_file_lock lock(stream);
     if (output.empty()) return;
@@ -95,7 +160,11 @@ inline void println_newline(FILE* stream) {
 inline void vprint_unicode(FILE* stream, string_view format,
                            format_args args) {
     /* The current RinOS stdio backend forwards the formatted UTF-8 bytes. */
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_PRINT)
+    detail::print_vformat_direct(stream, format, args);
+#else
     detail::print_vformat(stream, format, args);
+#endif
 }
 
 inline void vprint_unicode(string_view format, format_args args) {
@@ -104,7 +173,11 @@ inline void vprint_unicode(string_view format, format_args args) {
 
 inline void vprint_nonunicode(FILE* stream, string_view format,
                               format_args args) {
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_PRINT)
+    detail::print_vformat_direct(stream, format, args);
+#else
     detail::print_vformat(stream, format, args);
+#endif
 }
 
 inline void vprint_nonunicode(string_view format, format_args args) {
@@ -113,7 +186,16 @@ inline void vprint_nonunicode(string_view format, format_args args) {
 
 template<class... Args>
 void print(FILE* stream, format_string<Args...> format, Args&&... args) {
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_PRINT)
+    if constexpr (detail::print_args_nonlocking<Args...>) {
+        detail::print_format_direct(stream, format,
+                                    std::forward<Args>(args)...);
+    } else {
+        detail::print_format(stream, format, std::forward<Args>(args)...);
+    }
+#else
     detail::print_format(stream, format, std::forward<Args>(args)...);
+#endif
 }
 
 template<class... Args>
@@ -123,8 +205,30 @@ void print(format_string<Args...> format, Args&&... args) {
 
 template<class... Args>
 void println(FILE* stream, format_string<Args...> format, Args&&... args) {
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_PRINT)
+    if constexpr (detail::print_args_nonlocking<Args...>) {
+        detail::println_format_direct(stream, format,
+                                      std::forward<Args>(args)...);
+    } else {
+        detail::println_format(stream, format,
+                               std::forward<Args>(args)...);
+    }
+#else
     detail::println_format(stream, format, std::forward<Args>(args)...);
+#endif
 }
+
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_PRINT)
+inline void vprint_unicode_buffered(FILE* stream, string_view format,
+                                    format_args args) {
+    detail::print_vformat(stream, format, args);
+}
+
+inline void vprint_nonunicode_buffered(FILE* stream, string_view format,
+                                       format_args args) {
+    detail::print_vformat(stream, format, args);
+}
+#endif
 
 inline void println(FILE* stream) {
     detail::println_newline(stream);

@@ -198,7 +198,13 @@
 #define __cpp_lib_associative_heterogeneous_erasure 202110L
 #define __cpp_lib_optional                    202110L
 #define __cpp_lib_expected                    202211L
+#if defined(RIN_LIBCXX_CXX23_DIALECT)
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_PRINT)
+#define __cpp_lib_print                       202406L
+#else
 #define __cpp_lib_print                       202207L
+#endif
+#endif
 #define __cpp_lib_mdspan                      202207L
 #define __cpp_lib_spanstream                  202106L
 #if (defined(__cpp_impl_coroutine) && __cpp_impl_coroutine >= 201902L) || \

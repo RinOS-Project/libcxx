@@ -566,6 +566,24 @@ struct formatter<tuple<Ts...>, CharT>
     : detail::tuple_like_formatter<tuple<Ts...>, CharT,
                                    make_index_sequence<sizeof...(Ts)>> {};
 
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_PRINT)
+template<>
+inline constexpr bool enable_nonlocking_formatter_optimization<
+    detail::vector_bool_reference> = true;
+
+template<class First, class Second>
+inline constexpr bool enable_nonlocking_formatter_optimization<
+    pair<First, Second>> =
+        enable_nonlocking_formatter_optimization<remove_cvref_t<First>> &&
+        enable_nonlocking_formatter_optimization<remove_cvref_t<Second>>;
+
+template<class... Elements>
+inline constexpr bool enable_nonlocking_formatter_optimization<
+    tuple<Elements...>> =
+        (enable_nonlocking_formatter_optimization<
+             remove_cvref_t<Elements>> && ...);
+#endif
+
 namespace detail {
 
 struct format_container_access {
