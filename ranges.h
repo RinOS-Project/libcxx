@@ -6313,116 +6313,351 @@ inline constexpr bool enable_borrowed_range<slide_view<V>> =
  * stride_view - ????????????
  * ???????????????????????????????????????????????????????????????*/
 
+template<bool Forward, typename I>
+struct stride_iterator_category_base {};
+
+template<typename I>
+struct stride_iterator_category_base<true, I> {
+    using base_category = typename iterator_traits<I>::iterator_category;
+    using iterator_category = conditional_t<
+        derived_from<base_category, random_access_iterator_tag>,
+        random_access_iterator_tag, base_category>;
+};
+
+template<typename R>
+concept stride_simple_view = view<R> && range<const R> &&
+    same_as<iterator_t<R>, iterator_t<const R>> &&
+    same_as<sentinel_t<R>, sentinel_t<const R>>;
+
 template<typename V>
-    requires input_range<V>
+    requires view<V> && input_range<V>
 class stride_view : public view_interface<stride_view<V>> {
+    using difference_type = range_difference_t<V>;
+
     V base_;
-    size_t step_;
-    using base_iterator = iterator_t<V>;
-    using base_sentinel = sentinel_t<V>;
+    difference_type step_{1};
+    bool empty_{};
 
-    template<typename BI, typename BS>
-    struct sentinel_impl {
-        BS end_;
-        constexpr explicit sentinel_impl(BS end) : end_(end) {}
-    };
+    template<bool Const>
+    class iterator_impl : public stride_iterator_category_base<
+        forward_range<conditional_t<Const, const V, V>>,
+        iterator_t<conditional_t<Const, const V, V>>> {
+        using Base = conditional_t<Const, const V, V>;
+        using BI = iterator_t<Base>;
+        using BS = sentinel_t<Base>;
+        using Parent = conditional_t<Const, const stride_view, stride_view>;
 
-    template<typename BI, typename BS>
-    struct iterator_impl {
-        using iterator_category = input_iterator_tag;
-        using value_type = iter_value_t<BI>;
-        using difference_type = iter_difference_t<BI>;
-        using pointer = typename iterator_traits<BI>::pointer;
-        using reference = iter_reference_t<BI>;
-        BI current_;
-        BS end_;
-        size_t step_;
-        bool empty_;
+        BI current_{};
+        BS end_{};
+        range_difference_t<Base> step_{};
+        range_difference_t<Base> missing_{};
+        bool empty_{};
 
-        iterator_impl() = default;
-        constexpr iterator_impl(BI current, BS end, size_t step, bool empty)
-            : current_(current), end_(end), step_(step), empty_(empty) {}
+        template<bool>
+        friend class iterator_impl;
+
+        static constexpr range_difference_t<Base> div_ceil(
+            range_difference_t<Base> value,
+            range_difference_t<Base> divisor) {
+            return value / divisor + (value % divisor > 0 ? 1 : 0);
+        }
+
+        constexpr range_difference_t<Base> advance_bounded(
+            range_difference_t<Base> count) {
+            while (count > 0 && current_ != end_) {
+                ++current_;
+                --count;
+            }
+            return count;
+        }
+
+    public:
+        using iterator_concept = conditional_t<
+            random_access_range<Base>, random_access_iterator_tag,
+            conditional_t<bidirectional_range<Base>,
+                          bidirectional_iterator_tag,
+                          conditional_t<forward_range<Base>,
+                                        forward_iterator_tag,
+                                        input_iterator_tag>>>;
+        using value_type = range_value_t<Base>;
+        using difference_type = range_difference_t<Base>;
+
+        constexpr iterator_impl()
+            requires default_initializable<BI> = default;
+
+        constexpr iterator_impl(Parent* parent, BI current,
+                                difference_type missing = 0,
+                                bool empty = false)
+            : current_(std::move(current)), end_(ranges::end(parent->base_)),
+              step_(static_cast<difference_type>(parent->step_)),
+              missing_(missing), empty_(empty || parent->empty_) {}
+
+        template<bool OtherConst>
+        constexpr iterator_impl(iterator_impl<OtherConst> other)
+            requires Const && (!OtherConst) &&
+                     convertible_to<iterator_t<V>, BI> &&
+                     convertible_to<sentinel_t<V>, BS>
+            : current_(std::move(other.current_)), end_(std::move(other.end_)),
+              step_(other.step_),
+              missing_(other.missing_), empty_(other.empty_) {}
+
+        constexpr BI&& base() && { return std::move(current_); }
+        constexpr const BI& base() const& noexcept { return current_; }
+
         constexpr decltype(auto) operator*() const { return *current_; }
+
         constexpr iterator_impl& operator++() {
             if (empty_) return *this;
-            size_t left = step_;
-            while (left != 0u && current_ != end_) {
-                ++current_;
-                --left;
-            }
+            missing_ = advance_bounded(step_);
             return *this;
         }
-        constexpr iterator_impl operator++(int) {
+
+        constexpr void operator++(int)
+            requires (!forward_range<Base>) {
+            ++*this;
+        }
+
+        constexpr iterator_impl operator++(int)
+            requires forward_range<Base> {
             auto copy = *this;
             ++*this;
             return copy;
         }
-        friend constexpr bool operator==(const iterator_impl& a,
-                                         const iterator_impl& b) {
-            return a.empty_ == b.empty_ &&
-                   (a.empty_ || a.current_ == b.current_);
+
+        constexpr iterator_impl& operator--()
+            requires bidirectional_range<Base> {
+            if (empty_) return *this;
+            difference_type remaining = step_ - missing_;
+            while (remaining > 0) {
+                --current_;
+                --remaining;
+            }
+            missing_ = 0;
+            return *this;
         }
-        friend constexpr bool operator!=(const iterator_impl& a,
-                                         const iterator_impl& b) { return !(a == b); }
-        friend constexpr bool operator==(const iterator_impl& i,
-                                         const sentinel_impl<BI, BS>& s) {
-            return i.empty_ || i.current_ == s.end_;
+
+        constexpr iterator_impl operator--(int)
+            requires bidirectional_range<Base> {
+            auto copy = *this;
+            --*this;
+            return copy;
         }
-        friend constexpr bool operator!=(const iterator_impl& i,
-                                         const sentinel_impl<BI, BS>& s) { return !(i == s); }
-        friend constexpr bool operator==(const sentinel_impl<BI, BS>& s,
-                                         const iterator_impl& i) { return i == s; }
-        friend constexpr bool operator!=(const sentinel_impl<BI, BS>& s,
-                                         const iterator_impl& i) { return !(i == s); }
+
+        constexpr iterator_impl& operator+=(difference_type offset)
+            requires random_access_range<Base> {
+            if (empty_ || offset == 0) return *this;
+            if (offset > 0) {
+                current_ += step_ * (offset - 1);
+                missing_ = advance_bounded(step_);
+            } else {
+                current_ += step_ * offset + missing_;
+                missing_ = 0;
+            }
+            return *this;
+        }
+
+        constexpr iterator_impl& operator-=(difference_type offset)
+            requires random_access_range<Base> {
+            return *this += -offset;
+        }
+
+        constexpr decltype(auto) operator[](difference_type offset) const
+            requires random_access_range<Base> {
+            return *(*this + offset);
+        }
+
+        friend constexpr bool operator==(const iterator_impl& left,
+                                         default_sentinel_t) {
+            return left.empty_ || left.current_ == left.end_;
+        }
+
+        friend constexpr bool operator==(const iterator_impl& left,
+                                         const iterator_impl& right)
+            requires equality_comparable<BI> {
+            if (left.empty_ || right.empty_)
+                return left.empty_ && right.empty_;
+            return left.current_ == right.current_;
+        }
+
+        friend constexpr bool operator<(const iterator_impl& left,
+                                        const iterator_impl& right)
+            requires random_access_range<Base> {
+            return left.current_ < right.current_;
+        }
+
+        friend constexpr bool operator>(const iterator_impl& left,
+                                        const iterator_impl& right)
+            requires random_access_range<Base> {
+            return right < left;
+        }
+
+        friend constexpr bool operator<=(const iterator_impl& left,
+                                         const iterator_impl& right)
+            requires random_access_range<Base> {
+            return !(right < left);
+        }
+
+        friend constexpr bool operator>=(const iterator_impl& left,
+                                         const iterator_impl& right)
+            requires random_access_range<Base> {
+            return !(left < right);
+        }
+
+        friend constexpr auto operator<=>(const iterator_impl& left,
+                                          const iterator_impl& right)
+            requires random_access_range<Base> && three_way_comparable<BI> {
+            return left.current_ <=> right.current_;
+        }
+
+        friend constexpr iterator_impl operator+(
+            const iterator_impl& value, difference_type offset)
+            requires random_access_range<Base> {
+            auto result = value;
+            result += offset;
+            return result;
+        }
+
+        friend constexpr iterator_impl operator+(
+            difference_type offset, const iterator_impl& value)
+            requires random_access_range<Base> {
+            return value + offset;
+        }
+
+        friend constexpr iterator_impl operator-(
+            const iterator_impl& value, difference_type offset)
+            requires random_access_range<Base> {
+            auto result = value;
+            result -= offset;
+            return result;
+        }
+
+        friend constexpr difference_type operator-(
+            const iterator_impl& left, const iterator_impl& right)
+            requires sized_sentinel_for<BI, BI> {
+            if (left.empty_ || right.empty_) return 0;
+            const difference_type distance = left.current_ - right.current_;
+            if constexpr (forward_range<Base>) {
+                return (distance + left.missing_ - right.missing_) /
+                       left.step_;
+            } else {
+                return distance < 0
+                    ? -div_ceil(-distance, left.step_)
+                    : div_ceil(distance, left.step_);
+            }
+        }
+
+        friend constexpr difference_type operator-(
+            default_sentinel_t, const iterator_impl& value)
+            requires sized_sentinel_for<BS, BI> {
+            if (value.empty_) return 0;
+            return div_ceil(value.end_ - value.current_, value.step_);
+        }
+
+        friend constexpr difference_type operator-(
+            const iterator_impl& value, default_sentinel_t sentinel)
+            requires sized_sentinel_for<BS, BI> {
+            return -(sentinel - value);
+        }
+
+        friend constexpr iter_rvalue_reference_t<BI> iter_move(
+            const iterator_impl& value)
+            noexcept(noexcept(ranges::iter_move(value.current_))) {
+            return ranges::iter_move(value.current_);
+        }
+
+        friend constexpr void iter_swap(const iterator_impl& left,
+                                        const iterator_impl& right)
+            noexcept(noexcept(ranges::iter_swap(left.current_,
+                                                 right.current_)))
+            requires indirectly_swappable<BI> {
+            ranges::iter_swap(left.current_, right.current_);
+        }
     };
 
 public:
-    stride_view() = default;
-    constexpr stride_view(V base, size_t step)
-        : base_(std::move(base)), step_(step) {}
-    constexpr V base() const& { return base_; }
+    constexpr stride_view() requires default_initializable<V> = default;
+
+    constexpr explicit stride_view(V base, difference_type step)
+        : base_(std::move(base)), step_(step), empty_(step <= 0) {}
+
+    constexpr V base() const& requires copy_constructible<V> { return base_; }
     constexpr V base() && { return std::move(base_); }
-    constexpr auto begin() {
-        return iterator_impl<base_iterator, base_sentinel>(
-            ranges::begin(base_), ranges::end(base_), step_, step_ == 0u);
+
+    constexpr difference_type stride() const noexcept { return step_; }
+
+    constexpr auto begin()
+        requires (!stride_simple_view<V>) {
+        return iterator_impl<false>(this, ranges::begin(base_), 0, empty_);
     }
-    constexpr auto end() {
-        return sentinel_impl<base_iterator, base_sentinel>(ranges::end(base_));
+
+    constexpr auto end()
+        requires (!stride_simple_view<V>) {
+        if constexpr (common_range<V> && sized_range<V> &&
+                      forward_range<V>) {
+            const difference_type missing = step_ <= 0
+                ? 0
+                : (step_ - ranges::distance(base_) % step_) % step_;
+            return iterator_impl<false>(
+                this, ranges::end(base_), missing, empty_);
+        } else if constexpr (common_range<V> &&
+                             !bidirectional_range<V>) {
+            return iterator_impl<false>(
+                this, ranges::end(base_), 0, empty_);
+        } else {
+            return default_sentinel;
+        }
     }
 
     constexpr auto begin() const
         requires input_range<const V> {
-        using const_iterator = iterator_t<const V>;
-        using const_sentinel = sentinel_t<const V>;
-        return iterator_impl<const_iterator, const_sentinel>(
-            ranges::begin(std::as_const(base_)),
-            ranges::end(std::as_const(base_)), step_, step_ == 0u);
+        return iterator_impl<true>(this, ranges::begin(base_), 0, empty_);
     }
 
     constexpr auto end() const
         requires input_range<const V> {
-        using const_iterator = iterator_t<const V>;
-        using const_sentinel = sentinel_t<const V>;
-        return sentinel_impl<const_iterator, const_sentinel>(
-            ranges::end(std::as_const(base_)));
+        if constexpr (common_range<const V> && sized_range<const V> &&
+                      forward_range<const V>) {
+            using const_difference_type = range_difference_t<const V>;
+            const const_difference_type step =
+                static_cast<const_difference_type>(step_);
+            const const_difference_type missing = step <= 0
+                ? 0
+                : (step - ranges::distance(base_) % step) % step;
+            return iterator_impl<true>(
+                this, ranges::end(base_), missing, empty_);
+        } else if constexpr (common_range<const V> &&
+                             !bidirectional_range<const V>) {
+            return iterator_impl<true>(this, ranges::end(base_), 0, empty_);
+        } else {
+            return default_sentinel;
+        }
     }
 
-    constexpr size_t size() requires sized_range<V> {
-        if (step_ == 0u) return 0u;
-        const size_t n = static_cast<size_t>(ranges::size(base_));
-        return n / step_ + (n % step_ != 0u ? 1u : 0u);
+    constexpr auto size() requires sized_range<V> {
+        using size_type = make_unsigned_t<difference_type>;
+        if (empty_) return size_type(0);
+        const difference_type distance =
+            static_cast<difference_type>(ranges::size(base_));
+        return static_cast<size_type>(
+            distance / step_ + (distance % step_ != 0 ? 1 : 0));
     }
 
-    constexpr size_t size() const requires sized_range<const V> {
-        if (step_ == 0u) return 0u;
-        const size_t n = static_cast<size_t>(
-            ranges::size(std::as_const(base_)));
-        return n / step_ + (n % step_ != 0u ? 1u : 0u);
+    constexpr auto size() const requires sized_range<const V> {
+        using const_difference_type = range_difference_t<const V>;
+        using size_type = make_unsigned_t<const_difference_type>;
+        if (empty_) return size_type(0);
+        const const_difference_type distance =
+            static_cast<const_difference_type>(ranges::size(base_));
+        const const_difference_type step =
+            static_cast<const_difference_type>(step_);
+        return static_cast<size_type>(
+            distance / step + (distance % step != 0 ? 1 : 0));
     }
 };
 
 template<typename R>
-stride_view(R&&, size_t) -> stride_view<owning_view<R>>;
+stride_view(R&&, range_difference_t<views::all_t<R>>)
+    -> stride_view<views::all_t<R>>;
 
 template<typename V>
 inline constexpr bool enable_borrowed_range<stride_view<V>> =
@@ -7864,32 +8099,47 @@ constexpr auto operator|(R&& range, slide_adaptor<Count> adaptor) {
     return adaptor(std::forward<R>(range));
 }
 
+template<typename Step>
 struct stride_adaptor {
-    size_t step_;
+    Step step_;
     template<typename R>
         requires stride_viewable<R>
     constexpr auto operator()(R&& range) const {
         auto base = all(std::forward<R>(range));
-        return stride_view<decltype(base)>(std::move(base), step_);
+        using difference_type = range_difference_t<decltype(base)>;
+        if (!in_range<difference_type>(step_)) {
+            rin_panic("stride count out of range");
+        }
+        return stride_view<decltype(base)>(
+            std::move(base), static_cast<difference_type>(step_));
     }
 };
 
 struct stride_fn {
-    template<typename R>
-        requires stride_viewable<R>
-    constexpr auto operator()(R&& range, size_t step) const {
+    template<typename R, typename Step>
+        requires stride_viewable<R> && integral<remove_cvref_t<Step>>
+    constexpr auto operator()(R&& range, Step step) const {
         auto base = all(std::forward<R>(range));
-        return stride_view<decltype(base)>(std::move(base), step);
+        using difference_type = range_difference_t<decltype(base)>;
+        if (!in_range<difference_type>(step)) {
+            rin_panic("stride count out of range");
+        }
+        return stride_view<decltype(base)>(
+            std::move(base), static_cast<difference_type>(step));
     }
-    constexpr auto operator()(size_t step) const {
-        return stride_adaptor{step};
+
+    template<typename Step>
+        requires integral<remove_cvref_t<Step>>
+    constexpr auto operator()(Step step) const {
+        using step_type = remove_cvref_t<Step>;
+        return stride_adaptor<step_type>{static_cast<step_type>(step)};
     }
 };
 inline constexpr stride_fn stride{};
 
-template<typename R>
+template<typename R, typename Step>
     requires stride_viewable<R>
-constexpr auto operator|(R&& range, stride_adaptor adaptor) {
+constexpr auto operator|(R&& range, stride_adaptor<Step> adaptor) {
     return adaptor(std::forward<R>(range));
 }
 
