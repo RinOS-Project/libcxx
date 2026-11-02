@@ -193,7 +193,8 @@
 #define __cpp_lib_ranges_split                  202207L
 #define __cpp_lib_ranges_as_rvalue              202207L
 #define __cpp_lib_ranges_join_with              202202L
-#define __cpp_lib_ranges_concat                  202403L
+/* __cpp_lib_ranges_concat remains withheld until views::concat accepts the
+ * variadic range list required by P2542. */
 #define __cpp_lib_associative_heterogeneous_erasure 202110L
 #define __cpp_lib_optional                    202110L
 #define __cpp_lib_expected                    202211L
