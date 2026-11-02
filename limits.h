@@ -538,6 +538,51 @@ public:
     static constexpr float_round_style round_style = round_toward_zero;
 };
 
+#if defined(__SIZEOF_INT128__)
+/* GCC/RinCompiler extended 128-bit integer types. */
+template<>
+class numeric_limits<__int128> : public numeric_limits<long long> {
+public:
+    static constexpr __int128 min() noexcept { return -max() - 1; }
+    static constexpr __int128 max() noexcept {
+        return static_cast<__int128>(
+            (static_cast<unsigned __int128>(1) << 127) - 1);
+    }
+    static constexpr __int128 lowest() noexcept { return min(); }
+    static constexpr int digits = 127;
+    static constexpr int digits10 = 38;
+    static constexpr bool is_signed = true;
+    static constexpr bool is_modulo = false;
+    static constexpr __int128 epsilon() noexcept { return 0; }
+    static constexpr __int128 round_error() noexcept { return 0; }
+    static constexpr __int128 infinity() noexcept { return 0; }
+    static constexpr __int128 quiet_NaN() noexcept { return 0; }
+    static constexpr __int128 signaling_NaN() noexcept { return 0; }
+    static constexpr __int128 denorm_min() noexcept { return 0; }
+};
+
+template<>
+class numeric_limits<unsigned __int128>
+    : public numeric_limits<unsigned long long> {
+public:
+    static constexpr unsigned __int128 min() noexcept { return 0; }
+    static constexpr unsigned __int128 max() noexcept {
+        return ~static_cast<unsigned __int128>(0);
+    }
+    static constexpr unsigned __int128 lowest() noexcept { return 0; }
+    static constexpr int digits = 128;
+    static constexpr int digits10 = 38;
+    static constexpr bool is_signed = false;
+    static constexpr bool is_modulo = true;
+    static constexpr unsigned __int128 epsilon() noexcept { return 0; }
+    static constexpr unsigned __int128 round_error() noexcept { return 0; }
+    static constexpr unsigned __int128 infinity() noexcept { return 0; }
+    static constexpr unsigned __int128 quiet_NaN() noexcept { return 0; }
+    static constexpr unsigned __int128 signaling_NaN() noexcept { return 0; }
+    static constexpr unsigned __int128 denorm_min() noexcept { return 0; }
+};
+#endif
+
 /* float特殊化 */
 template<>
 class numeric_limits<float> {
@@ -784,6 +829,16 @@ RIN_DEFINE_NL_ARITHMETIC(unsigned long long)
 RIN_DEFINE_NL_ARITHMETIC(float)
 RIN_DEFINE_NL_ARITHMETIC(double)
 RIN_DEFINE_NL_ARITHMETIC(long double)
+#if defined(__SIZEOF_INT128__)
+RIN_DEFINE_NL_MEMBER(__int128, digits)
+RIN_DEFINE_NL_MEMBER(__int128, digits10)
+RIN_DEFINE_NL_MEMBER(__int128, is_signed)
+RIN_DEFINE_NL_MEMBER(__int128, is_modulo)
+RIN_DEFINE_NL_MEMBER(unsigned __int128, digits)
+RIN_DEFINE_NL_MEMBER(unsigned __int128, digits10)
+RIN_DEFINE_NL_MEMBER(unsigned __int128, is_signed)
+RIN_DEFINE_NL_MEMBER(unsigned __int128, is_modulo)
+#endif
 #undef RIN_DEFINE_NL_ARITHMETIC
 #undef RIN_DEFINE_NL_MEMBER
 #undef RIN_CXX11_NUMERIC_LIMITS_SPECIALIZATION_DEF
