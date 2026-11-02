@@ -29,28 +29,34 @@ namespace std {
 namespace detail {
 
 /*
- * `notify_all_at_thread_exit` keeps work until the caller thread exits.  A
+ * `notify_all_at_thread_exit` keeps work until the caller thread exits. A
  * raw condition_variable pointer in that work item becomes a use-after-free
- * when a condition variable is closed before the thread exits.  Keep a
- * bounded, generation-tagged registry of the native condition objects.  Each
- * entry also owns a gate mutex: waiters hold it across caller-lock release
- * and entry into pthread_cond_wait, while notifiers and destruction hold it
- * across signal/broadcast.  Destruction first closes the entry and drains it,
- * so a stale exit node can only become a no-op and no native wait can miss a
- * close wakeup immediately before entering pthread_cond_wait.
+ * when a condition variable is closed before the thread exits. Keep a
+ * generation-tagged registry whose pages grow as needed. Each entry owns a
+ * gate mutex: waiters hold it across caller-lock release and entry into
+ * pthread_cond_wait, and pinned notifiers hold it across signal/broadcast.
+ * Destruction closes an entry and drains both operation classes before the
+ * native condition object or gate can be reclaimed.
  */
 struct __condition_variable_registry_slot {
     pthread_cond_t* cond;
     pthread_mutex_t gate;
     unsigned long long generation;
     unsigned int active_waiters;
+    unsigned int active_notifiers;
     volatile unsigned char closing;
     unsigned char gate_initialized;
 };
 
+struct __condition_variable_registry_page {
+    __condition_variable_registry_page* next;
+    __condition_variable_registry_slot slots[128];
+};
+
 struct __condition_variable_registry {
     volatile unsigned int lock;
-    __condition_variable_registry_slot slots[128];
+    __condition_variable_registry_page first_page;
+    __condition_variable_registry_page* last_page;
 };
 
 inline __condition_variable_registry& __condition_variable_registry_state() {
@@ -61,9 +67,8 @@ inline __condition_variable_registry& __condition_variable_registry_state() {
 inline void __condition_variable_registry_lock(
     __condition_variable_registry& state) noexcept {
     while (__sync_lock_test_and_set(&state.lock, 1u) != 0u) {
-        /* The registry is only held across a slot lookup or one pthread
-         * broadcast.  A bounded pause keeps exit/destruction contention from
-         * consuming the whole core. */
+        /* Keep registry ownership limited to generation/count snapshots.
+         * Gate waits and condition notifications happen after unlocking. */
         __asm__ volatile("pause" ::: "memory");
     }
 }
@@ -73,28 +78,95 @@ inline void __condition_variable_registry_unlock(
     __sync_lock_release(&state.lock);
 }
 
+/* All page links are read or written with the registry lock held. Pages are
+ * stable for the process lifetime, so wait and notify operations can retain a
+ * slot's gate pointer after releasing the registry lock. */
+inline __condition_variable_registry_page*
+__condition_variable_registry_first_page_locked(
+    __condition_variable_registry& state) noexcept {
+    if (state.last_page == nullptr)
+        state.last_page = &state.first_page;
+    return &state.first_page;
+}
+
+inline __condition_variable_registry_slot*
+__condition_variable_registry_find_locked(
+    __condition_variable_registry& state, pthread_cond_t* cond,
+    unsigned long long generation) noexcept {
+    for (__condition_variable_registry_page* page =
+             __condition_variable_registry_first_page_locked(state);
+         page != nullptr; page = page->next) {
+        for (unsigned int index = 0u; index < 128u; ++index) {
+            __condition_variable_registry_slot& slot = page->slots[index];
+            if (slot.cond == cond && slot.generation == generation)
+                return &slot;
+        }
+    }
+    return nullptr;
+}
+
 inline bool __condition_variable_registry_register(
     pthread_cond_t* cond, unsigned long long& generation) noexcept {
     __condition_variable_registry& state =
         __condition_variable_registry_state();
-    __condition_variable_registry_lock(state);
-    for (unsigned int index = 0; index < 128u; ++index) {
-        __condition_variable_registry_slot& slot = state.slots[index];
-        if (slot.cond != nullptr) continue;
-        if (pthread_mutex_init(&slot.gate, nullptr) != 0) continue;
-        unsigned long long next = slot.generation + 1u;
-        if (next == 0u) next = 1u;
-        slot.generation = next;
-        slot.cond = cond;
-        slot.active_waiters = 0u;
-        __atomic_store_n(&slot.closing, 0u, __ATOMIC_RELEASE);
-        slot.gate_initialized = 1u;
-        generation = next;
+    for (;;) {
+        bool saw_free_slot = false;
+        __condition_variable_registry_lock(state);
+        for (__condition_variable_registry_page* page =
+                 __condition_variable_registry_first_page_locked(state);
+             page != nullptr; page = page->next) {
+            for (unsigned int index = 0u; index < 128u; ++index) {
+                __condition_variable_registry_slot& slot =
+                    page->slots[index];
+                if (slot.cond != nullptr) continue;
+                saw_free_slot = true;
+                if (pthread_mutex_init(&slot.gate, nullptr) != 0) continue;
+                unsigned long long next = slot.generation + 1u;
+                if (next == 0u) next = 1u;
+                slot.generation = next;
+                slot.cond = cond;
+                slot.active_waiters = 0u;
+                slot.active_notifiers = 0u;
+                __atomic_store_n(&slot.closing, 0u, __ATOMIC_RELEASE);
+                slot.gate_initialized = 1u;
+                generation = next;
+                __condition_variable_registry_unlock(state);
+                return true;
+            }
+        }
         __condition_variable_registry_unlock(state);
-        return true;
+        /* A free slot whose native gate could not be initialized is an
+         * allocator/resource failure, not a reason to grow an empty page. */
+        if (saw_free_slot) return false;
+
+        void* allocation = malloc(sizeof(__condition_variable_registry_page));
+        if (allocation == nullptr) return false;
+        __condition_variable_registry_page* new_page =
+            new (allocation) __condition_variable_registry_page();
+        bool appended = false;
+        __condition_variable_registry_lock(state);
+        bool capacity_appeared = false;
+        for (__condition_variable_registry_page* page =
+                 __condition_variable_registry_first_page_locked(state);
+             page != nullptr && !capacity_appeared; page = page->next) {
+            for (unsigned int index = 0u; index < 128u; ++index) {
+                if (page->slots[index].cond == nullptr) {
+                    capacity_appeared = true;
+                    break;
+                }
+            }
+        }
+        if (!capacity_appeared) {
+            state.last_page->next = new_page;
+            state.last_page = new_page;
+            appended = true;
+        }
+        __condition_variable_registry_unlock(state);
+        if (!appended) {
+            free(new_page);
+            continue;
+        }
     }
-    __condition_variable_registry_unlock(state);
-    return false;
 }
 
 inline bool __condition_variable_registry_begin_wait(
@@ -106,18 +178,16 @@ inline bool __condition_variable_registry_begin_wait(
     __condition_variable_registry& state =
         __condition_variable_registry_state();
     __condition_variable_registry_lock(state);
+    __condition_variable_registry_slot* slot =
+        __condition_variable_registry_find_locked(state, cond, generation);
     bool accepted = false;
-    for (unsigned int index = 0; index < 128u; ++index) {
-        __condition_variable_registry_slot& slot = state.slots[index];
-        if (slot.cond != cond || slot.generation != generation) continue;
-        if (__atomic_load_n(&slot.closing, __ATOMIC_ACQUIRE) == 0u &&
-            slot.active_waiters != 0xffffffffu) {
-            ++slot.active_waiters;
-            gate = &slot.gate;
-            closing = &slot.closing;
-            accepted = true;
-        }
-        break;
+    if (slot != nullptr &&
+        __atomic_load_n(&slot->closing, __ATOMIC_ACQUIRE) == 0u &&
+        slot->active_waiters != 0xffffffffu) {
+        ++slot->active_waiters;
+        gate = &slot->gate;
+        closing = &slot->closing;
+        accepted = true;
     }
     __condition_variable_registry_unlock(state);
     return accepted;
@@ -129,13 +199,10 @@ inline void __condition_variable_registry_end_wait(
     __condition_variable_registry& state =
         __condition_variable_registry_state();
     __condition_variable_registry_lock(state);
-    for (unsigned int index = 0; index < 128u; ++index) {
-        __condition_variable_registry_slot& slot = state.slots[index];
-        if (slot.cond == cond && slot.generation == generation) {
-            if (slot.active_waiters != 0u) --slot.active_waiters;
-            break;
-        }
-    }
+    __condition_variable_registry_slot* slot =
+        __condition_variable_registry_find_locked(state, cond, generation);
+    if (slot != nullptr && slot->active_waiters != 0u)
+        --slot->active_waiters;
     __condition_variable_registry_unlock(state);
 }
 
@@ -145,14 +212,9 @@ inline unsigned int __condition_variable_registry_active_waiters(
     __condition_variable_registry& state =
         __condition_variable_registry_state();
     __condition_variable_registry_lock(state);
-    unsigned int result = 0u;
-    for (unsigned int index = 0; index < 128u; ++index) {
-        const __condition_variable_registry_slot& slot = state.slots[index];
-        if (slot.cond == cond && slot.generation == generation) {
-            result = slot.active_waiters;
-            break;
-        }
-    }
+    const __condition_variable_registry_slot* slot =
+        __condition_variable_registry_find_locked(state, cond, generation);
+    const unsigned int result = slot != nullptr ? slot->active_waiters : 0u;
     __condition_variable_registry_unlock(state);
     return result;
 }
@@ -171,14 +233,12 @@ inline void __condition_variable_registry_close(
     pthread_mutex_t* gate = nullptr;
     bool found = false;
     __condition_variable_registry_lock(state);
-    for (unsigned int index = 0; index < 128u; ++index) {
-        __condition_variable_registry_slot& slot = state.slots[index];
-        if (slot.cond == cond && slot.generation == generation) {
-            __atomic_store_n(&slot.closing, 1u, __ATOMIC_RELEASE);
-            gate = &slot.gate;
-            found = true;
-            break;
-        }
+    __condition_variable_registry_slot* slot =
+        __condition_variable_registry_find_locked(state, cond, generation);
+    if (slot != nullptr) {
+        __atomic_store_n(&slot->closing, 1u, __ATOMIC_RELEASE);
+        gate = &slot->gate;
+        found = true;
     }
     __condition_variable_registry_unlock(state);
     if (!found) return;
@@ -196,19 +256,17 @@ inline void __condition_variable_registry_close(
     for (;;) {
         __condition_variable_registry_lock(state);
         bool drained = false;
-        for (unsigned int index = 0; index < 128u; ++index) {
-            __condition_variable_registry_slot& slot = state.slots[index];
-            if (slot.cond != cond || slot.generation != generation) continue;
-            if (slot.active_waiters == 0u) {
-                if (slot.gate_initialized) {
-                    (void)pthread_mutex_destroy(&slot.gate);
-                    slot.gate_initialized = 0u;
-                }
-                slot.cond = nullptr;
-                __atomic_store_n(&slot.closing, 0u, __ATOMIC_RELEASE);
-                drained = true;
+        slot = __condition_variable_registry_find_locked(
+            state, cond, generation);
+        if (slot != nullptr && slot->active_waiters == 0u &&
+            slot->active_notifiers == 0u) {
+            if (slot->gate_initialized) {
+                (void)pthread_mutex_destroy(&slot->gate);
+                slot->gate_initialized = 0u;
             }
-            break;
+            slot->cond = nullptr;
+            __atomic_store_n(&slot->closing, 0u, __ATOMIC_RELEASE);
+            drained = true;
         }
         __condition_variable_registry_unlock(state);
         if (drained) return;
@@ -222,70 +280,78 @@ inline void __condition_variable_registry_close(
 
 inline void __condition_variable_registry_unregister(
     pthread_cond_t* cond, unsigned long long generation) noexcept {
+    __condition_variable_registry_close(cond, generation);
+}
+
+inline bool __condition_variable_registry_begin_notify(
+    pthread_cond_t* cond, unsigned long long generation,
+    pthread_mutex_t*& gate, volatile unsigned char*& closing) noexcept {
+    gate = nullptr;
+    closing = nullptr;
+    if (!cond || generation == 0u) return false;
+    __condition_variable_registry& state =
+        __condition_variable_registry_state();
+    __condition_variable_registry_lock(state);
+    __condition_variable_registry_slot* slot =
+        __condition_variable_registry_find_locked(state, cond, generation);
+    bool pinned = false;
+    if (slot != nullptr &&
+        __atomic_load_n(&slot->closing, __ATOMIC_ACQUIRE) == 0u &&
+        slot->active_notifiers != 0xffffffffu) {
+        ++slot->active_notifiers;
+        gate = &slot->gate;
+        closing = &slot->closing;
+        pinned = true;
+    }
+    __condition_variable_registry_unlock(state);
+    return pinned;
+}
+
+inline void __condition_variable_registry_end_notify(
+    pthread_cond_t* cond, unsigned long long generation) noexcept {
     if (!cond || generation == 0u) return;
     __condition_variable_registry& state =
         __condition_variable_registry_state();
     __condition_variable_registry_lock(state);
-    for (unsigned int index = 0; index < 128u; ++index) {
-        __condition_variable_registry_slot& slot = state.slots[index];
-        if (slot.cond == cond && slot.generation == generation) {
-            if (slot.gate_initialized) {
-                (void)pthread_mutex_destroy(&slot.gate);
-                slot.gate_initialized = 0u;
-            }
-            slot.cond = nullptr;
-            break;
-        }
-    }
+    __condition_variable_registry_slot* slot =
+        __condition_variable_registry_find_locked(state, cond, generation);
+    if (slot != nullptr && slot->active_notifiers != 0u)
+        --slot->active_notifiers;
     __condition_variable_registry_unlock(state);
+}
+
+inline bool __condition_variable_registry_notify_operation(
+    pthread_cond_t* cond, unsigned long long generation,
+    bool broadcast) noexcept {
+    pthread_mutex_t* gate = nullptr;
+    volatile unsigned char* closing = nullptr;
+    if (!__condition_variable_registry_begin_notify(
+            cond, generation, gate, closing))
+        return false;
+
+    bool notified = false;
+    if (pthread_mutex_lock(gate) == 0) {
+        if (__atomic_load_n(closing, __ATOMIC_ACQUIRE) == 0u) {
+            const int result = broadcast
+                ? pthread_cond_broadcast(cond) : pthread_cond_signal(cond);
+            notified = result == 0;
+        }
+        (void)pthread_mutex_unlock(gate);
+    }
+    __condition_variable_registry_end_notify(cond, generation);
+    return notified;
 }
 
 inline bool __condition_variable_registry_notify(
     pthread_cond_t* cond, unsigned long long generation) noexcept {
-    if (!cond || generation == 0u) return false;
-    __condition_variable_registry& state =
-        __condition_variable_registry_state();
-    __condition_variable_registry_lock(state);
-    bool found = false;
-    for (unsigned int index = 0; index < 128u; ++index) {
-        __condition_variable_registry_slot& slot = state.slots[index];
-        if (slot.cond == cond && slot.generation == generation) {
-            (void)pthread_mutex_lock(&slot.gate);
-            (void)pthread_cond_broadcast(slot.cond);
-            (void)pthread_mutex_unlock(&slot.gate);
-            found = true;
-            break;
-        }
-    }
-    __condition_variable_registry_unlock(state);
-    return found;
+    return __condition_variable_registry_notify_operation(
+        cond, generation, true);
 }
 
-/* Serialize one-shot notifications with close/drain as well.  The public
- * notify methods used to call pthread_cond_signal directly, which left a
- * small window where a concurrent destructor could destroy the native condvar
- * while a notifier was still entering it.  Keeping the signal under the same
- * generation registry lock makes the native lifetime boundary identical for
- * notify_one and notify_all. */
 inline bool __condition_variable_registry_signal(
     pthread_cond_t* cond, unsigned long long generation) noexcept {
-    if (!cond || generation == 0u) return false;
-    __condition_variable_registry& state =
-        __condition_variable_registry_state();
-    bool found = false;
-    __condition_variable_registry_lock(state);
-    for (unsigned int index = 0; index < 128u; ++index) {
-        __condition_variable_registry_slot& slot = state.slots[index];
-        if (slot.cond == cond && slot.generation == generation) {
-            (void)pthread_mutex_lock(&slot.gate);
-            (void)pthread_cond_signal(slot.cond);
-            (void)pthread_mutex_unlock(&slot.gate);
-            found = true;
-            break;
-        }
-    }
-    __condition_variable_registry_unlock(state);
-    return found;
+    return __condition_variable_registry_notify_operation(
+        cond, generation, false);
 }
 
 [[noreturn]] inline void condition_variable_operation_failed(
@@ -553,7 +619,7 @@ public:
                 &cond_, registry_generation_)) {
             (void)pthread_cond_destroy(&cond_);
             detail::condition_variable_operation_failed(
-                ENOMEM, "condition_variable registry capacity");
+                ENOMEM, "condition_variable registry allocation");
         }
     }
 
