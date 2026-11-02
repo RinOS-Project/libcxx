@@ -1003,8 +1003,18 @@ class flat_map {
         return iterator(this, index);
     }
     template <typename InputIt> void insert_range_impl(InputIt first, InputIt last) {
-        for (; first != last; ++first)
-            insert_pair((*first).first, (*first).second, false);
+        for (; first != last; ++first) {
+            auto &&value = *first;
+            insert_pair(std::forward<decltype(value)>(value).first,
+                        std::forward<decltype(value)>(value).second, false);
+        }
+    }
+    template <typename InputIt> void insert_sorted_range(InputIt first, InputIt last) {
+        for (; first != last; ++first) {
+            auto &&value = *first;
+            keys_.insert(keys_.end(), std::forward<decltype(value)>(value).first);
+            mapped_.insert(mapped_.end(), std::forward<decltype(value)>(value).second);
+        }
     }
     void normalize_pairs(bool keep_equivalent) {
         vector<value_type> ordered;
@@ -1267,19 +1277,13 @@ class flat_map {
     template <typename InputIt>
     flat_map(sorted_unique_t, InputIt first, InputIt last, const Compare &comp = Compare())
         : comp_(comp), keys_(), mapped_() {
-        for (; first != last; ++first) {
-            keys_.insert(keys_.end(), (*first).first);
-            mapped_.insert(mapped_.end(), (*first).second);
-        }
+        insert_sorted_range(first, last);
     }
     template <typename InputIt>
     flat_map(sorted_unique_t, InputIt first, InputIt last, const Compare &comp,
              const allocator_type &alloc)
         : comp_(comp), keys_(key_allocator_type(alloc)), mapped_(mapped_allocator_type(alloc)) {
-        for (; first != last; ++first) {
-            keys_.insert(keys_.end(), (*first).first);
-            mapped_.insert(mapped_.end(), (*first).second);
-        }
+        insert_sorted_range(first, last);
     }
     template <typename InputIt>
     flat_map(sorted_unique_t, InputIt first, InputIt last, const allocator_type &alloc)
@@ -1300,10 +1304,7 @@ class flat_map {
     flat_map(sorted_unique_t, InputIt first, InputIt last, const Compare &comp, const Alloc &alloc)
         : comp_(comp), keys_(flat_detail::sequence_allocator<KeyContainer>(alloc)),
           mapped_(flat_detail::sequence_allocator<MappedContainer>(alloc)) {
-        for (; first != last; ++first) {
-            keys_.insert(keys_.end(), (*first).first);
-            mapped_.insert(mapped_.end(), (*first).second);
-        }
+        insert_sorted_range(first, last);
     }
     flat_map(initializer_list<value_type> values, const Compare &comp = Compare())
         : flat_map(values.begin(), values.end(), comp) {}
@@ -1342,14 +1343,12 @@ class flat_map {
     template <typename R>
     flat_map(from_range_t, R &&range, const Compare &comp = Compare())
         : comp_(comp), keys_(), mapped_() {
-        for (auto &&value : range)
-            insert_pair(value.first, value.second, false);
+        insert_range(std::forward<R>(range));
     }
     template <typename R>
     flat_map(from_range_t, R &&range, const Compare &comp, const allocator_type &alloc)
         : comp_(comp), keys_(key_allocator_type(alloc)), mapped_(mapped_allocator_type(alloc)) {
-        for (auto &&value : range)
-            insert_pair(value.first, value.second, false);
+        insert_range(std::forward<R>(range));
     }
     template <typename R>
     flat_map(from_range_t, R &&range, const allocator_type &alloc)
@@ -1361,8 +1360,7 @@ class flat_map {
     flat_map(from_range_t, R &&range, const Compare &comp, const Alloc &alloc)
         : comp_(comp), keys_(flat_detail::sequence_allocator<KeyContainer>(alloc)),
           mapped_(flat_detail::sequence_allocator<MappedContainer>(alloc)) {
-        for (auto &&value : range)
-            insert_pair(value.first, value.second, false);
+        insert_range(std::forward<R>(range));
     }
 #endif
 
@@ -1478,8 +1476,7 @@ class flat_map {
         insert(values.begin(), values.end());
     }
     template <typename InputIt> void insert(sorted_unique_t, InputIt first, InputIt last) {
-        for (; first != last; ++first)
-            insert_pair((*first).first, (*first).second, false);
+        insert_sorted_range(first, last);
     }
 #if __cplusplus > 202002L
     template <typename R> void insert_range(R &&range) {
@@ -1860,7 +1857,8 @@ class flat_multimap : public flat_map<Key, T, Compare, KeyContainer, MappedConta
     }
     template <typename R> void insert_range(R &&range) {
         for (auto &&value : range)
-            this->insert_equivalent(value.first, value.second);
+            this->insert_equivalent(std::forward<decltype(value)>(value).first,
+                                    std::forward<decltype(value)>(value).second);
     }
     template <typename R> void insert_range(sorted_equivalent_t, R &&range) {
         insert_range(std::forward<R>(range));
