@@ -209,8 +209,9 @@
 #if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RATIO)
 #define __cpp_lib_ratio                       202306L
 #endif
-/* P2363 remains unadvertised until heterogeneous insert is implemented for
- * set and unordered_set as well as the map families. */
+/* P2363's insertion and bucket overloads remain preview-gated in the headers.
+ * Keep the feature-test macro withheld until the complete cross-container
+ * surface passes source and runtime acceptance. */
 #if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_NUMERIC)
 /* P0543 saturation arithmetic.  The preview gate is shared with
  * <numeric>; do not advertise the API in older modes without the explicit

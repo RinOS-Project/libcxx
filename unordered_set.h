@@ -18,6 +18,10 @@
 #include "ranges.h"
 #endif
 
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_ASSOCIATIVE_INSERTION)
+#define RIN_UNORDERED_SET_HAS_HETERO_INSERTION 1
+#endif
+
 namespace std {
 
 template<class Key, class Hash, class KeyEqual, class Allocator>
@@ -788,12 +792,94 @@ public:
     pair<iterator, bool> insert(value_type&& value) {
         return emplace(move(value));
     }
+
+    iterator insert(const_iterator /* hint */, const value_type& value) {
+        return insert(value).first;
+    }
+
+    iterator insert(const_iterator /* hint */, value_type&& value) {
+        return insert(move(value)).first;
+    }
+
+#if defined(RIN_UNORDERED_SET_HAS_HETERO_INSERTION)
+    template<typename K,
+             typename = enable_if_t<
+                 detail::unordered_heterogeneous_lookup<
+                     hasher, key_equal, key_type, decay_t<K>>::value>>
+    pair<iterator, bool> insert(K&& value) {
+        const size_type lookup_hash = hasher_(value);
+        if (buckets_ && bucket_count_ != 0) {
+            const size_type lookup_bucket = bucket_index(lookup_hash);
+            for (Node* node = buckets_[lookup_bucket]; node; node = node->next) {
+                if (node->hash_value == lookup_hash &&
+                    key_equal_(node->value, value)) {
+                    return pair<iterator, bool>(
+                        iterator(this, lookup_bucket, node), false);
+                }
+            }
+        }
+
+        ensure_bucket_storage();
+        Node* new_node = allocate_node(lookup_hash, forward<K>(value));
+        size_type stored_hash = 0;
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+        try {
+            stored_hash = hasher_(new_node->value);
+        } catch (...) {
+            destroy_node(new_node);
+            throw;
+        }
+#else
+        stored_hash = hasher_(new_node->value);
+#endif
+        new_node->hash_value = stored_hash;
+
+        const size_type idx = bucket_index(stored_hash);
+        for (Node* node = buckets_[idx]; node; node = node->next) {
+            bool equivalent = false;
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+            try {
+#endif
+                equivalent = node->hash_value == stored_hash &&
+                             key_equal_(node->value, new_node->value);
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+            } catch (...) {
+                destroy_node(new_node);
+                throw;
+            }
+#endif
+            if (equivalent) {
+                destroy_node(new_node);
+                return pair<iterator, bool>(iterator(this, idx, node), false);
+            }
+        }
+
+        new_node->next = buckets_[idx];
+        buckets_[idx] = new_node;
+        ++size_;
+        rehash_if_needed();
+        return pair<iterator, bool>(
+            iterator(this, bucket_index(new_node->hash_value), new_node), true);
+    }
+#endif
     
     template<class InputIt>
     void insert(InputIt first, InputIt last) {
         for (; first != last; ++first)
             insert(*first);
     }
+
+#if defined(RIN_UNORDERED_SET_HAS_HETERO_INSERTION)
+    template<typename K,
+             typename = enable_if_t<
+                 detail::unordered_heterogeneous_lookup<
+                     hasher, key_equal, key_type, decay_t<K>>::value &&
+                 !is_convertible<K&&, iterator>::value &&
+                 !is_convertible<K&&, const_iterator>::value>>
+    iterator insert(const_iterator /* hint */, K&& value) {
+        return insert(forward<K>(value)).first;
+    }
+#endif
     
     void insert(initializer_list<value_type> init) {
         for (const auto& v : init)
@@ -1187,7 +1273,7 @@ public:
         return bucket_index(hasher_(key));
     }
 
-#if __cplusplus >= 202002L
+#if defined(RIN_UNORDERED_SET_HAS_HETERO_INSERTION)
     template<typename K,
              typename = enable_if_t<
                  detail::unordered_heterogeneous_lookup<
@@ -2106,7 +2192,7 @@ public:
         return hasher_(key) % bucket_count_;
     }
 
-#if __cplusplus >= 202002L
+#if defined(RIN_UNORDERED_SET_HAS_HETERO_INSERTION)
     template<typename K,
              typename = enable_if_t<
                  detail::unordered_heterogeneous_lookup<

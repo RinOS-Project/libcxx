@@ -769,13 +769,12 @@ public:
     template<typename K,
              typename = enable_if_t<
                  unordered_map_detail::heterogeneous_lookup<
-                     hasher, key_equal, key_type, decay_t<K>>::value &&
-                 is_constructible<key_type, K&&>::value &&
-                 is_constructible<mapped_type>::value>>
+                     hasher, key_equal, key_type, decay_t<K>>::value>>
     mapped_type& operator[](K&& key) {
-        /* Reuse try_emplace so an existing heterogeneous key never creates a
-         * temporary mapped value and a missing key is published once. */
-        return try_emplace(std::forward<K>(key)).first->second;
+        /* Use the hinted overload so iterator-convertible heterogeneous keys
+         * remain accepted here; duplicate probes still precede mapped
+         * construction. */
+        return try_emplace(cbegin(), std::forward<K>(key))->second;
     }
 #endif
     
@@ -810,9 +809,8 @@ public:
     template<typename K,
              typename = enable_if_t<
                  unordered_map_detail::heterogeneous_lookup<
-                     hasher, key_equal, key_type, decay_t<K>>::value &&
-                 is_constructible<key_type, K&&>::value>>
-    mapped_type& at(K&& key) {
+                     hasher, key_equal, key_type, decay_t<K>>::value>>
+    mapped_type& at(const K& key) {
         if (m_buckets.empty()) at_failure();
         const size_t h = m_hash(key);
         const size_type idx = bucket_index(h);
@@ -828,9 +826,8 @@ public:
     template<typename K,
              typename = enable_if_t<
                  unordered_map_detail::heterogeneous_lookup<
-                     hasher, key_equal, key_type, decay_t<K>>::value &&
-                 is_constructible<key_type, K&&>::value>>
-    const mapped_type& at(K&& key) const {
+                     hasher, key_equal, key_type, decay_t<K>>::value>>
+    const mapped_type& at(const K& key) const {
         if (m_buckets.empty()) at_failure();
         const size_t h = m_hash(key);
         const size_type idx = bucket_index(h);
@@ -977,7 +974,8 @@ public:
              typename = enable_if_t<
                  unordered_map_detail::heterogeneous_lookup<
                      hasher, key_equal, key_type, decay_t<K>>::value &&
-                 is_constructible<key_type, K&&>::value>>
+                 !is_convertible<K&&, const_iterator>::value &&
+                 !is_convertible<K&&, iterator>::value>>
     pair<iterator, bool> try_emplace(K&& key, Args&&... args) {
         size_t h = m_hash(key);
         ensure_bucket_storage();
@@ -1007,12 +1005,26 @@ public:
     template<typename K, typename... Args,
              typename = enable_if_t<
                  unordered_map_detail::heterogeneous_lookup<
-                     hasher, key_equal, key_type, decay_t<K>>::value &&
-                 is_constructible<key_type, K&&>::value>>
+                     hasher, key_equal, key_type, decay_t<K>>::value>>
     iterator try_emplace(const_iterator /* hint */, K&& key,
                          Args&&... args) {
-        return try_emplace(std::forward<K>(key),
-                           std::forward<Args>(args)...).first;
+        const size_t h = m_hash(key);
+        ensure_bucket_storage();
+        size_type idx = bucket_index(h);
+        for (Node* node = m_buckets[idx]; node; node = node->next) {
+            if (node->hash_value == h && m_equal(node->data().first, key))
+                return iterator(this, idx, node);
+        }
+
+        rehash_if_needed();
+        idx = bucket_index(h);
+        Node* new_node = allocate_node(typename Node::emplace_tag{},
+                                       std::forward<K>(key), h,
+                                       std::forward<Args>(args)...);
+        new_node->next = m_buckets[idx];
+        m_buckets[idx] = new_node;
+        ++m_size;
+        return iterator(this, idx, new_node);
     }
 #endif
 
@@ -1041,33 +1053,34 @@ public:
     template<typename K, typename M,
              typename = enable_if_t<
                  unordered_map_detail::heterogeneous_lookup<
-                     hasher, key_equal, key_type, decay_t<K>>::value &&
-                 is_constructible<key_type, K&&>::value &&
-                 is_constructible<mapped_type, M&&>::value &&
-                 is_assignable<mapped_type&, M&&>::value>>
+                     hasher, key_equal, key_type, decay_t<K>>::value>>
     pair<iterator, bool> insert_or_assign(K&& key, M&& obj) {
-        if (!m_buckets.empty()) {
-            const size_t h = m_hash(key);
-            const size_type idx = bucket_index(h);
-            for (Node* node = m_buckets[idx]; node; node = node->next) {
-                if (node->hash_value == h &&
-                    m_equal(node->data().first, key)) {
-                    node->data().second = std::forward<M>(obj);
-                    return {iterator(this, idx, node), false};
-                }
+        const size_t h = m_hash(key);
+        ensure_bucket_storage();
+        size_type idx = bucket_index(h);
+        for (Node* node = m_buckets[idx]; node; node = node->next) {
+            if (node->hash_value == h &&
+                m_equal(node->data().first, key)) {
+                node->data().second = std::forward<M>(obj);
+                return {iterator(this, idx, node), false};
             }
         }
-        return try_emplace(std::forward<K>(key),
-                           std::forward<M>(obj));
+
+        rehash_if_needed();
+        idx = bucket_index(h);
+        Node* new_node = allocate_node(typename Node::emplace_tag{},
+                                       std::forward<K>(key), h,
+                                       std::forward<M>(obj));
+        new_node->next = m_buckets[idx];
+        m_buckets[idx] = new_node;
+        ++m_size;
+        return {iterator(this, idx, new_node), true};
     }
 
     template<typename K, typename M,
              typename = enable_if_t<
                  unordered_map_detail::heterogeneous_lookup<
-                     hasher, key_equal, key_type, decay_t<K>>::value &&
-                 is_constructible<key_type, K&&>::value &&
-                 is_constructible<mapped_type, M&&>::value &&
-                 is_assignable<mapped_type&, M&&>::value>>
+                     hasher, key_equal, key_type, decay_t<K>>::value>>
     iterator insert_or_assign(const_iterator /* hint */, K&& key, M&& obj) {
         return insert_or_assign(std::forward<K>(key),
                                 std::forward<M>(obj)).first;
@@ -1360,7 +1373,7 @@ public:
         return bucket_index(m_hash(key));
     }
 
-#if __cplusplus >= 202002L
+#if defined(RIN_UNORDERED_HAS_HETERO_INSERTION)
     template<typename K,
              typename = enable_if_t<
                  unordered_map_detail::heterogeneous_lookup<
@@ -2131,7 +2144,7 @@ public:
         return buckets_.empty() ? 0 : bucket_index(hash_(key));
     }
 
-#if __cplusplus >= 202002L
+#if defined(RIN_UNORDERED_HAS_HETERO_INSERTION)
     template<typename K,
              typename = enable_if_t<
                  unordered_map_detail::heterogeneous_lookup<

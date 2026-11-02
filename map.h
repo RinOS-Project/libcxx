@@ -1236,9 +1236,7 @@ public:
 
 #if defined(RIN_MAP_HAS_HETERO_INSERTION)
     template<typename K, typename C = Compare,
-             typename = typename map_detail::transparent_compare<C>::type,
-             typename = typename enable_if<
-                 is_constructible<key_type, K&&>::value>::type>
+             typename = typename map_detail::transparent_compare<C>::type>
     mapped_type& operator[](K&& key) {
         Node* n = find_node(key);
         if (n) return n->data.second;
@@ -1261,20 +1259,16 @@ public:
 
 #if defined(RIN_MAP_HAS_HETERO_INSERTION)
     template<typename K, typename C = Compare,
-             typename = typename map_detail::transparent_compare<C>::type,
-             typename = typename enable_if<
-                 is_constructible<key_type, K&&>::value>::type>
-    mapped_type& at(K&& key) {
+             typename = typename map_detail::transparent_compare<C>::type>
+    mapped_type& at(const K& key) {
         Node* n = find_node(key);
         if (!n) at_failure();
         return n->data.second;
     }
 
     template<typename K, typename C = Compare,
-             typename = typename map_detail::transparent_compare<C>::type,
-             typename = typename enable_if<
-                 is_constructible<key_type, K&&>::value>::type>
-    const mapped_type& at(K&& key) const {
+             typename = typename map_detail::transparent_compare<C>::type>
+    const mapped_type& at(const K& key) const {
         Node* n = find_node(key);
         if (!n) at_failure();
         return n->data.second;
@@ -1379,7 +1373,8 @@ public:
              typename C = Compare,
              typename = typename map_detail::transparent_compare<C>::type,
              typename = typename enable_if<
-                 is_constructible<key_type, K&&>::value>::type>
+                 !is_convertible<K&&, const_iterator>::value &&
+                 !is_convertible<K&&, iterator>::value>::type>
     pair<iterator, bool> try_emplace(K&& key, Args&&... args) {
         /* Probe before constructing the mapped object.  Besides matching the
          * standard's no-effect duplicate path, this keeps a heterogeneous
@@ -1393,12 +1388,12 @@ public:
 
     template<typename K, typename... Args,
              typename C = Compare,
-             typename = typename map_detail::transparent_compare<C>::type,
-             typename = typename enable_if<
-                 is_constructible<key_type, K&&>::value>::type>
+             typename = typename map_detail::transparent_compare<C>::type>
     iterator try_emplace(const_iterator /*hint*/, K&& key, Args&&... args) {
-        return try_emplace(std::forward<K>(key),
-                           std::forward<Args>(args)...).first;
+        Node* n = find_node(key);
+        if (n) return iterator(n, this);
+        mapped_type mapped(std::forward<Args>(args)...);
+        return insert_unique_node(std::forward<K>(key), std::move(mapped)).first;
     }
 #endif
 
@@ -1426,10 +1421,7 @@ public:
 #if defined(RIN_MAP_HAS_HETERO_INSERTION)
     template<typename K, typename M,
              typename C = Compare,
-             typename = typename map_detail::transparent_compare<C>::type,
-             typename = typename enable_if<
-                 is_constructible<key_type, K&&>::value &&
-                 is_constructible<mapped_type, M&&>::value>::type>
+             typename = typename map_detail::transparent_compare<C>::type>
     pair<iterator, bool> insert_or_assign(K&& key, M&& obj) {
         Node* n = find_node(key);
         if (n) {
@@ -1442,10 +1434,7 @@ public:
 
     template<typename K, typename M,
              typename C = Compare,
-             typename = typename map_detail::transparent_compare<C>::type,
-             typename = typename enable_if<
-                 is_constructible<key_type, K&&>::value &&
-                 is_constructible<mapped_type, M&&>::value>::type>
+             typename = typename map_detail::transparent_compare<C>::type>
     iterator insert_or_assign(const_iterator /*hint*/, K&& key, M&& obj) {
         return insert_or_assign(std::forward<K>(key),
                                 std::forward<M>(obj)).first;

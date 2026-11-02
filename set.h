@@ -168,6 +168,11 @@ private:
         Node(value_type&& val, Node* p = nullptr)
             : data(std::move(val)), parent(p), left(nullptr), right(nullptr),
               color(Color::Red) {}
+
+        template<typename U>
+        Node(U&& val, Node* p = nullptr)
+            : data(std::forward<U>(val)), parent(p), left(nullptr), right(nullptr),
+              color(Color::Red) {}
         
         Node* minimum() {
             Node* node = this;
@@ -243,6 +248,29 @@ private:
         try {
 #endif
             node_allocator_traits::construct(m_alloc, node, std::move(value), parent);
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+        } catch (...) {
+            node_allocator_traits::deallocate(m_alloc, allocation, 1);
+            throw;
+        }
+#endif
+        return node;
+    }
+
+    template<typename U>
+    Node* allocate_node(U&& value, Node* parent) {
+        node_pointer allocation = node_allocator_traits::allocate(m_alloc, 1);
+        Node* node = set_detail::pointer_address(allocation);
+        if (allocation == node_pointer() || !node) {
+            if (allocation != node_pointer())
+                node_allocator_traits::deallocate(m_alloc, allocation, 1);
+            set_detail::allocation_failure();
+        }
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+        try {
+#endif
+            node_allocator_traits::construct(
+                m_alloc, node, std::forward<U>(value), parent);
 #if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
         } catch (...) {
             node_allocator_traits::deallocate(m_alloc, allocation, 1);
@@ -1015,6 +1043,44 @@ public:
         return {iterator(new_node, this), true};
     }
 
+#if defined(RIN_SET_HAS_HETERO_INSERTION)
+    template<typename K, typename C = Compare,
+             typename = typename set_detail::transparent_compare<C>::type>
+    pair<iterator, bool> insert(K&& value) {
+        Node* parent = nullptr;
+        Node* current = m_root;
+        bool insert_left = false;
+
+        while (current) {
+            parent = current;
+            if (m_comp(value, current->data)) {
+                insert_left = true;
+                current = current->left;
+            } else if (m_comp(current->data, value)) {
+                insert_left = false;
+                current = current->right;
+            } else {
+                return {iterator(current, this), false};
+            }
+        }
+
+        if (m_size >= max_size())
+            set_detail::length_failure();
+        Node* new_node = allocate_node(std::forward<K>(value), parent);
+        if (!parent) {
+            m_root = new_node;
+        } else if (insert_left) {
+            parent->left = new_node;
+        } else {
+            parent->right = new_node;
+        }
+
+        insert_fixup(new_node);
+        ++m_size;
+        return {iterator(new_node, this), true};
+    }
+#endif
+
     /* ヒント付き挿入（ヒントは無視、標準インターフェース互換用） */
     iterator insert(const_iterator /*hint*/, const value_type& value) {
         return insert(value).first;
@@ -1023,6 +1089,17 @@ public:
     iterator insert(const_iterator /*hint*/, value_type&& value) {
         return insert(std::move(value)).first;
     }
+
+#if defined(RIN_SET_HAS_HETERO_INSERTION)
+    template<typename K, typename C = Compare,
+             typename = typename set_detail::transparent_compare<C>::type,
+             typename = typename enable_if<
+                 !is_convertible<K&&, iterator>::value &&
+                 !is_convertible<K&&, const_iterator>::value>::type>
+    iterator insert(const_iterator /*hint*/, K&& value) {
+        return insert(std::forward<K>(value)).first;
+    }
+#endif
 
     template<typename... Args>
     pair<iterator, bool> emplace(Args&&... args) {
