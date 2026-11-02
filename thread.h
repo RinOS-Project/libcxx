@@ -132,6 +132,9 @@ public:
         friend class thread;
         friend struct hash<id>;
         friend bool operator==(id x, id y) noexcept {
+            const pthread_t empty{};
+            if (x.id_ == empty || y.id_ == empty)
+                return x.id_ == empty && y.id_ == empty;
             return ::pthread_equal(x.id_, y.id_) != 0;
         }
         friend bool operator!=(id x, id y) noexcept { return !(x == y); }
