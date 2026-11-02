@@ -51,6 +51,11 @@ protected:
     basic_streambuf<CharT, Traits>* setbuf(CharT* data,
                                             streamsize count) override {
         if (count < 0 || (!data && count != 0)) return nullptr;
+        if constexpr (numeric_limits<streamsize>::digits >
+                      numeric_limits<size_t>::digits) {
+            if (count > static_cast<streamsize>(numeric_limits<size_t>::max()))
+                return nullptr;
+        }
         std::span<CharT> replacement(data, static_cast<size_t>(count));
         span(replacement);
         return this;
@@ -61,7 +66,9 @@ protected:
                                                ios_base::out) override {
         const bool in = (which & ios_base::in) && (mode_ & ios_base::in);
         const bool out = (which & ios_base::out) && (mode_ & ios_base::out);
-        if ((!in && !out) || (in && out && direction == ios_base::cur))
+        if ((!in && !out) ||
+            ((which & ios_base::in) && (which & ios_base::out) &&
+             direction == ios_base::cur))
             return failure();
 
         const CharT* next = out ? this->pptr_ : this->gptr_;
@@ -93,8 +100,13 @@ protected:
             (offset < 0 && base < minimum - offset))
             return failure();
         const off_type position = base + offset;
-        if (position < 0 || static_cast<size_t>(position) > buffer_.size())
-            return failure();
+        if (position < 0) return failure();
+        if constexpr (numeric_limits<off_type>::digits >
+                      numeric_limits<size_t>::digits) {
+            if (position > static_cast<off_type>(numeric_limits<size_t>::max()))
+                return failure();
+        }
+        if (static_cast<size_t>(position) > buffer_.size()) return failure();
         if ((!this->gptr_ && in && position != 0) ||
             (!this->pptr_ && out && position != 0))
             return failure();
