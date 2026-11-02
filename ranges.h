@@ -11010,9 +11010,8 @@ constexpr bool container_range_known_empty(R&& range) {
         integral_constant<bool, ranges::sized_range<R>>());
 }
 
-template<typename Container, typename Ref, typename... Args>
-constexpr void append_container_element(Container& container, Ref&& element,
-                                        Args&&... args) {
+template<typename Container, typename Ref>
+constexpr void append_container_element(Container& container, Ref&& element) {
     if constexpr (ranges::detail::container_appendable<Container, Ref>) {
         if constexpr (requires {
                           container.emplace_back(
@@ -11038,7 +11037,7 @@ constexpr void append_container_element(Container& container, Ref&& element,
     } else {
         using value_type = typename Container::value_type;
         auto converted = ranges::to<value_type>(
-            std::forward<Ref>(element), std::forward<Args>(args)...);
+            std::forward<Ref>(element));
         append_container_element(container, std::move(converted));
     }
 }
@@ -11064,27 +11063,6 @@ constexpr void append_container_range(Container& container, R&& range) {
         auto last = ranges::end(range);
         for (; first != last; ++first) {
             append_container_element(container, *first);
-        }
-    }
-}
-
-template<typename Container, typename R, typename... Args>
-constexpr void append_container_range(Container& container, R&& range,
-                                      Args&&... args) {
-    if constexpr (sizeof...(Args) == 0) {
-        append_container_range(container, std::forward<R>(range));
-    } else if constexpr (requires {
-                             container.append_range(
-                                 std::forward<R>(range));
-                         }) {
-        container.append_range(std::forward<R>(range));
-    } else {
-        reserve_container_for_range(container, range);
-        auto first = ranges::begin(range);
-        auto last = ranges::end(range);
-        for (; first != last; ++first) {
-            append_container_element(container, *first,
-                                     std::forward<Args>(args)...);
         }
     }
 }
@@ -11137,9 +11115,7 @@ constexpr Container make_container_from_range_args(
     } else {
         Container container(
             std::get<Is>(std::forward<Tuple>(args))...);
-        append_container_range(
-            container, std::forward<R>(range),
-            std::get<Is>(std::forward<Tuple>(args))...);
+        append_container_range(container, std::forward<R>(range));
         return container;
     }
 }
@@ -11160,7 +11136,7 @@ constexpr Container make_container_from_range(R&& range, const Alloc& alloc) {
         return Container(ranges::begin(range), ranges::end(range), alloc);
     } else {
         Container container(alloc);
-        append_container_range(container, std::forward<R>(range), alloc);
+        append_container_range(container, std::forward<R>(range));
         return container;
     }
 }
