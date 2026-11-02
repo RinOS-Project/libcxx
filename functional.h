@@ -8,10 +8,12 @@
 
 #include "rincxx.h"
 #include "version.h"
+#include "type_traits.h"
+#include "invoke.h"
+#include "hash_integral.h"
 #include "exception.h"
 #include "new.h"
 #include "memory.h"
-#include "type_traits.h"
 #include "typeinfo.h"
 #include "pointer_order.h"
 #include "iterator.h"
@@ -37,7 +39,7 @@ struct hash;
 #endif
 
 /* ═══════════════════════════════════════════════════════════════
- * invoke (C++17)
+ * std::function implementation helpers
  * ═══════════════════════════════════════════════════════════════*/
 
 namespace detail {
@@ -113,92 +115,7 @@ inline bool functional_type_signature_equal(const char* left,
     return *left == *right;
 }
 
-template<typename Class, typename T,
-         enable_if_t<is_base_of<Class, remove_cvref_t<T>>::value, int> = 0>
-constexpr T&& functional_invoke_target(T&& value) noexcept {
-    return std::forward<T>(value);
-}
-
-template<typename Class, typename T>
-constexpr T& functional_invoke_target(reference_wrapper<T> value) noexcept {
-    return value.get();
-}
-
-template<typename Class, typename T,
-         enable_if_t<
-             !is_base_of<Class, remove_cvref_t<T>>::value &&
-             !is_reference_wrapper<remove_cvref_t<T>>::value,
-             int> = 0>
-constexpr auto functional_invoke_target(T&& value)
-    noexcept(noexcept(*std::forward<T>(value)))
-    -> decltype(*std::forward<T>(value)) {
-    return *std::forward<T>(value);
-}
-
 } /* namespace detail */
-
-template<typename F, typename T, typename... Args,
-         enable_if_t<
-             is_member_function_pointer<remove_cvref_t<F>>::value,
-             int> = 0>
-constexpr auto invoke(F&& function, T&& target, Args&&... args)
-    noexcept(noexcept(
-        (detail::functional_invoke_target<
-            typename detail::member_pointer_class<remove_cvref_t<F>>::type>(
-                std::forward<T>(target)).*std::forward<F>(function))(
-                    std::forward<Args>(args)...)))
-    -> decltype(
-        (detail::functional_invoke_target<
-            typename detail::member_pointer_class<remove_cvref_t<F>>::type>(
-                std::forward<T>(target)).*std::forward<F>(function))(
-                    std::forward<Args>(args)...)) {
-    return (detail::functional_invoke_target<
-        typename detail::member_pointer_class<remove_cvref_t<F>>::type>(
-            std::forward<T>(target)).*std::forward<F>(function))(
-                std::forward<Args>(args)...);
-}
-
-template<typename F, typename T,
-         enable_if_t<
-             is_member_object_pointer<remove_cvref_t<F>>::value,
-             int> = 0>
-constexpr auto invoke(F&& function, T&& target)
-    noexcept(noexcept(
-        detail::functional_invoke_target<
-            typename detail::member_pointer_class<remove_cvref_t<F>>::type>(
-                std::forward<T>(target)).*std::forward<F>(function)))
-    -> decltype((
-        detail::functional_invoke_target<
-            typename detail::member_pointer_class<remove_cvref_t<F>>::type>(
-                std::forward<T>(target)).*std::forward<F>(function))) {
-    return detail::functional_invoke_target<
-        typename detail::member_pointer_class<remove_cvref_t<F>>::type>(
-            std::forward<T>(target)).*std::forward<F>(function);
-}
-
-template<typename F, typename... Args,
-         enable_if_t<!is_member_pointer<remove_cvref_t<F>>::value, int> = 0>
-constexpr auto invoke(F&& function, Args&&... args)
-    noexcept(noexcept(std::forward<F>(function)(
-        std::forward<Args>(args)...)))
-    -> decltype(std::forward<F>(function)(std::forward<Args>(args)...)) {
-    return std::forward<F>(function)(std::forward<Args>(args)...);
-}
-
-#if __cplusplus > 202002L
-template<typename R, typename F, typename... Args>
-    requires is_invocable_r_v<R, F, Args...>
-constexpr R invoke_r(F&& function, Args&&... args)
-    noexcept(is_nothrow_invocable_r_v<R, F, Args...>)
-{
-    if constexpr (is_void_v<R>) {
-        std::invoke(std::forward<F>(function), std::forward<Args>(args)...);
-    } else {
-        return std::invoke(
-            std::forward<F>(function), std::forward<Args>(args)...);
-    }
-}
-#endif
 
 /* ═══════════════════════════════════════════════════════════════
  * function
@@ -886,6 +803,8 @@ class move_only_function_storage {
     }
 
 public:
+    using result_type = R;
+
     move_only_function_storage() noexcept : callable_(nullptr) {}
     move_only_function_storage(nullptr_t) noexcept : callable_(nullptr) {}
 
@@ -997,6 +916,11 @@ class move_only_function
     using base = detail::move_only_function_signature<
         Signature, move_only_function<Signature>>;
 public:
+    friend bool operator==(const move_only_function& function,
+                           nullptr_t) noexcept {
+        return !function;
+    }
+
     using base::base;
     using base::operator=;
     move_only_function() noexcept = default;
@@ -2482,124 +2406,6 @@ inline void functional_hash_store_u64(
 
 template<typename T>
 struct hash : detail::functional_hash_base<T> {};
-
-/* 整数型のハッシュ */
-template<>
-struct hash<bool> {
-    size_t operator()(bool val) const noexcept {
-        return static_cast<size_t>(val);
-    }
-};
-
-template<>
-struct hash<char> {
-    size_t operator()(char val) const noexcept {
-        return static_cast<size_t>(val);
-    }
-};
-
-template<>
-struct hash<signed char> {
-    size_t operator()(signed char val) const noexcept {
-        return static_cast<size_t>(val);
-    }
-};
-
-template<>
-struct hash<unsigned char> {
-    size_t operator()(unsigned char val) const noexcept {
-        return static_cast<size_t>(val);
-    }
-};
-
-template<>
-struct hash<wchar_t> {
-    size_t operator()(wchar_t value) const noexcept {
-        return static_cast<size_t>(value);
-    }
-};
-
-#if __cplusplus >= 201103L
-template<>
-struct hash<char16_t> {
-    size_t operator()(char16_t value) const noexcept {
-        return static_cast<size_t>(value);
-    }
-};
-
-template<>
-struct hash<char32_t> {
-    size_t operator()(char32_t value) const noexcept {
-        return static_cast<size_t>(value);
-    }
-};
-#endif
-
-#if defined(__cpp_char8_t)
-template<>
-struct hash<char8_t> {
-    size_t operator()(char8_t value) const noexcept {
-        return static_cast<size_t>(value);
-    }
-};
-#endif
-
-template<>
-struct hash<short> {
-    size_t operator()(short val) const noexcept {
-        return static_cast<size_t>(val);
-    }
-};
-
-template<>
-struct hash<unsigned short> {
-    size_t operator()(unsigned short val) const noexcept {
-        return static_cast<size_t>(val);
-    }
-};
-
-template<>
-struct hash<int> {
-    size_t operator()(int val) const noexcept {
-        return static_cast<size_t>(val);
-    }
-};
-
-template<>
-struct hash<unsigned int> {
-    size_t operator()(unsigned int val) const noexcept {
-        return static_cast<size_t>(val);
-    }
-};
-
-template<>
-struct hash<long> {
-    size_t operator()(long val) const noexcept {
-        return static_cast<size_t>(val);
-    }
-};
-
-template<>
-struct hash<unsigned long> {
-    size_t operator()(unsigned long val) const noexcept {
-        return static_cast<size_t>(val);
-    }
-};
-
-template<>
-struct hash<long long> {
-    size_t operator()(long long val) const noexcept {
-        const unsigned long long bits = static_cast<unsigned long long>(val);
-        return static_cast<size_t>(bits ^ (bits >> 32));
-    }
-};
-
-template<>
-struct hash<unsigned long long> {
-    size_t operator()(unsigned long long val) const noexcept {
-        return static_cast<size_t>(val ^ (val >> 32));
-    }
-};
 
 /* Floating hashes canonicalize both signed zero representations. */
 template<>
