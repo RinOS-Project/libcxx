@@ -769,6 +769,18 @@ public:
         return accessor_.access(pointer_, mapping_(indices...));
     }
 
+    template<class... Indices,
+             typename enable_if<sizeof...(Indices) ==
+                                    extents_type::rank() &&
+                                    conjunction<is_convertible<Indices,
+                                                               index_type>...>::value &&
+                                    conjunction<is_nothrow_constructible<
+                                        index_type, Indices>...>::value,
+                                int>::type = 0>
+    constexpr reference operator[](Indices... indices) const noexcept {
+        return (*this)(std::move(indices)...);
+    }
+
     static constexpr rank_type rank() noexcept { return extents_type::rank(); }
     static constexpr rank_type rank_dynamic() noexcept {
         return extents_type::rank_dynamic();
@@ -781,6 +793,9 @@ public:
             detail::mdspan_product(extents(), 0, extents_type::rank()));
     }
     constexpr bool empty() const noexcept { return size() == 0; }
+    constexpr index_type extent(rank_type rank) const noexcept {
+        return extents().extent(rank);
+    }
     constexpr const extents_type& extents() const noexcept {
         return mapping_.extents();
     }
