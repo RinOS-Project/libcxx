@@ -217,7 +217,7 @@ public:
         return const_cast<basic_spanbuf<CharT, Traits>*>(&buffer_);
     }
 
-    std::span<CharT> span() const noexcept { return buffer_.span(); }
+    std::span<const CharT> span() const noexcept { return buffer_.span(); }
     void span(std::span<CharT> storage) noexcept { buffer_.span(storage); }
 };
 
