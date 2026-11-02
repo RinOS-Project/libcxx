@@ -4781,6 +4781,186 @@ public:
  * generate_canonical
  * ═══════════════════════════════════════════════════════════════*/
 
+namespace __detail {
+
+/* The canonical integer is bounded by R^k < R * radix^digits.  The library
+ * supports at most 64 precision digits and numeric_limits::radix is an int,
+ * so 80 base-2^32 words cover that product, including a full-width 64-bit
+ * URBG whose range cardinality is 2^64. */
+struct __random_canonical_integer {
+    enum { word_count = 80 };
+    uint32_t words[word_count];
+};
+
+inline void __random_canonical_clear(__random_canonical_integer& value) {
+    for (size_t i = 0u; i < __random_canonical_integer::word_count; ++i)
+        value.words[i] = 0u;
+}
+
+inline void __random_canonical_set_u64(
+    __random_canonical_integer& value, uint64_t number) {
+    __random_canonical_clear(value);
+    value.words[0] = static_cast<uint32_t>(number);
+    value.words[1] = static_cast<uint32_t>(number >> 32u);
+}
+
+inline int __random_canonical_compare(
+    const __random_canonical_integer& left,
+    const __random_canonical_integer& right) {
+    for (size_t i = __random_canonical_integer::word_count; i != 0u; --i) {
+        const uint32_t a = left.words[i - 1u];
+        const uint32_t b = right.words[i - 1u];
+        if (a < b) return -1;
+        if (a > b) return 1;
+    }
+    return 0;
+}
+
+inline bool __random_canonical_add(
+    __random_canonical_integer& value,
+    const __random_canonical_integer& addend) {
+    uint64_t carry = 0u;
+    for (size_t i = 0u; i < __random_canonical_integer::word_count; ++i) {
+        const uint64_t sum = static_cast<uint64_t>(value.words[i]) +
+                             addend.words[i] + carry;
+        value.words[i] = static_cast<uint32_t>(sum);
+        carry = sum >> 32u;
+    }
+    return carry == 0u;
+}
+
+inline void __random_canonical_subtract(
+    __random_canonical_integer& value,
+    const __random_canonical_integer& subtrahend) {
+    uint64_t borrow = 0u;
+    for (size_t i = 0u; i < __random_canonical_integer::word_count; ++i) {
+        const uint64_t minuend_word = value.words[i];
+        const uint64_t subtrahend_word =
+            static_cast<uint64_t>(subtrahend.words[i]) + borrow;
+        if (minuend_word < subtrahend_word) {
+            value.words[i] = static_cast<uint32_t>(
+                (UINT64_C(1) << 32u) + minuend_word - subtrahend_word);
+            borrow = 1u;
+        } else {
+            value.words[i] = static_cast<uint32_t>(
+                minuend_word - subtrahend_word);
+            borrow = 0u;
+        }
+    }
+}
+
+inline bool __random_canonical_shift_left_one(
+    __random_canonical_integer& value) {
+    uint32_t carry = 0u;
+    for (size_t i = 0u; i < __random_canonical_integer::word_count; ++i) {
+        const uint32_t next = value.words[i] >> 31u;
+        value.words[i] = static_cast<uint32_t>((value.words[i] << 1u) | carry);
+        carry = next;
+    }
+    return carry == 0u;
+}
+
+inline bool __random_canonical_shift_left_64(
+    __random_canonical_integer& value) {
+    if (value.words[__random_canonical_integer::word_count - 2u] != 0u ||
+        value.words[__random_canonical_integer::word_count - 1u] != 0u)
+        return false;
+    for (size_t i = __random_canonical_integer::word_count; i > 2u; --i)
+        value.words[i - 1u] = value.words[i - 3u];
+    value.words[0] = 0u;
+    value.words[1] = 0u;
+    return true;
+}
+
+inline bool __random_canonical_multiply_u32(
+    __random_canonical_integer& value, uint32_t factor) {
+    uint64_t carry = 0u;
+    for (size_t i = 0u; i < __random_canonical_integer::word_count; ++i) {
+        const uint64_t product =
+            static_cast<uint64_t>(value.words[i]) * factor + carry;
+        value.words[i] = static_cast<uint32_t>(product);
+        carry = product >> 32u;
+    }
+    return carry == 0u;
+}
+
+inline bool __random_canonical_multiply_u64(
+    __random_canonical_integer& value, uint64_t factor) {
+    __random_canonical_integer low = value;
+    __random_canonical_integer high = value;
+    if (!__random_canonical_multiply_u32(
+            low, static_cast<uint32_t>(factor)))
+        return false;
+    if (!__random_canonical_multiply_u32(
+            high, static_cast<uint32_t>(factor >> 32u)))
+        return false;
+    if (high.words[__random_canonical_integer::word_count - 1u] != 0u)
+        return false;
+    for (size_t i = __random_canonical_integer::word_count; i != 0u; --i) {
+        if (i > 1u) high.words[i - 1u] = high.words[i - 2u];
+        else high.words[0] = 0u;
+    }
+    if (!__random_canonical_add(low, high)) return false;
+    value = low;
+    return true;
+}
+
+inline bool __random_canonical_multiply_range(
+    __random_canonical_integer& value, uint64_t range, bool full_width) {
+    return full_width ? __random_canonical_shift_left_64(value)
+                      : __random_canonical_multiply_u64(value, range);
+}
+
+inline bool __random_canonical_divmod(
+    const __random_canonical_integer& numerator,
+    const __random_canonical_integer& denominator,
+    __random_canonical_integer& quotient,
+    __random_canonical_integer& remainder) {
+    size_t bit_count = __random_canonical_integer::word_count * 32u;
+    __random_canonical_clear(quotient);
+    __random_canonical_clear(remainder);
+    if (__random_canonical_compare(denominator, quotient) == 0) return false;
+    while (bit_count != 0u &&
+           ((numerator.words[(bit_count - 1u) / 32u] >>
+             ((bit_count - 1u) % 32u)) & 1u) == 0u)
+        --bit_count;
+    while (bit_count != 0u) {
+        const size_t bit = --bit_count;
+        if (!__random_canonical_shift_left_one(remainder)) return false;
+        remainder.words[0] |=
+            (numerator.words[bit / 32u] >> (bit % 32u)) & 1u;
+        if (__random_canonical_compare(remainder, denominator) >= 0) {
+            __random_canonical_subtract(remainder, denominator);
+            quotient.words[bit / 32u] |=
+                static_cast<uint32_t>(1u << (bit % 32u));
+        }
+    }
+    return true;
+}
+
+inline bool __random_canonical_divide_u32(
+    __random_canonical_integer& value, uint32_t divisor,
+    uint32_t* remainder_out) {
+    uint64_t remainder = 0u;
+    if (divisor == 0u || remainder_out == NULL) return false;
+    for (size_t i = __random_canonical_integer::word_count; i != 0u; --i) {
+        const uint64_t current = (remainder << 32u) | value.words[i - 1u];
+        value.words[i - 1u] = static_cast<uint32_t>(current / divisor);
+        remainder = current % divisor;
+    }
+    *remainder_out = static_cast<uint32_t>(remainder);
+    return true;
+}
+
+inline bool __random_canonical_is_zero(
+    const __random_canonical_integer& value) {
+    for (size_t i = 0u; i < __random_canonical_integer::word_count; ++i)
+        if (value.words[i] != 0u) return false;
+    return true;
+}
+
+} /* namespace __detail */
+
 template<typename RealType, size_t bits, typename Generator>
 RealType generate_canonical(Generator& g) {
     static_assert(is_floating_point<RealType>::value,
@@ -4799,59 +4979,90 @@ RealType generate_canonical(Generator& g) {
     constexpr size_t requested_bits =
         bits < static_cast<size_t>(numeric_limits<RealType>::digits)
             ? bits : static_cast<size_t>(numeric_limits<RealType>::digits);
-    constexpr unsigned long long minimum =
-        static_cast<unsigned long long>(generator_type::min());
-    constexpr unsigned long long maximum =
-        static_cast<unsigned long long>(generator_type::max());
-    constexpr unsigned long long outcomes = maximum - minimum + 1u;
-    /* Keep arithmetic in both ordinary-C++11 branches defined even when a
-     * full-width URBG represents 2^64 outcomes as zero modulo uint64_t. */
-    const unsigned long long finite_outcomes =
-        outcomes == 0u ? 1u : outcomes;
-    const size_t bounded_requested_bits =
-        requested_bits == 64u ? 63u : requested_bits;
+    static_assert(numeric_limits<RealType>::radix >= 2,
+                  "RealType must have radix at least two");
+    if (requested_bits == 0u) return RealType(0);
 
-    size_t draws = 1u;
-    if (requested_bits != 0u && outcomes != 0u) {
-        unsigned long long product = 1u;
-        draws = 0u;
-        for (;;) {
-            ++draws;
-            bool enough;
-            if (requested_bits == 64u) {
-                enough = product > (~0ull / finite_outcomes);
-            } else {
-                const unsigned long long target =
-                    1ull << bounded_requested_bits;
-                const unsigned long long quotient = target / finite_outcomes;
-                const unsigned long long remainder = target % finite_outcomes;
-                const unsigned long long ceiling =
-                    quotient + (remainder != 0u ? 1u : 0u);
-                enough = product >= ceiling;
-            }
-            if (enough) break;
-            product *= finite_outcomes;
+    const uint64_t minimum = static_cast<uint64_t>(generator_type::min());
+    const uint64_t maximum = static_cast<uint64_t>(generator_type::max());
+    const uint64_t range = maximum - minimum + UINT64_C(1);
+    const bool full_width = range == 0u;
+    const uint32_t radix = static_cast<uint32_t>(
+        numeric_limits<RealType>::radix);
+
+    __detail::__random_canonical_integer target;
+    __detail::__random_canonical_set_u64(target, 1u);
+    for (size_t i = 0u; i < requested_bits; ++i) {
+        if (!__detail::__random_canonical_multiply_u32(target, radix))
+            __detail::__random_invalid_parameter();
+    }
+
+    __detail::__random_canonical_integer range_power;
+    __detail::__random_canonical_set_u64(range_power, 1u);
+    size_t draws = 0u;
+    while (__detail::__random_canonical_compare(range_power, target) < 0) {
+        if (!__detail::__random_canonical_multiply_range(
+                range_power, range, full_width))
+            __detail::__random_invalid_parameter();
+        ++draws;
+    }
+
+    __detail::__random_canonical_integer scale;
+    __detail::__random_canonical_integer range_remainder;
+    if (!__detail::__random_canonical_divmod(
+            range_power, target, scale, range_remainder))
+        __detail::__random_invalid_parameter();
+    __detail::__random_canonical_integer acceptance_limit = range_power;
+    __detail::__random_canonical_subtract(
+        acceptance_limit, range_remainder);
+
+    for (;;) {
+        __detail::__random_canonical_integer sum;
+        __detail::__random_canonical_integer place;
+        __detail::__random_canonical_clear(sum);
+        __detail::__random_canonical_set_u64(place, 1u);
+        for (size_t i = 0u; i < draws; ++i) {
+            const uint64_t raw = static_cast<uint64_t>(g());
+            const uint64_t digit = raw - minimum;
+            if ((!full_width && digit >= range) ||
+                (full_width && raw < minimum))
+                __detail::__random_invalid_parameter();
+            __detail::__random_canonical_integer term = place;
+            if (!__detail::__random_canonical_multiply_u64(term, digit) ||
+                !__detail::__random_canonical_add(sum, term) ||
+                !__detail::__random_canonical_multiply_range(
+                    place, range, full_width))
+                __detail::__random_invalid_parameter();
         }
-    }
+        if (__detail::__random_canonical_compare(sum, acceptance_limit) >= 0)
+            continue;
 
-    const RealType base = outcomes == 0u
-                        ? static_cast<RealType>(18446744073709551616.0L)
-                        : static_cast<RealType>(outcomes);
-    RealType sum = RealType(0);
-    RealType factor = RealType(1);
-    for (size_t i = 0; i < draws; ++i) {
-        const unsigned long long digit =
-            static_cast<unsigned long long>(g()) - minimum;
-        sum += static_cast<RealType>(digit) * factor;
-        factor *= base;
-    }
+        __detail::__random_canonical_integer quotient;
+        __detail::__random_canonical_integer division_remainder;
+        if (!__detail::__random_canonical_divmod(
+                sum, scale, quotient, division_remainder))
+            __detail::__random_invalid_parameter();
 
-    RealType result = sum / factor;
-    if (result < RealType(0)) result = RealType(0);
-    if (!(result < RealType(1))) {
-        result = RealType(1) - numeric_limits<RealType>::epsilon() / RealType(2);
+        uint32_t radix_digits[64] = {};
+        for (size_t i = 0u; i < requested_bits; ++i) {
+            if (!__detail::__random_canonical_divide_u32(
+                    quotient, radix, &radix_digits[i]))
+                __detail::__random_invalid_parameter();
+        }
+        if (!__detail::__random_canonical_is_zero(quotient))
+            __detail::__random_invalid_parameter();
+
+        RealType result = RealType(0);
+        RealType factor = RealType(1) / static_cast<RealType>(radix);
+        for (size_t i = requested_bits; i != 0u; --i) {
+            result += static_cast<RealType>(radix_digits[i - 1u]) * factor;
+            factor /= static_cast<RealType>(radix);
+        }
+        if (!(result < RealType(1)))
+            result = RealType(1) -
+                     numeric_limits<RealType>::epsilon() / RealType(2);
+        return result;
     }
-    return result;
 }
 
 } /* namespace std */
