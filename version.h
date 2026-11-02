@@ -208,10 +208,8 @@
 #if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RATIO)
 #define __cpp_lib_ratio                       202306L
 #endif
-#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_ASSOCIATIVE_INSERTION)
-/* P2363 heterogeneous try_emplace/insert_or_assign. */
-#define __cpp_lib_associative_heterogeneous_insertion 202311L
-#endif
+/* P2363 remains unadvertised until heterogeneous insert is implemented for
+ * set and unordered_set as well as the map families. */
 #if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_NUMERIC)
 /* P0543 saturation arithmetic.  The preview gate is shared with
  * <numeric>; do not advertise the API in older modes without the explicit
