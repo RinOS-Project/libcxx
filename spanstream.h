@@ -192,6 +192,14 @@ public:
 private:
     basic_spanbuf<CharT, Traits> buffer_;
 
+    template<class ROS>
+    static std::span<CharT> mutable_input_span(ROS&& storage) noexcept {
+        const std::span<const CharT> input(
+            std::forward<ROS>(storage));
+        return std::span<CharT>(const_cast<CharT*>(input.data()),
+                                input.size());
+    }
+
 public:
     explicit basic_ispanstream(std::span<CharT> storage,
                                ios_base::openmode which = ios_base::in)
@@ -199,6 +207,14 @@ public:
           buffer_(storage, which | ios_base::in) {
         this->init(&buffer_);
     }
+
+    template<class ROS>
+        requires ranges::borrowed_range<ROS> &&
+                 (!convertible_to<ROS, std::span<CharT>>) &&
+                 convertible_to<ROS, std::span<const CharT>>
+    explicit basic_ispanstream(ROS&& storage)
+        : basic_ispanstream(mutable_input_span(
+              std::forward<ROS>(storage))) {}
 
     basic_ispanstream(const basic_ispanstream&) = delete;
     basic_ispanstream& operator=(const basic_ispanstream&) = delete;
@@ -231,6 +247,14 @@ public:
 
     std::span<const CharT> span() const noexcept { return buffer_.span(); }
     void span(std::span<CharT> storage) noexcept { buffer_.span(storage); }
+
+    template<class ROS>
+        requires ranges::borrowed_range<ROS> &&
+                 (!convertible_to<ROS, std::span<CharT>>) &&
+                 convertible_to<ROS, std::span<const CharT>>
+    void span(ROS&& storage) noexcept {
+        buffer_.span(mutable_input_span(std::forward<ROS>(storage)));
+    }
 };
 
 template<class CharT, class Traits>
