@@ -153,9 +153,6 @@
  * ===================================================================*/
 
 #if defined(RIN_LIBCXX_CXX23_DIALECT)
-#ifndef __cpp_lib_constexpr_charconv
-#define __cpp_lib_constexpr_charconv 202207L
-#endif
 #define __cpp_lib_format_ranges              202207L
 #ifndef __cpp_lib_allocate_at_least
 #define __cpp_lib_allocate_at_least 202302L
