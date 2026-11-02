@@ -2630,5 +2630,21 @@ erase_if(unordered_multimap<Key, T, Hash, KeyEqual, Allocator>& value,
 
 } /* namespace std */
 
+#if __cplusplus >= 201703L
+#include "memory_resource.h"
+namespace std { namespace pmr {
+template<class Key, class T, class Hash = std::hash<Key>,
+         class KeyEqual = std::equal_to<Key>>
+using unordered_map = std::unordered_map<
+    Key, T, Hash, KeyEqual,
+    polymorphic_allocator<std::pair<const Key, T>>>;
+template<class Key, class T, class Hash = std::hash<Key>,
+         class KeyEqual = std::equal_to<Key>>
+using unordered_multimap = std::unordered_multimap<
+    Key, T, Hash, KeyEqual,
+    polymorphic_allocator<std::pair<const Key, T>>>;
+} }
+#endif
+
 #endif /* __cplusplus */
 #endif /* RINCXX_UNORDERED_MAP_H */

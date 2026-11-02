@@ -1634,5 +1634,13 @@ forward_list(from_range_t, R&&, Allocator)
 
 } /* namespace std */
 
+#if __cplusplus >= 201703L
+#include "memory_resource.h"
+namespace std { namespace pmr {
+template<class T>
+using forward_list = std::forward_list<T, polymorphic_allocator<T>>;
+} }
+#endif
+
 #endif /* __cplusplus */
 #endif /* RINCXX_FORWARD_LIST_H */

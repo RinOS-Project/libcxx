@@ -1959,6 +1959,13 @@ struct hash<vector<bool, Alloc>> {
 
 } /* namespace std */
 
+#if __cplusplus >= 201703L
+#include "memory_resource.h"
+namespace std { namespace pmr {
+template<class T> using vector = std::vector<T, polymorphic_allocator<T>>;
+} }
+#endif
+
 #endif /* __cplusplus */
 
 #endif /* RINCXX_VECTOR_H */

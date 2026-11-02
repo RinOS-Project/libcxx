@@ -1412,5 +1412,12 @@ list(from_range_t, R&&, Allocator)
 
 } /* namespace std */
 
+#if __cplusplus >= 201703L
+#include "memory_resource.h"
+namespace std { namespace pmr {
+template<class T> using list = std::list<T, polymorphic_allocator<T>>;
+} }
+#endif
+
 #endif /* __cplusplus */
 #endif /* RINCXX_LIST_H */

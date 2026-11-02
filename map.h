@@ -3248,5 +3248,17 @@ erase_if(multimap<Key, T, Compare, Allocator>& c, Pred pred) {
 
 } /* namespace std */
 
+#if __cplusplus >= 201703L
+#include "memory_resource.h"
+namespace std { namespace pmr {
+template<class Key, class T, class Compare = std::less<Key>>
+using map = std::map<Key, T, Compare,
+                     polymorphic_allocator<std::pair<const Key, T>>>;
+template<class Key, class T, class Compare = std::less<Key>>
+using multimap = std::multimap<Key, T, Compare,
+                               polymorphic_allocator<std::pair<const Key, T>>>;
+} }
+#endif
+
 #endif /* __cplusplus */
 #endif /* RINCXX_MAP_H */

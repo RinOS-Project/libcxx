@@ -2435,4 +2435,18 @@ erase_if(unordered_multiset<Key, Hash, KeyEqual, Allocator>& value,
 
 } /* namespace std */
 
+#if __cplusplus >= 201703L
+#include "memory_resource.h"
+namespace std { namespace pmr {
+template<class Key, class Hash = std::hash<Key>,
+         class KeyEqual = std::equal_to<Key>>
+using unordered_set = std::unordered_set<
+    Key, Hash, KeyEqual, polymorphic_allocator<Key>>;
+template<class Key, class Hash = std::hash<Key>,
+         class KeyEqual = std::equal_to<Key>>
+using unordered_multiset = std::unordered_multiset<
+    Key, Hash, KeyEqual, polymorphic_allocator<Key>>;
+} }
+#endif
+
 #endif /* RINCXX_UNORDERED_SET_H */

@@ -1839,4 +1839,11 @@ erase_if(deque<T, Allocator>& c, Pred pred) {
 
 } /* namespace std */
 
+#if __cplusplus >= 201703L
+#include "memory_resource.h"
+namespace std { namespace pmr {
+template<class T> using deque = std::deque<T, polymorphic_allocator<T>>;
+} }
+#endif
+
 #endif /* RINCXX_DEQUE_H */

@@ -2822,5 +2822,15 @@ erase_if(multiset<Key, Compare, Allocator>& value, Pred predicate) {
 
 } /* namespace std */
 
+#if __cplusplus >= 201703L
+#include "memory_resource.h"
+namespace std { namespace pmr {
+template<class Key, class Compare = std::less<Key>>
+using set = std::set<Key, Compare, polymorphic_allocator<Key>>;
+template<class Key, class Compare = std::less<Key>>
+using multiset = std::multiset<Key, Compare, polymorphic_allocator<Key>>;
+} }
+#endif
+
 #endif /* __cplusplus */
 #endif /* RINCXX_SET_H */
