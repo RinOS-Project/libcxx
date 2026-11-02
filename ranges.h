@@ -4165,508 +4165,572 @@ inline constexpr bool enable_borrowed_range<adjacent_view<V, N>> =
  * ???????????????????????????????????????????????????????????????*/
 
 template<typename R>
-concept cartesian_product_viewable = viewable_range<R> &&
-    (is_lvalue_reference_v<R> || view<remove_cvref_t<R>> ||
-     range<const remove_reference_t<R>>) &&
-    input_range<R>;
+concept cartesian_product_viewable = viewable_range<R> && input_range<R>;
 
+template<typename R>
+concept cartesian_product_inner_viewable =
+    viewable_range<R> && forward_range<R>;
 
-template<typename V1, typename V2>
-    requires input_range<V1> && input_range<V2>
+template<typename R>
+concept cartesian_simple_view =
+    view<R> && range<const R> &&
+    same_as<iterator_t<R>, iterator_t<const R>> &&
+    same_as<sentinel_t<R>, sentinel_t<const R>>;
+
+template<bool Const, typename R>
+using cartesian_maybe_const_t = conditional_t<Const, const R, R>;
+
+template<typename R>
+concept cartesian_product_common_arg = common_range<R> ||
+    (sized_range<R> && random_access_range<R>);
+
+template<bool Const, typename First, typename... Vs>
+concept cartesian_product_is_random_access =
+    random_access_range<cartesian_maybe_const_t<Const, First>> &&
+    ((random_access_range<cartesian_maybe_const_t<Const, Vs>> &&
+      sized_range<cartesian_maybe_const_t<Const, Vs>>) && ...);
+
+template<bool Const, typename First, typename... Vs>
+concept cartesian_product_all_random_access =
+    random_access_range<cartesian_maybe_const_t<Const, First>> &&
+    (random_access_range<cartesian_maybe_const_t<Const, Vs>> && ...);
+
+template<bool Const, typename First, typename... Vs>
+concept cartesian_product_is_bidirectional =
+    bidirectional_range<cartesian_maybe_const_t<Const, First>> &&
+    ((bidirectional_range<cartesian_maybe_const_t<Const, Vs>> &&
+      cartesian_product_common_arg<cartesian_maybe_const_t<Const, Vs>>) && ...);
+
+template<bool Const, typename First, typename... Vs>
+concept cartesian_product_is_sized_sentinel =
+    sized_sentinel_for<
+        sentinel_t<cartesian_maybe_const_t<Const, First>>,
+        iterator_t<cartesian_maybe_const_t<Const, First>>> &&
+    ((sized_range<cartesian_maybe_const_t<Const, Vs>> &&
+      sized_sentinel_for<
+          iterator_t<cartesian_maybe_const_t<Const, Vs>>,
+          iterator_t<cartesian_maybe_const_t<Const, Vs>>>) && ...);
+
+template<bool Const, typename First, typename... Vs>
+concept cartesian_product_is_sized_iterator =
+    sized_sentinel_for<
+        iterator_t<cartesian_maybe_const_t<Const, First>>,
+        iterator_t<cartesian_maybe_const_t<Const, First>>> &&
+    ((sized_range<cartesian_maybe_const_t<Const, Vs>> &&
+      sized_sentinel_for<
+          iterator_t<cartesian_maybe_const_t<Const, Vs>>,
+          iterator_t<cartesian_maybe_const_t<Const, Vs>>>) && ...);
+
+template<typename R>
+    requires cartesian_product_common_arg<R>
+constexpr auto cartesian_product_common_arg_end(R& range) {
+    if constexpr (common_range<R>) {
+        return ranges::end(range);
+    } else {
+        return ranges::begin(range) + ranges::distance(range);
+    }
+}
+
+template<typename First, typename... Vs>
+    requires view<First> && input_range<First> && (view<Vs> && ...) &&
+             (forward_range<Vs> && ...)
 class cartesian_product_view
-    : public view_interface<cartesian_product_view<V1, V2>> {
-    using I1 = iterator_t<V1>;
-    using I2 = iterator_t<V2>;
-    using S1 = sentinel_t<V1>;
-    using S2 = sentinel_t<V2>;
+    : public view_interface<cartesian_product_view<First, Vs...>> {
+    tuple<First, Vs...> bases_;
 
-    template<typename B1, typename B2>
-    struct sentinel;
+    template<bool Const>
+    class iterator {
+        using parent_type = cartesian_maybe_const_t<Const, cartesian_product_view>;
+        using first_base = cartesian_maybe_const_t<Const, First>;
+        using base_types = tuple<first_base,
+                                 cartesian_maybe_const_t<Const, Vs>...>;
+        using iterator_tuple = tuple<
+            iterator_t<first_base>, iterator_t<cartesian_maybe_const_t<Const, Vs>>...>;
+        using sentinel_tuple = tuple<
+            sentinel_t<first_base>, sentinel_t<cartesian_maybe_const_t<Const, Vs>>...>;
 
-    template<typename B1, typename B2>
-    struct iterator {
-        using I1 = iterator_t<B1>;
-        using I2 = iterator_t<B2>;
-        using reference = pair<iter_reference_t<I1>, iter_reference_t<I2>>;
-        using value_type = remove_cvref_t<reference>;
-        using difference_type = common_type_t<iter_difference_t<I1>,
-                                              iter_difference_t<I2>>;
-        using pointer = void;
-        using iterator_category = input_iterator_tag;
-        I1 first_;
-        I2 second_;
-        I2 second_begin_;
-        sentinel_t<B2> second_end_;
-        bool empty_;
+        template<size_t Index>
+        using base_type = tuple_element_t<Index, base_types>;
 
-        constexpr iterator() : first_(), second_(), second_begin_(),
-                                second_end_(), empty_(true) {}
-        constexpr iterator(I1 first, I2 second, I2 second_begin,
-                           sentinel_t<B2> second_end, bool empty)
-            : first_(first), second_(second), second_begin_(second_begin),
-              second_end_(second_end), empty_(empty) {}
+        parent_type* parent_ = nullptr;
+        iterator_tuple current_;
 
-        constexpr auto operator*() const {
-            return std::pair<decltype(*first_), decltype(*second_)>(
-                *first_, *second_);
+        template<size_t... Indices>
+        static constexpr iterator_tuple make_begins(
+            parent_type& parent, index_sequence<Indices...>) {
+            return iterator_tuple(
+                ranges::begin(get<Indices>(parent.bases_))...);
         }
 
-        constexpr iterator& operator++() {
-            if (empty_) return *this;
-            ++second_;
-            if (second_ == second_end_) {
-                second_ = second_begin_;
-                ++first_;
+        template<size_t... Indices>
+        static constexpr sentinel_tuple make_ends(
+            parent_type& parent, index_sequence<Indices...>) {
+            return sentinel_tuple(
+                ranges::end(get<Indices>(parent.bases_))...);
+        }
+
+        template<size_t... Indices>
+        static constexpr bool is_at_end(
+            const iterator& value, index_sequence<Indices...>) {
+            if (!value.parent_) return true;
+            const auto ends = make_ends(
+                *value.parent_, index_sequence<Indices...>{});
+            return ((get<Indices>(value.current_) == get<Indices>(ends)) || ...);
+        }
+
+        template<size_t... Indices>
+        static constexpr bool has_empty_inner_dimension(
+            const iterator_tuple& begins, const sentinel_tuple& ends,
+            index_sequence<Indices...>) {
+            return ((get<Indices + 1u>(begins) ==
+                     get<Indices + 1u>(ends)) || ...);
+        }
+
+        template<size_t Index>
+        constexpr void advance_index() {
+            ++get<Index>(current_);
+            if (get<Index>(current_) ==
+                ranges::end(get<Index>(parent_->bases_))) {
+                if constexpr (Index == 0u) {
+                    return;
+                } else {
+                    get<Index>(current_) =
+                        ranges::begin(get<Index>(parent_->bases_));
+                    advance_index<Index - 1u>();
+                }
             }
-            return *this;
         }
 
-        constexpr iterator operator++(int) {
-            auto copy = *this;
-            ++*this;
-            return copy;
+        template<size_t Index>
+        constexpr void retreat_index() {
+            if (get<Index>(current_) ==
+                ranges::begin(get<Index>(parent_->bases_))) {
+                if constexpr (Index > 0u) {
+                    get<Index>(current_) = cartesian_product_common_arg_end(
+                        get<Index>(parent_->bases_));
+                    retreat_index<Index - 1u>();
+                }
+            }
+            --get<Index>(current_);
         }
 
-        friend constexpr bool operator==(const iterator& left,
-                                         const iterator& right) {
-            return left.empty_ == right.empty_ &&
-                   left.first_ == right.first_ &&
-                   left.second_ == right.second_;
+        template<size_t Index>
+        constexpr void accumulate_linear_index(
+            difference_type& result, difference_type& multiplier) const {
+            const auto begin = ranges::begin(get<Index>(parent_->bases_));
+            result += static_cast<difference_type>(
+                          get<Index>(current_) - begin) * multiplier;
+            if constexpr (Index > 0u) {
+                multiplier *= static_cast<difference_type>(
+                    ranges::size(get<Index>(parent_->bases_)));
+                accumulate_linear_index<Index - 1u>(result, multiplier);
+            }
         }
 
-        friend constexpr bool operator!=(const iterator& left,
-                                         const iterator& right) {
-            return !(left == right);
+        constexpr difference_type linear_index() const {
+            difference_type result = 0;
+            difference_type multiplier = 1;
+            accumulate_linear_index<sizeof...(Vs)>(result, multiplier);
+            return result;
         }
 
-        template<typename Bound,
-                 enable_if_t<is_same_v<Bound, sentinel<B1, B2>>, int> = 0>
-        friend constexpr bool operator==(const iterator& value,
-                                         const Bound& bound) {
-            return value.empty_ || value.first_ == bound.first_end_;
+        template<size_t Index>
+        constexpr void multiply_inner_sizes(difference_type& result) const {
+            if constexpr (Index > 0u) {
+                result *= static_cast<difference_type>(
+                    ranges::size(get<Index>(parent_->bases_)));
+                if constexpr (Index > 1u)
+                    multiply_inner_sizes<Index - 1u>(result);
+            }
         }
 
-        template<typename Bound,
-                 enable_if_t<is_same_v<Bound, sentinel<B1, B2>>, int> = 0>
-        friend constexpr bool operator==(const Bound& bound,
-                                         const iterator& value) {
-            return value == bound;
+        constexpr difference_type inner_size_product() const {
+            difference_type result = 1;
+            multiply_inner_sizes<sizeof...(Vs)>(result);
+            return result;
         }
 
-        template<typename Bound,
-                 enable_if_t<is_same_v<Bound, sentinel<B1, B2>>, int> = 0>
-        friend constexpr bool operator!=(const iterator& value,
-                                         const Bound& bound) {
-            return !(value == bound);
+        template<size_t Index>
+        constexpr void accumulate_inner_index(
+            difference_type& result, difference_type& multiplier) const {
+            if constexpr (Index > 0u) {
+                const auto begin = ranges::begin(
+                    get<Index>(parent_->bases_));
+                result += static_cast<difference_type>(
+                              get<Index>(current_) - begin) * multiplier;
+                if constexpr (Index > 1u) {
+                    multiplier *= static_cast<difference_type>(
+                        ranges::size(get<Index>(parent_->bases_)));
+                    accumulate_inner_index<Index - 1u>(result, multiplier);
+                }
+            }
         }
 
-        template<typename Bound,
-                 enable_if_t<is_same_v<Bound, sentinel<B1, B2>>, int> = 0>
-        friend constexpr bool operator!=(const Bound& bound,
-                                         const iterator& value) {
-            return !(value == bound);
+        constexpr difference_type inner_linear_index() const {
+            difference_type result = 0;
+            difference_type multiplier = 1;
+            accumulate_inner_index<sizeof...(Vs)>(result, multiplier);
+            return result;
         }
-    };
 
-    template<typename B1, typename B2>
-    struct sentinel {
-        using S1 = sentinel_t<B1>;
-        S1 first_end_;
-        constexpr sentinel() = default;
-        constexpr explicit sentinel(S1 first_end) : first_end_(first_end) {}
-    };
+        constexpr difference_type remaining_count() const
+            requires cartesian_product_is_sized_sentinel<Const, First, Vs...> {
+            if (!parent_) return 0;
+            const auto first_remaining =
+                ranges::end(get<0>(parent_->bases_)) - get<0>(current_);
+            if (first_remaining <= 0) return 0;
+            const difference_type inner_size = inner_size_product();
+            return static_cast<difference_type>(first_remaining - 1) *
+                       inner_size + (inner_size - inner_linear_index());
+        }
 
-    V1 first_;
-    V2 second_;
+        template<size_t Index>
+        constexpr void assign_from_linear_index(difference_type& index) {
+            if constexpr (Index > 0u) {
+                const difference_type dimension_size =
+                    static_cast<difference_type>(
+                        ranges::size(get<Index>(parent_->bases_)));
+                const difference_type coordinate = index % dimension_size;
+                index /= dimension_size;
+                get<Index>(current_) =
+                    ranges::begin(get<Index>(parent_->bases_)) + coordinate;
+                assign_from_linear_index<Index - 1u>(index);
+            } else {
+                get<0>(current_) =
+                    ranges::begin(get<0>(parent_->bases_)) + index;
+            }
+        }
 
-public:
-    cartesian_product_view() = default;
-    constexpr cartesian_product_view(V1 first, V2 second)
-        : first_(std::move(first)), second_(std::move(second)) {}
+        template<size_t... Indices>
+        static constexpr auto iter_move_tuple(
+            const iterator& value, index_sequence<Indices...>)
+            noexcept((noexcept(ranges::iter_move(
+                          get<Indices>(value.current_))) && ...) &&
+                     (is_nothrow_move_constructible_v<
+                          iter_rvalue_reference_t<
+                              iterator_t<base_type<Indices>>>> && ...)) {
+            return tuple<iter_rvalue_reference_t<
+                iterator_t<base_type<Indices>>>...>(
+                    ranges::iter_move(get<Indices>(value.current_))...);
+        }
 
-    constexpr V1 base1() const& { return first_; }
-    constexpr V1 base1() && { return std::move(first_); }
-    constexpr V2 base2() const& { return second_; }
-    constexpr V2 base2() && { return std::move(second_); }
+        template<size_t... Indices>
+        static constexpr void iter_swap_tuple(
+            const iterator& left, const iterator& right,
+            index_sequence<Indices...>)
+            noexcept((noexcept(ranges::iter_swap(
+                get<Indices>(left.current_),
+                get<Indices>(right.current_))) && ...)) {
+            (ranges::iter_swap(get<Indices>(left.current_),
+                               get<Indices>(right.current_)), ...);
+        }
 
-    constexpr auto begin() {
-        const auto first = ranges::begin(first_);
-        const auto first_end = ranges::end(first_);
-        const auto second = ranges::begin(second_);
-        const auto second_end = ranges::end(second_);
-        const bool empty = first == first_end || second == second_end;
-        return iterator<V1, V2>(first, second, second, second_end, empty);
-    }
+        template<bool>
+        friend class iterator;
 
-    constexpr auto end() {
-        return sentinel<V1, V2>(ranges::end(first_));
-    }
+        template<size_t Index>
+        static constexpr strong_ordering compare_current(
+            const iterator& left, const iterator& right) {
+            if (get<Index>(left.current_) < get<Index>(right.current_))
+                return strong_ordering::less;
+            if (get<Index>(right.current_) < get<Index>(left.current_))
+                return strong_ordering::greater;
+            if constexpr (Index < sizeof...(Vs))
+                return compare_current<Index + 1u>(left, right);
+            else
+                return strong_ordering::equal;
+        }
 
-    constexpr auto begin() const
-        requires input_range<const V1> && input_range<const V2> {
-        const auto first = ranges::begin(std::as_const(first_));
-        const auto first_end = ranges::end(std::as_const(first_));
-        const auto second = ranges::begin(std::as_const(second_));
-        const auto second_end = ranges::end(std::as_const(second_));
-        const bool empty = first == first_end || second == second_end;
-        return iterator<const V1, const V2>(
-            first, second, second, second_end, empty);
-    }
-
-    constexpr auto end() const
-        requires input_range<const V1> && input_range<const V2> {
-        return sentinel<const V1, const V2>(
-            ranges::end(std::as_const(first_)));
-    }
-
-    constexpr auto size() requires sized_range<V1> && sized_range<V2> {
-        using size_type = common_type_t<
-            decltype(ranges::size(first_)),
-            decltype(ranges::size(second_))>;
-        const size_type first_size =
-            static_cast<size_type>(ranges::size(first_));
-        const size_type second_size =
-            static_cast<size_type>(ranges::size(second_));
-        if (first_size == 0 || second_size == 0) return size_type(0);
-        const size_type maximum = ~size_type(0);
-        if (first_size > maximum / second_size) return maximum;
-        return first_size * second_size;
-    }
-
-    constexpr auto size() const
-        requires sized_range<const V1> && sized_range<const V2> {
-        using size_type = common_type_t<
-            decltype(ranges::size(std::as_const(first_))),
-            decltype(ranges::size(std::as_const(second_)))>;
-        const size_type first_size = static_cast<size_type>(
-            ranges::size(std::as_const(first_)));
-        const size_type second_size = static_cast<size_type>(
-            ranges::size(std::as_const(second_)));
-        if (first_size == 0 || second_size == 0) return size_type(0);
-        const size_type maximum = ~size_type(0);
-        if (first_size > maximum / second_size) return maximum;
-        return first_size * second_size;
-    }
-};
-
-template<typename R1, typename R2>
-cartesian_product_view(R1&&, R2&&)
-    -> cartesian_product_view<owning_view<R1>, owning_view<R2>>;
-
-template<typename V1, typename V2>
-inline constexpr bool enable_borrowed_range<cartesian_product_view<V1, V2>> =
-    borrowed_range<V1> && borrowed_range<V2>;
-
-#if __cplusplus > 202002L
-/* C++23 variadic cartesian product.  The iterator is an allocation-free
- * odometer: the last range advances first, then carries into earlier ranges.
- * The first range reaching its sentinel is the single end condition, while
- * every other cursor is reset to its begin cursor during a carry. */
-template<typename... Vs>
-    requires (input_range<Vs> && ...)
-class cartesian_product_view_variadic
-    : public view_interface<cartesian_product_view_variadic<Vs...>> {
-    static_assert(sizeof...(Vs) >= 3u,
-                  "variadic cartesian_product requires at least three ranges");
-    using iterator_tuple = tuple<iterator_t<Vs>...>;
-    using sentinel_tuple = tuple<sentinel_t<Vs>...>;
-
-    struct sentinel;
-
-    struct iterator {
-        iterator_tuple current_{};
-        iterator_tuple begins_{};
-        sentinel_tuple ends_{};
-        bool empty_ = true;
+    public:
+        using iterator_concept = conditional_t<
+            cartesian_product_is_random_access<Const, First, Vs...>,
+            random_access_iterator_tag,
+            conditional_t<
+                cartesian_product_is_bidirectional<Const, First, Vs...>,
+                bidirectional_iterator_tag,
+                conditional_t<forward_range<first_base>,
+                              forward_iterator_tag, input_iterator_tag>>>;
+        using iterator_category = input_iterator_tag;
+        using value_type = tuple<range_value_t<first_base>,
+                                 range_value_t<cartesian_maybe_const_t<Const, Vs>>...>;
+        using reference = tuple<range_reference_t<first_base>,
+                                range_reference_t<cartesian_maybe_const_t<Const, Vs>>...>;
+        using difference_type = common_type_t<
+            iter_difference_t<iterator_t<first_base>>,
+            iter_difference_t<iterator_t<cartesian_maybe_const_t<Const, Vs>>>...>;
+        using pointer = void;
 
         constexpr iterator() = default;
-        constexpr iterator(iterator_tuple current, iterator_tuple begins,
-                           sentinel_tuple ends, bool empty)
-            : current_(std::move(current)), begins_(std::move(begins)),
-              ends_(std::move(ends)), empty_(empty) {}
 
-        template<size_t... Indices>
-        constexpr auto dereference(index_sequence<Indices...>) const {
-            return tuple<decltype(*get<Indices>(current_))...>(
-                *get<Indices>(current_)...);
+        constexpr iterator(parent_type& parent, iterator_tuple current)
+            : parent_(&parent), current_(std::move(current)) {}
+
+        template<bool OtherConst>
+        constexpr iterator(iterator<OtherConst> other)
+            requires Const && (!OtherConst) &&
+                     convertible_to<iterator_t<First>, iterator_t<const First>> &&
+                     (convertible_to<iterator_t<Vs>, iterator_t<const Vs>> && ...)
+            : parent_(other.parent_), current_(std::move(other.current_)) {}
+
+        static constexpr iterator from_begin(parent_type& parent) {
+            auto current = make_begins(
+                parent, make_index_sequence<1u + sizeof...(Vs)>{});
+            return iterator(parent, std::move(current));
         }
 
-        template<size_t Index>
-        constexpr void advance_index() {
-            ++get<Index>(current_);
-            if (get<Index>(current_) == get<Index>(ends_)) {
-                if constexpr (Index == 0u) {
-                    empty_ = true;
-                } else {
-                    get<Index>(current_) = get<Index>(begins_);
-                    advance_index<Index - 1u>();
-                }
-            }
+        static constexpr iterator from_end(parent_type& parent)
+            requires cartesian_product_common_arg<first_base> {
+            auto current = make_begins(
+                parent, make_index_sequence<1u + sizeof...(Vs)>{});
+            const auto ends = make_ends(
+                parent, make_index_sequence<1u + sizeof...(Vs)>{});
+            const bool empty_inner = has_empty_inner_dimension(
+                current, ends, make_index_sequence<sizeof...(Vs)>{});
+            if (!empty_inner)
+                get<0>(current) = cartesian_product_common_arg_end(
+                    get<0>(parent.bases_));
+            return iterator(parent, std::move(current));
         }
 
         constexpr auto operator*() const {
-            return dereference(make_index_sequence<sizeof...(Vs)>{});
+            return dereference(make_index_sequence<1u + sizeof...(Vs)>{});
+        }
+
+        template<size_t... Indices>
+        constexpr reference dereference(index_sequence<Indices...>) const {
+            return reference(*get<Indices>(current_)...);
         }
 
         constexpr iterator& operator++() {
-            if (!empty_)
-                advance_index<sizeof...(Vs) - 1u>();
+            if (parent_ && !is_at_end(
+                    *this, make_index_sequence<1u + sizeof...(Vs)>{}))
+                advance_index<sizeof...(Vs)>();
             return *this;
         }
 
-        constexpr iterator operator++(int) {
+        constexpr void operator++(int)
+            requires (!forward_range<first_base>) {
+            ++*this;
+        }
+
+        constexpr iterator operator++(int)
+            requires forward_range<first_base> {
             auto copy = *this;
             ++*this;
             return copy;
+        }
+
+        constexpr iterator& operator--()
+            requires cartesian_product_is_bidirectional<Const, First, Vs...> {
+            if (parent_)
+                retreat_index<sizeof...(Vs)>();
+            return *this;
+        }
+
+        constexpr iterator operator--(int)
+            requires cartesian_product_is_bidirectional<Const, First, Vs...> {
+            auto copy = *this;
+            --*this;
+            return copy;
+        }
+
+        constexpr iterator& operator+=(difference_type offset)
+            requires cartesian_product_is_random_access<Const, First, Vs...> {
+            if (!parent_) return *this;
+            difference_type target = linear_index() + offset;
+            const difference_type first_size = static_cast<difference_type>(
+                ranges::distance(get<0>(parent_->bases_)));
+            const difference_type total = first_size * inner_size_product();
+            if (total == 0) {
+                current_ = make_begins(
+                    *parent_, make_index_sequence<1u + sizeof...(Vs)>{});
+                return *this;
+            }
+            assign_from_linear_index<sizeof...(Vs)>(target);
+            return *this;
+        }
+
+        constexpr iterator& operator-=(difference_type offset)
+            requires cartesian_product_is_random_access<Const, First, Vs...> {
+            return *this += -offset;
+        }
+
+        constexpr reference operator[](difference_type offset) const
+            requires cartesian_product_is_random_access<Const, First, Vs...> {
+            return *(*this + offset);
+        }
+
+        friend constexpr iterator operator+(
+            const iterator& value, difference_type offset)
+            requires cartesian_product_is_random_access<Const, First, Vs...> {
+            auto result = value;
+            result += offset;
+            return result;
+        }
+
+        friend constexpr iterator operator+(
+            difference_type offset, const iterator& value)
+            requires cartesian_product_is_random_access<Const, First, Vs...> {
+            return value + offset;
+        }
+
+        friend constexpr iterator operator-(
+            const iterator& value, difference_type offset)
+            requires cartesian_product_is_random_access<Const, First, Vs...> {
+            auto result = value;
+            result -= offset;
+            return result;
+        }
+
+        friend constexpr difference_type operator-(
+            const iterator& left, const iterator& right)
+            requires cartesian_product_is_sized_iterator<Const, First, Vs...> {
+            return left.linear_index() - right.linear_index();
         }
 
         friend constexpr bool operator==(const iterator& left,
-                                         const iterator& right) {
-            return left.empty_ == right.empty_ &&
-                   (left.empty_ || left.current_ == right.current_);
-        }
-
-        friend constexpr bool operator!=(const iterator& left,
-                                         const iterator& right) {
-            return !(left == right);
+                                         const iterator& right)
+            requires equality_comparable<iterator_t<first_base>> {
+            return left.current_ == right.current_;
         }
 
         friend constexpr bool operator==(const iterator& value,
-                                         const sentinel& bound) {
-            (void)bound;
-            return value.empty_;
+                                         default_sentinel_t) {
+            return is_at_end(
+                value, make_index_sequence<1u + sizeof...(Vs)>{});
         }
 
-        friend constexpr bool operator==(const sentinel& bound,
+        friend constexpr bool operator==(default_sentinel_t sentinel,
                                          const iterator& value) {
-            return value == bound;
+            return value == sentinel;
         }
 
-        friend constexpr bool operator!=(const iterator& value,
-                                         const sentinel& bound) {
-            return !(value == bound);
+        friend constexpr auto operator<=>(const iterator& left,
+                                          const iterator& right)
+            requires cartesian_product_all_random_access<Const, First, Vs...> {
+            return compare_current<0u>(left, right);
         }
 
-        friend constexpr bool operator!=(const sentinel& bound,
-                                         const iterator& value) {
-            return !(value == bound);
-        }
-    };
-
-    struct sentinel {
-        constexpr sentinel() = default;
-    };
-
-    template<typename... Bases>
-    struct const_sentinel {
-        constexpr const_sentinel() = default;
-    };
-
-    template<typename... Bases>
-    struct const_iterator {
-        using reference = tuple<iter_reference_t<iterator_t<const Bases>>...>;
-        using value_type = remove_cvref_t<reference>;
-        using difference_type = common_type_t<
-            iter_difference_t<iterator_t<const Bases>>...>;
-        using pointer = void;
-        using iterator_category = input_iterator_tag;
-        tuple<iterator_t<const Bases>...> current_{};
-        tuple<iterator_t<const Bases>...> begins_{};
-        tuple<sentinel_t<const Bases>...> ends_{};
-        bool empty_ = true;
-
-        constexpr const_iterator() = default;
-        constexpr const_iterator(
-            tuple<iterator_t<const Bases>...> current,
-            tuple<iterator_t<const Bases>...> begins,
-            tuple<sentinel_t<const Bases>...> ends,
-            bool empty)
-            : current_(std::move(current)), begins_(std::move(begins)),
-              ends_(std::move(ends)), empty_(empty) {}
-
-        template<size_t Index>
-        constexpr void advance_index() {
-            ++get<Index>(current_);
-            if (get<Index>(current_) == get<Index>(ends_)) {
-                if constexpr (Index == 0u) {
-                    empty_ = true;
-                } else {
-                    get<Index>(current_) = get<Index>(begins_);
-                    advance_index<Index - 1u>();
-                }
-            }
+        friend constexpr difference_type operator-(
+            const iterator& value, default_sentinel_t sentinel)
+            requires cartesian_product_is_sized_sentinel<Const, First, Vs...> {
+            (void)sentinel;
+            return -value.remaining_count();
         }
 
-        template<size_t... Indices>
-        constexpr auto dereference(index_sequence<Indices...>) const {
-            return tuple<decltype(*get<Indices>(current_))...>(
-                *get<Indices>(current_)...);
+        friend constexpr difference_type operator-(
+            default_sentinel_t sentinel, const iterator& value)
+            requires cartesian_product_is_sized_sentinel<Const, First, Vs...> {
+            (void)sentinel;
+            return value.remaining_count();
         }
 
-        constexpr auto operator*() const {
-            return dereference(make_index_sequence<sizeof...(Bases)>{});
+        friend constexpr auto iter_move(const iterator& value)
+            noexcept(noexcept(iter_move_tuple(
+                value, make_index_sequence<1u + sizeof...(Vs)>{}))) {
+            return iter_move_tuple(
+                value, make_index_sequence<1u + sizeof...(Vs)>{});
         }
 
-        constexpr const_iterator& operator++() {
-            if (!empty_)
-                advance_index<sizeof...(Bases) - 1u>();
-            return *this;
-        }
-
-        constexpr const_iterator operator++(int) {
-            auto copy = *this;
-            ++*this;
-            return copy;
-        }
-
-        friend constexpr bool operator==(const const_iterator& left,
-                                         const const_iterator& right) {
-            return left.empty_ == right.empty_ &&
-                   (left.empty_ || left.current_ == right.current_);
-        }
-
-        friend constexpr bool operator!=(const const_iterator& left,
-                                         const const_iterator& right) {
-            return !(left == right);
-        }
-
-        friend constexpr bool operator==(const const_iterator& value,
-                                         const const_sentinel<Bases...>&) {
-            return value.empty_;
-        }
-
-        friend constexpr bool operator==(const const_sentinel<Bases...>& bound,
-                                         const const_iterator& value) {
-            return value == bound;
-        }
-
-        friend constexpr bool operator!=(const const_iterator& value,
-                                         const const_sentinel<Bases...>& bound) {
-            return !(value == bound);
-        }
-
-        friend constexpr bool operator!=(const const_sentinel<Bases...>& bound,
-                                         const const_iterator& value) {
-            return !(value == bound);
+        friend constexpr void iter_swap(const iterator& left,
+                                        const iterator& right)
+            noexcept(noexcept(iter_swap_tuple(
+                left, right, make_index_sequence<1u + sizeof...(Vs)>{})))
+            requires indirectly_swappable<iterator_t<first_base>> &&
+                     (indirectly_swappable<
+                          iterator_t<cartesian_maybe_const_t<Const, Vs>>> && ...) {
+            iter_swap_tuple(left, right,
+                            make_index_sequence<1u + sizeof...(Vs)>{});
         }
     };
-
-    tuple<Vs...> bases_;
 
     template<size_t... Indices>
-    constexpr iterator begin_impl(index_sequence<Indices...>) {
-        auto begins = iterator_tuple(ranges::begin(get<Indices>(bases_))...);
-        auto ends = sentinel_tuple(ranges::end(get<Indices>(bases_))...);
-        auto current = begins;
-        const bool empty = ((get<Indices>(current) == get<Indices>(ends)) || ...);
-        return iterator(std::move(current), std::move(begins),
-                        std::move(ends), empty);
+    constexpr auto size_impl(index_sequence<Indices...>)
+        requires (sized_range<First> && (sized_range<Vs> && ...)) {
+        using size_type = common_type_t<
+            decltype(ranges::size(get<Indices>(bases_)))...>;
+        size_type result = 1;
+        ((result *= static_cast<size_type>(
+                         ranges::size(get<Indices>(bases_)))), ...);
+        return result;
     }
 
     template<size_t... Indices>
-    constexpr sentinel end_impl(index_sequence<Indices...>) {
-        (void)sizeof...(Indices);
-        return sentinel();
-    }
-
-    using size_type = size_t;
-
-    template<size_t Index>
-    constexpr void multiply_size(size_type& result) {
-        const size_type maximum = ~size_type(0);
-        const size_type candidate = static_cast<size_type>(
-            ranges::size(get<Index>(bases_)));
-        if (result == 0 || candidate == 0) {
-            result = 0;
-        } else if (result > maximum / candidate) {
-            result = maximum;
-        } else {
-            result *= candidate;
-        }
-        if constexpr (Index + 1u < sizeof...(Vs)) {
-            if (result != maximum)
-                multiply_size<Index + 1u>(result);
-        }
+    constexpr auto size_impl(index_sequence<Indices...>) const
+        requires (sized_range<const First> && (sized_range<const Vs> && ...)) {
+        using size_type = common_type_t<
+            decltype(ranges::size(get<Indices>(bases_)))...>;
+        size_type result = 1;
+        ((result *= static_cast<size_type>(
+                         ranges::size(get<Indices>(bases_)))), ...);
+        return result;
     }
 
 public:
-    constexpr cartesian_product_view_variadic() = default;
-    constexpr cartesian_product_view_variadic(tuple<Vs...> bases)
-        : bases_(std::move(bases)) {}
+    constexpr cartesian_product_view()
+        requires default_initializable<First> &&
+                 (default_initializable<Vs> && ...) = default;
 
-    constexpr auto begin() {
-        return begin_impl(make_index_sequence<sizeof...(Vs)>{});
+    constexpr explicit cartesian_product_view(First first, Vs... bases)
+        : bases_(std::move(first), std::move(bases)...) {}
+
+    constexpr First base1() const& requires copy_constructible<First> {
+        return get<0>(bases_);
+    }
+    constexpr First base1() && { return std::move(get<0>(bases_)); }
+
+    constexpr auto base2() const&
+        requires (sizeof...(Vs) > 0u) &&
+                 copy_constructible<tuple_element_t<1u, tuple<First, Vs...>>> {
+        return get<1>(bases_);
+    }
+    constexpr auto base2() && requires (sizeof...(Vs) > 0u) {
+        return std::move(get<1>(bases_));
     }
 
-    constexpr auto end() {
-        return end_impl(make_index_sequence<sizeof...(Vs)>{});
-    }
-
-    template<size_t... Indices>
-    constexpr auto begin_const_impl(index_sequence<Indices...>) const {
-        auto begins = tuple<iterator_t<const Vs>...>(
-            ranges::begin(std::as_const(get<Indices>(bases_)))...);
-        auto ends = tuple<sentinel_t<const Vs>...>(
-            ranges::end(std::as_const(get<Indices>(bases_)))...);
-        auto current = begins;
-        const bool empty = ((get<Indices>(current) == get<Indices>(ends)) || ...);
-        return const_iterator<Vs...>(std::move(current), std::move(begins),
-                                     std::move(ends), empty);
-    }
-
-    template<size_t... Indices>
-    constexpr const_sentinel<Vs...> end_const_impl(
-        index_sequence<Indices...>) const {
-        (void)sizeof...(Indices);
-        return const_sentinel<Vs...>();
+    constexpr auto begin()
+        requires (!cartesian_simple_view<First> ||
+                  (!cartesian_simple_view<Vs> || ...)) {
+        return iterator<false>::from_begin(*this);
     }
 
     constexpr auto begin() const
-        requires (input_range<const Vs> && ...) {
-        return begin_const_impl(make_index_sequence<sizeof...(Vs)>{});
+        requires range<const First> && (range<const Vs> && ...) {
+        return iterator<true>::from_begin(*this);
+    }
+
+    constexpr auto end()
+        requires ((!cartesian_simple_view<First> ||
+                   (!cartesian_simple_view<Vs> || ...)) &&
+                  cartesian_product_common_arg<First>) {
+        return iterator<false>::from_end(*this);
     }
 
     constexpr auto end() const
-        requires (input_range<const Vs> && ...) {
-        return end_const_impl(make_index_sequence<sizeof...(Vs)>{});
+        requires (range<const First> && (range<const Vs> && ...) &&
+                  cartesian_product_common_arg<const First>) {
+        return iterator<true>::from_end(*this);
     }
 
-    constexpr auto size() requires (sized_range<Vs> && ...) {
-        size_type result = 1;
-        multiply_size<0u>(result);
-        return result;
+    constexpr default_sentinel_t end() const noexcept {
+        return default_sentinel;
     }
 
-    template<size_t Index>
-    constexpr void multiply_size_const(size_type& result) const {
-        const size_type maximum = ~size_type(0);
-        const size_type candidate = static_cast<size_type>(
-            ranges::size(std::as_const(get<Index>(bases_))));
-        if (result == 0 || candidate == 0) {
-            result = 0;
-        } else if (result > maximum / candidate) {
-            result = maximum;
-        } else {
-            result *= candidate;
-        }
-        if constexpr (Index + 1u < sizeof...(Vs)) {
-            if (result != maximum)
-                multiply_size_const<Index + 1u>(result);
-        }
+    constexpr auto size()
+        requires (sized_range<First> && (sized_range<Vs> && ...)) {
+        return size_impl(make_index_sequence<1u + sizeof...(Vs)>{});
     }
 
     constexpr auto size() const
-        requires (sized_range<const Vs> && ...) {
-        size_type result = 1;
-        multiply_size_const<0u>(result);
-        return result;
+        requires (sized_range<const First> &&
+                  (sized_range<const Vs> && ...)) {
+        return size_impl(make_index_sequence<1u + sizeof...(Vs)>{});
     }
 };
 
-template<typename... Vs>
-inline constexpr bool enable_borrowed_range<
-    cartesian_product_view_variadic<Vs...>> = (borrowed_range<Vs> && ...);
-#endif
+template<typename First, typename... Vs>
+cartesian_product_view(First&&, Vs&&...)
+    -> cartesian_product_view<views::all_t<First>, views::all_t<Vs>...>;
 
 /* ???????????????????????????????????????????????????????????????
  * enumerate_view - index ????????
@@ -6834,35 +6898,21 @@ constexpr auto operator|(R&& range, pairwise_fn) {
 }
 
 struct cartesian_product_fn {
-    template<typename R1, typename R2>
-        requires cartesian_product_viewable<R1> && cartesian_product_viewable<R2>
-    constexpr auto operator()(R1&& first, R2&& second) const {
-        auto first_view = all(std::forward<R1>(first));
-        auto second_view = all(std::forward<R2>(second));
-        return cartesian_product_view<decltype(first_view), decltype(second_view)>(
-            std::move(first_view), std::move(second_view));
+    constexpr auto operator()() const {
+        return single(tuple<>{});
     }
 
-#if __cplusplus > 202002L
-    template<typename R1, typename R2, typename... Rs>
-        requires (cartesian_product_viewable<R1> && cartesian_product_viewable<R2> && (cartesian_product_viewable<Rs> && ...))
-    constexpr auto operator()(R1&& first, R2&& second,
-                              Rs&&... rest) const {
-        auto first_view = all(std::forward<R1>(first));
-        auto second_view = all(std::forward<R2>(second));
-        auto rest_views = tuple<decltype(all(std::forward<Rs>(rest)))...>(
-            all(std::forward<Rs>(rest))...);
-        return cartesian_product_view_variadic<
-            decltype(first_view), decltype(second_view),
-            decltype(all(std::forward<Rs>(rest)))...>(
-            tuple_cat(
-                tuple<decltype(first_view), decltype(second_view)>(
-                    std::move(first_view), std::move(second_view)),
-                std::move(rest_views)));
+    template<typename R, typename... Rs>
+        requires cartesian_product_viewable<R> &&
+                 (cartesian_product_inner_viewable<Rs> && ...)
+    constexpr auto operator()(R&& first, Rs&&... rest) const {
+        auto first_view = all(std::forward<R>(first));
+        return cartesian_product_view<decltype(first_view),
+                                      decltype(all(std::forward<Rs>(rest)))...>(
+            std::move(first_view), all(std::forward<Rs>(rest))...);
     }
-#endif
 };
-inline constexpr cartesian_product_fn cartesian_product{};
+inline constexpr cartesian_product_fn cartesian_product{};inline constexpr cartesian_product_fn cartesian_product{};
 
 #if __cplusplus > 202002L
 template<typename R>
