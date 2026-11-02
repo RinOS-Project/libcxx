@@ -82,7 +82,15 @@ inline bool __random_device_getentropy(void* buffer, size_t size,
         __NR_getrandom, buffer, size, 0u);
     if (result == (intptr_t)size) return true;
     if (error_out) {
-        *error_out = result < 0 ? (int)-result : EIO;
+        if (result < 0) {
+            const uint64_t magnitude =
+                static_cast<uint64_t>(-(result + 1)) + 1u;
+            *error_out = magnitude <= static_cast<uint64_t>(
+                             numeric_limits<int>::max())
+                ? static_cast<int>(magnitude) : EIO;
+        } else {
+            *error_out = EIO;
+        }
         if (*error_out == 0) *error_out = EIO;
     }
     return false;
