@@ -196,10 +196,12 @@ public:
     }
 
     double entropy() const noexcept {
-        if (backend_ == backend::invalid ||
-            backend_ == backend::getrandom ||
-            (backend_ == backend::platform &&
-             !__detail::__random_device_platform32_available()))
+        const bool platform_selected =
+            backend_ == backend::platform ||
+            (backend_ == backend::automatic &&
+             __detail::__random_device_platform32_available());
+        if (!platform_selected ||
+            !__detail::__random_device_platform32_available())
             return 0.0;
         if (__detail::__random_device_rdrand_available() &&
             platform_has_rdrand()) {
