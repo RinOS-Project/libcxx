@@ -5937,130 +5937,371 @@ inline constexpr bool enable_borrowed_range<chunk_view<V>> =
  * slide_view - ??????? window ?????
  * ???????????????????????????????????????????????????????????????*/
 
+template<typename R>
+concept slide_caches_nothing = random_access_range<R> && sized_range<R>;
+
+template<typename R>
+concept slide_caches_last = !slide_caches_nothing<R> &&
+    bidirectional_range<R> && common_range<R>;
+
+template<typename R>
+concept slide_caches_first = !slide_caches_nothing<R> &&
+    !slide_caches_last<R>;
+
+template<typename R>
+concept slide_simple_view = view<R> && range<const R> &&
+    same_as<iterator_t<R>, iterator_t<const R>> &&
+    same_as<sentinel_t<R>, sentinel_t<const R>>;
+
+template<typename T>
+class slide_non_propagating_cache {
+    optional<T> value_;
+
+public:
+    constexpr slide_non_propagating_cache() = default;
+    constexpr slide_non_propagating_cache(
+        const slide_non_propagating_cache&) noexcept {}
+    constexpr slide_non_propagating_cache& operator=(
+        const slide_non_propagating_cache&) noexcept {
+        value_.reset();
+        return *this;
+    }
+    constexpr slide_non_propagating_cache(
+        slide_non_propagating_cache&& other) noexcept {
+        other.value_.reset();
+    }
+    constexpr slide_non_propagating_cache& operator=(
+        slide_non_propagating_cache&& other) noexcept {
+        value_.reset();
+        other.value_.reset();
+        return *this;
+    }
+
+    constexpr bool has_value() const noexcept { return value_.has_value(); }
+    constexpr T& value() noexcept { return *value_; }
+    constexpr const T& value() const noexcept { return *value_; }
+
+    template<typename... Args>
+    constexpr T& emplace(Args&&... args) {
+        return value_.emplace(std::forward<Args>(args)...);
+    }
+};
+
 template<typename V>
     requires forward_range<V>
 class slide_view : public view_interface<slide_view<V>> {
-    V base_;
-    size_t count_;
+    using difference_type = range_difference_t<V>;
     using base_iterator = iterator_t<V>;
     using base_sentinel = sentinel_t<V>;
 
-    template<typename BI, typename BS>
-    struct sentinel_impl {
-        BS end_;
-        constexpr explicit sentinel_impl(BS end) : end_(end) {}
-    };
+    V base_;
+    difference_type count_{};
+    slide_non_propagating_cache<base_iterator> first_cache_;
+    slide_non_propagating_cache<base_iterator> last_cache_;
 
-    template<typename BI, typename BS>
-    struct iterator_impl {
+    struct sentinel_impl;
+
+    template<bool Const>
+    class iterator_impl {
+        using Base = conditional_t<Const, const V, V>;
+        using BI = iterator_t<Base>;
+        using base_difference_type = range_difference_t<Base>;
+
+        BI current_{};
+        BI last_ele_{};
+        base_difference_type count_{};
+
+        template<bool>
+        friend class iterator_impl;
+        friend struct sentinel_impl;
+
+    public:
         using iterator_category = input_iterator_tag;
-        using value_type = subrange<BI, BI>;
-        using difference_type = iter_difference_t<BI>;
+        using iterator_concept = conditional_t<
+            random_access_range<Base>, random_access_iterator_tag,
+            conditional_t<bidirectional_range<Base>,
+                         bidirectional_iterator_tag, forward_iterator_tag>>;
+        using value_type = subrange<counted_iterator<BI>, default_sentinel_t>;
+        using difference_type = base_difference_type;
         using pointer = void;
         using reference = value_type;
-        BI current_;
-        BI next_;
-        BS end_;
-        bool empty_;
 
-        iterator_impl() = default;
-        constexpr iterator_impl(BI current, BI next, BS end, bool empty)
-            : current_(current), next_(next), end_(end), empty_(empty) {}
+        constexpr iterator_impl() = default;
+
+        constexpr iterator_impl(BI current, base_difference_type count)
+            requires (!slide_caches_first<Base>)
+            : current_(std::move(current)), count_(count) {}
+
+        constexpr iterator_impl(BI current, BI last_ele,
+                                base_difference_type count)
+            requires slide_caches_first<Base>
+            : current_(std::move(current)), last_ele_(std::move(last_ele)),
+              count_(count) {}
+
+        template<bool OtherConst>
+        constexpr iterator_impl(iterator_impl<OtherConst> other)
+            requires Const && (!OtherConst) &&
+                     convertible_to<iterator_t<V>, iterator_t<Base>>
+            : current_(std::move(other.current_)),
+              count_(static_cast<base_difference_type>(other.count_)) {
+            if constexpr (slide_caches_first<Base>) {
+                if constexpr (slide_caches_first<V>) {
+                    last_ele_ = std::move(other.last_ele_);
+                } else {
+                    last_ele_ = current_;
+                    for (base_difference_type remaining = count_ - 1;
+                         remaining > 0; --remaining) {
+                        ++last_ele_;
+                    }
+                }
+            }
+        }
 
         constexpr value_type operator*() const {
-            return value_type(current_, next_);
+            return value_type(counted_iterator<BI>(current_, count_),
+                              default_sentinel);
         }
+
         constexpr iterator_impl& operator++() {
-            if (empty_) return *this;
-            if (next_ == end_) {
-                empty_ = true;
-                return *this;
-            }
             ++current_;
-            ++next_;
+            if constexpr (slide_caches_first<Base>) ++last_ele_;
             return *this;
         }
+
         constexpr iterator_impl operator++(int) {
             auto copy = *this;
             ++*this;
             return copy;
         }
-        friend constexpr bool operator==(const iterator_impl& a,
-                                         const iterator_impl& b) {
-            return a.empty_ == b.empty_ &&
-                   (a.empty_ || a.current_ == b.current_);
+
+        constexpr iterator_impl& operator--()
+            requires bidirectional_range<Base> {
+            --current_;
+            if constexpr (slide_caches_first<Base>) --last_ele_;
+            return *this;
         }
-        friend constexpr bool operator!=(const iterator_impl& a,
-                                         const iterator_impl& b) { return !(a == b); }
-        friend constexpr bool operator==(const iterator_impl& i,
-                                         const sentinel_impl<BI, BS>&) {
-            return i.empty_;
+
+        constexpr iterator_impl operator--(int)
+            requires bidirectional_range<Base> {
+            auto copy = *this;
+            --*this;
+            return copy;
         }
-        friend constexpr bool operator!=(const iterator_impl& i,
-                                         const sentinel_impl<BI, BS>& s) { return !(i == s); }
-        friend constexpr bool operator==(const sentinel_impl<BI, BS>& s,
-                                         const iterator_impl& i) { return i == s; }
-        friend constexpr bool operator!=(const sentinel_impl<BI, BS>& s,
-                                         const iterator_impl& i) { return !(i == s); }
+
+        constexpr iterator_impl& operator+=(difference_type offset)
+            requires random_access_range<Base> {
+            current_ += offset;
+            if constexpr (slide_caches_first<Base>) last_ele_ += offset;
+            return *this;
+        }
+
+        constexpr iterator_impl& operator-=(difference_type offset)
+            requires random_access_range<Base> {
+            current_ -= offset;
+            if constexpr (slide_caches_first<Base>) last_ele_ -= offset;
+            return *this;
+        }
+
+        constexpr value_type operator[](difference_type offset) const
+            requires random_access_range<Base> {
+            return value_type(
+                counted_iterator<BI>(current_ + offset, count_),
+                default_sentinel);
+        }
+
+        friend constexpr bool operator==(const iterator_impl& left,
+                                         const iterator_impl& right) {
+            if constexpr (slide_caches_first<Base>)
+                return left.last_ele_ == right.last_ele_;
+            else
+                return left.current_ == right.current_;
+        }
+
+        friend constexpr bool operator<(const iterator_impl& left,
+                                        const iterator_impl& right)
+            requires random_access_range<Base> {
+            return left.current_ < right.current_;
+        }
+
+        friend constexpr bool operator>(const iterator_impl& left,
+                                        const iterator_impl& right)
+            requires random_access_range<Base> {
+            return right < left;
+        }
+
+        friend constexpr bool operator<=(const iterator_impl& left,
+                                         const iterator_impl& right)
+            requires random_access_range<Base> {
+            return !(right < left);
+        }
+
+        friend constexpr bool operator>=(const iterator_impl& left,
+                                         const iterator_impl& right)
+            requires random_access_range<Base> {
+            return !(left < right);
+        }
+
+        friend constexpr auto operator<=>(const iterator_impl& left,
+                                          const iterator_impl& right)
+            requires random_access_range<Base> &&
+                     three_way_comparable<BI> {
+            return left.current_ <=> right.current_;
+        }
+
+        friend constexpr iterator_impl operator+(
+            const iterator_impl& value, difference_type offset)
+            requires random_access_range<Base> {
+            auto result = value;
+            result += offset;
+            return result;
+        }
+
+        friend constexpr iterator_impl operator+(
+            difference_type offset, const iterator_impl& value)
+            requires random_access_range<Base> {
+            return value + offset;
+        }
+
+        friend constexpr iterator_impl operator-(
+            const iterator_impl& value, difference_type offset)
+            requires random_access_range<Base> {
+            auto result = value;
+            result -= offset;
+            return result;
+        }
+
+        friend constexpr difference_type operator-(
+            const iterator_impl& left, const iterator_impl& right)
+            requires sized_sentinel_for<BI, BI> {
+            if constexpr (slide_caches_first<Base>)
+                return left.last_ele_ - right.last_ele_;
+            else
+                return left.current_ - right.current_;
+        }
+    };
+
+    struct sentinel_impl {
+        base_sentinel end_{};
+
+        constexpr sentinel_impl() = default;
+        constexpr explicit sentinel_impl(base_sentinel end)
+            : end_(std::move(end)) {}
+
+        friend constexpr bool operator==(const iterator_impl<false>& value,
+                                         const sentinel_impl& bound) {
+            return value.last_ele_ == bound.end_;
+        }
+
+        friend constexpr difference_type operator-(
+            const iterator_impl<false>& value, const sentinel_impl& bound)
+            requires sized_sentinel_for<base_sentinel, base_iterator> {
+            return value.last_ele_ - bound.end_;
+        }
+
+        friend constexpr difference_type operator-(
+            const sentinel_impl& bound, const iterator_impl<false>& value)
+            requires sized_sentinel_for<base_sentinel, base_iterator> {
+            return bound.end_ - value.last_ele_;
+        }
     };
 
 public:
-    slide_view() = default;
-    constexpr slide_view(V base, size_t count)
-        : base_(std::move(base)), count_(count) {}
-    constexpr V base() const& { return base_; }
+    constexpr slide_view() = default;
+
+    constexpr explicit slide_view(V base, difference_type count)
+        : base_(std::move(base)), count_(count > 0 ? count : 0) {}
+
+    constexpr V base() const& requires copy_constructible<V> { return base_; }
     constexpr V base() && { return std::move(base_); }
 
-    constexpr auto begin() {
+    constexpr auto begin()
+        requires (!(slide_simple_view<V> && slide_caches_nothing<const V>)) {
         auto first = ranges::begin(base_);
-        auto last = first;
-        auto e = ranges::end(base_);
-        size_t left = count_;
-        while (left != 0u && last != e) { ++last; --left; }
-        return iterator_impl<base_iterator, base_sentinel>(
-            first, last, e, count_ == 0u || left != 0u);
-    }
-    constexpr auto end() {
-        return sentinel_impl<base_iterator, base_sentinel>(ranges::end(base_));
+        if constexpr (slide_caches_first<V>) {
+            if (!first_cache_.has_value()) {
+                auto last_ele = first;
+                const auto end = ranges::end(base_);
+                if (count_ == 0) {
+                    while (last_ele != end) ++last_ele;
+                } else {
+                    difference_type remaining = count_ - 1;
+                    while (remaining > 0 && last_ele != end) {
+                        ++last_ele;
+                        --remaining;
+                    }
+                }
+                first_cache_.emplace(std::move(last_ele));
+            }
+            return iterator_impl<false>(
+                std::move(first), first_cache_.value(), count_);
+        } else {
+            return iterator_impl<false>(std::move(first), count_);
+        }
     }
 
     constexpr auto begin() const
-        requires forward_range<const V> {
-        using const_iterator = iterator_t<const V>;
-        using const_sentinel = sentinel_t<const V>;
-        auto first = ranges::begin(std::as_const(base_));
-        auto last = first;
-        auto e = ranges::end(std::as_const(base_));
-        size_t left = count_;
-        while (left != 0u && last != e) { ++last; --left; }
-        return iterator_impl<const_iterator, const_sentinel>(
-            first, last, e, count_ == 0u || left != 0u);
+        requires slide_caches_nothing<const V> {
+        using const_difference_type = range_difference_t<const V>;
+        return iterator_impl<true>(
+            ranges::begin(base_), static_cast<const_difference_type>(count_));
+    }
+
+    constexpr auto end()
+        requires (!(slide_simple_view<V> && slide_caches_nothing<const V>)) {
+        if constexpr (slide_caches_nothing<V>) {
+            return begin() + static_cast<difference_type>(size());
+        } else if constexpr (slide_caches_last<V>) {
+            if (count_ == 0)
+                return iterator_impl<false>(ranges::begin(base_), count_);
+            if (!last_cache_.has_value()) {
+                auto last = ranges::end(base_);
+                auto first = ranges::begin(base_);
+                difference_type remaining = count_ - 1;
+                while (remaining > 0 && last != first) {
+                    --last;
+                    --remaining;
+                }
+                last_cache_.emplace(std::move(last));
+            }
+            return iterator_impl<false>(last_cache_.value(), count_);
+        } else if constexpr (common_range<V>) {
+            auto last = ranges::end(base_);
+            return iterator_impl<false>(last, last, count_);
+        } else {
+            return sentinel_impl(ranges::end(base_));
+        }
     }
 
     constexpr auto end() const
-        requires forward_range<const V> {
-        using const_iterator = iterator_t<const V>;
-        using const_sentinel = sentinel_t<const V>;
-        return sentinel_impl<const_iterator, const_sentinel>(
-            ranges::end(std::as_const(base_)));
+        requires slide_caches_nothing<const V> {
+        using const_difference_type = range_difference_t<const V>;
+        return begin() + static_cast<const_difference_type>(size());
     }
 
-    constexpr size_t size() requires sized_range<V> {
-        const size_t n = static_cast<size_t>(ranges::size(base_));
-        if (count_ == 0u || n < count_) return 0u;
-        return n - count_ + 1u;
+    constexpr auto size() requires sized_range<V> {
+        using size_type = make_unsigned_t<difference_type>;
+        if (count_ == 0) return size_type(0);
+        const difference_type distance =
+            static_cast<difference_type>(ranges::size(base_));
+        const difference_type result = distance - count_ + 1;
+        return result > 0 ? static_cast<size_type>(result) : size_type(0);
     }
 
-    constexpr size_t size() const requires sized_range<const V> {
-        const size_t n = static_cast<size_t>(
-            ranges::size(std::as_const(base_)));
-        if (count_ == 0u || n < count_) return 0u;
-        return n - count_ + 1u;
+    constexpr auto size() const requires sized_range<const V> {
+        using const_difference_type = range_difference_t<const V>;
+        using size_type = make_unsigned_t<const_difference_type>;
+        if (count_ == 0) return size_type(0);
+        const const_difference_type distance = static_cast<const_difference_type>(
+            ranges::size(base_));
+        const const_difference_type result =
+            distance - static_cast<const_difference_type>(count_) + 1;
+        return result > 0 ? static_cast<size_type>(result) : size_type(0);
     }
 };
 
 template<typename R>
-slide_view(R&&, size_t) -> slide_view<owning_view<R>>;
+slide_view(R&&, range_difference_t<views::all_t<R>>)
+    -> slide_view<views::all_t<R>>;
 
 template<typename V>
 inline constexpr bool enable_borrowed_range<slide_view<V>> =
@@ -7489,32 +7730,47 @@ constexpr auto operator|(R&& range, chunk_adaptor adaptor) {
     return adaptor(std::forward<R>(range));
 }
 
+template<typename Count>
 struct slide_adaptor {
-    size_t count_;
+    Count count_;
     template<typename R>
         requires slide_viewable<R>
     constexpr auto operator()(R&& range) const {
         auto base = all(std::forward<R>(range));
-        return slide_view<decltype(base)>(std::move(base), count_);
+        using difference_type = range_difference_t<decltype(base)>;
+        if (!in_range<difference_type>(count_)) {
+            rin_panic("slide count out of range");
+        }
+        return slide_view<decltype(base)>(
+            std::move(base), static_cast<difference_type>(count_));
     }
 };
 
 struct slide_fn {
-    template<typename R>
-        requires slide_viewable<R>
-    constexpr auto operator()(R&& range, size_t count) const {
+    template<typename R, typename Count>
+        requires slide_viewable<R> && integral<remove_cvref_t<Count>>
+    constexpr auto operator()(R&& range, Count count) const {
         auto base = all(std::forward<R>(range));
-        return slide_view<decltype(base)>(std::move(base), count);
+        using difference_type = range_difference_t<decltype(base)>;
+        if (!in_range<difference_type>(count)) {
+            rin_panic("slide count out of range");
+        }
+        return slide_view<decltype(base)>(
+            std::move(base), static_cast<difference_type>(count));
     }
-    constexpr auto operator()(size_t count) const {
-        return slide_adaptor{count};
+
+    template<typename Count>
+        requires integral<remove_cvref_t<Count>>
+    constexpr auto operator()(Count count) const {
+        using count_type = remove_cvref_t<Count>;
+        return slide_adaptor<count_type>{static_cast<count_type>(count)};
     }
 };
 inline constexpr slide_fn slide{};
 
-template<typename R>
+template<typename R, typename Count>
     requires slide_viewable<R>
-constexpr auto operator|(R&& range, slide_adaptor adaptor) {
+constexpr auto operator|(R&& range, slide_adaptor<Count> adaptor) {
     return adaptor(std::forward<R>(range));
 }
 
