@@ -672,10 +672,12 @@ void sleep_until(const chrono::time_point<Clock, Duration>& sleep_time) {
             sleep_for(chrono::duration<long double>(remaining_seconds));
     }
 #else
-    if (!(sleep_time > Clock::now())) return;
-    if (detail::sleep_until_native_clock(sleep_time)) return;
-    const auto now = Clock::now();
-    if (sleep_time > now) sleep_for(sleep_time - now);
+    for (;;) {
+        const auto now = Clock::now();
+        if (!(sleep_time > now)) return;
+        if (detail::sleep_until_native_clock(sleep_time)) return;
+        sleep_for(sleep_time - now);
+    }
 #endif
 }
 
