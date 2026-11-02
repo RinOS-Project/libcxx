@@ -7,10 +7,12 @@
 #define RINCXX_MEMORY_H
 
 #include "rincxx.h"
+#include "cstddef.h"
 #include "cstdint.h"
 #include "type_traits.h"
 #include "iterator.h"
 #include "utility.h"
+#include "new.h"
 #include "pointer_order.h"
 #if __cplusplus >= 202002L
 #include "compare.h"
@@ -1834,9 +1836,27 @@ public:
     ~allocator() {}
     
     pointer allocate(size_type n) {
-        if (n > max_size()) return nullptr;
-        size_type total = n * sizeof(T);
-        return static_cast<pointer>(rin_malloc(total));
+        if (n > max_size()) {
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+            throw bad_array_new_length();
+#else
+            terminate();
+#endif
+        }
+        const size_type total = n * sizeof(T);
+#if __cplusplus >= 201703L
+#if defined(__STDCPP_DEFAULT_NEW_ALIGNMENT__)
+        constexpr size_t default_new_alignment =
+            __STDCPP_DEFAULT_NEW_ALIGNMENT__;
+#else
+        constexpr size_t default_new_alignment = alignof(max_align_t);
+#endif
+        if (alignof(T) > default_new_alignment) {
+            return static_cast<pointer>(::operator new(
+                total, align_val_t(alignof(T))));
+        }
+#endif
+        return static_cast<pointer>(::operator new(total));
     }
 
 #if __cplusplus > 202002L
@@ -1846,7 +1866,19 @@ public:
 #endif
     
     void deallocate(pointer p, size_type) noexcept {
-        rin_free(p);
+#if __cplusplus >= 201703L
+#if defined(__STDCPP_DEFAULT_NEW_ALIGNMENT__)
+        constexpr size_t default_new_alignment =
+            __STDCPP_DEFAULT_NEW_ALIGNMENT__;
+#else
+        constexpr size_t default_new_alignment = alignof(max_align_t);
+#endif
+        if (alignof(T) > default_new_alignment) {
+            ::operator delete(p, align_val_t(alignof(T)));
+            return;
+        }
+#endif
+        ::operator delete(p);
     }
     
     template<typename U, typename... Args>
