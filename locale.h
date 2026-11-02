@@ -142,6 +142,13 @@ extern "C" {
 #define LC_MESSAGES 6
 #endif
 
+#if defined(RIN_FREESTANDING) || !defined(__STDC_HOSTED__) || \
+    !__STDC_HOSTED__
+#define RINCXX_HAS_LOCALE_CATALOG 1
+#else
+#define RINCXX_HAS_LOCALE_CATALOG 0
+#endif
+
 namespace rincxx {
 
 /* hosted struct tm のsidecar寿命をスコープに結び付けるガード。
@@ -330,10 +337,7 @@ public:
         _add_node_ref(facets_);
     }
 
-    explicit locale(const char* name) : name_("C"), facets_(nullptr) {
-        if (!_supported_name(name)) _invalid_locale();
-        name_ = name;
-    }
+    explicit locale(const char* name);
 
     explicit locale(const string& name) : locale(name.c_str()) {}
 
@@ -573,6 +577,17 @@ private:
     }
 
     static bool _supported_name(const char* name) noexcept {
+#if RINCXX_HAS_LOCALE_CATALOG
+        const int category_mask = (1 << LC_CTYPE) | (1 << LC_NUMERIC) |
+                                  (1 << LC_TIME) | (1 << LC_COLLATE) |
+                                  (1 << LC_MONETARY) | (1 << LC_MESSAGES);
+        locale_t probe;
+        if (!name) return false;
+        probe = newlocale(category_mask, name, (locale_t)0);
+        if (!probe) return false;
+        freelocale(probe);
+        return true;
+#else
         return _text_equal(name, "C") || _text_equal(name, "POSIX") ||
                _text_equal(name, "C.UTF-8") ||
                _text_equal(name, "POSIX.UTF-8") ||
@@ -581,9 +596,13 @@ private:
                _text_equal(name, "C.utf8") ||
                _text_equal(name, "POSIX.utf8") ||
                _regional_utf8_name(name);
+#endif
     }
 
     static const char* _c_locale_name(const char* name) noexcept {
+#if RINCXX_HAS_LOCALE_CATALOG
+        return name;
+#else
         return _text_equal(name, "C.UTF-8") ||
                _text_equal(name, "POSIX.UTF-8") ||
                _text_equal(name, "C.UTF8") ||
@@ -591,6 +610,7 @@ private:
                _text_equal(name, "C.utf8") ||
                _text_equal(name, "POSIX.utf8") ||
                _regional_utf8_name(name) ? "C" : name;
+#endif
     }
 
     static int _c_locale_category() noexcept {
@@ -1035,14 +1055,210 @@ protected:
 template<typename CharT>
 locale::id numpunct<CharT>::id;
 
-/* The named facet providers below are defined before the common classic
- * facet availability table.  Keep the character-domain trait visible to
- * those providers; its full definition remains in the shared facet section
- * below. */
+/* The named facet providers are defined before the common classic facet
+ * availability table. */
 template<typename CharT>
 struct __classic_locale_character;
 
 namespace __num_punct_detail {
+
+struct catalog_data {
+    char decimal_point[8];
+    char thousands_sep[8];
+    char grouping[16];
+    char int_curr_symbol[64];
+    char currency_symbol[64];
+    char mon_decimal_point[8];
+    char mon_thousands_sep[8];
+    char mon_grouping[16];
+    char positive_sign[32];
+    char negative_sign[32];
+    char int_frac_digits;
+    char frac_digits;
+    char p_cs_precedes;
+    char p_sep_by_space;
+    char n_cs_precedes;
+    char n_sep_by_space;
+    char p_sign_posn;
+    char n_sign_posn;
+    char int_p_cs_precedes;
+    char int_p_sep_by_space;
+    char int_n_cs_precedes;
+    char int_n_sep_by_space;
+    char int_p_sign_posn;
+    char int_n_sign_posn;
+};
+
+inline bool copy_field(char* output, size_t capacity,
+                       const char* input) noexcept {
+    size_t length = 0u;
+    if (!output || capacity == 0u || !input) return false;
+    while (length < capacity && input[length] != '\0') ++length;
+    if (length == capacity) return false;
+    for (size_t index = 0u; index <= length; ++index)
+        output[index] = input[index];
+    return true;
+}
+
+inline bool load_catalog(const char* name, catalog_data* output,
+                         char* canonical, size_t canonical_capacity) noexcept {
+#if RINCXX_HAS_LOCALE_CATALOG
+    const int category_mask = (1 << LC_CTYPE) | (1 << LC_NUMERIC) |
+                              (1 << LC_TIME) | (1 << LC_COLLATE) |
+                              (1 << LC_MONETARY) | (1 << LC_MESSAGES);
+    locale_t selected;
+    struct lconv* values;
+    const char* resolved;
+    bool valid;
+    if (!name || !output || !canonical || canonical_capacity == 0u)
+        return false;
+    selected = newlocale(category_mask, name, (locale_t)0);
+    if (!selected) return false;
+    values = rin_localeconv_for_locale(selected);
+    resolved = rin_locale_l_name(selected, LC_NUMERIC);
+    valid = values && resolved &&
+        copy_field(output->decimal_point, sizeof(output->decimal_point),
+                   values->decimal_point) &&
+        copy_field(output->thousands_sep, sizeof(output->thousands_sep),
+                   values->thousands_sep) &&
+        copy_field(output->grouping, sizeof(output->grouping),
+                   values->grouping) &&
+        copy_field(output->int_curr_symbol, sizeof(output->int_curr_symbol),
+                   values->int_curr_symbol) &&
+        copy_field(output->currency_symbol, sizeof(output->currency_symbol),
+                   values->currency_symbol) &&
+        copy_field(output->mon_decimal_point,
+                   sizeof(output->mon_decimal_point),
+                   values->mon_decimal_point) &&
+        copy_field(output->mon_thousands_sep,
+                   sizeof(output->mon_thousands_sep),
+                   values->mon_thousands_sep) &&
+        copy_field(output->mon_grouping, sizeof(output->mon_grouping),
+                   values->mon_grouping) &&
+        copy_field(output->positive_sign, sizeof(output->positive_sign),
+                   values->positive_sign) &&
+        copy_field(output->negative_sign, sizeof(output->negative_sign),
+                   values->negative_sign) &&
+        copy_field(canonical, canonical_capacity, resolved);
+    if (valid) {
+        output->int_frac_digits = values->int_frac_digits;
+        output->frac_digits = values->frac_digits;
+        output->p_cs_precedes = values->p_cs_precedes;
+        output->p_sep_by_space = values->p_sep_by_space;
+        output->n_cs_precedes = values->n_cs_precedes;
+        output->n_sep_by_space = values->n_sep_by_space;
+        output->p_sign_posn = values->p_sign_posn;
+        output->n_sign_posn = values->n_sign_posn;
+        output->int_p_cs_precedes = values->int_p_cs_precedes;
+        output->int_p_sep_by_space = values->int_p_sep_by_space;
+        output->int_n_cs_precedes = values->int_n_cs_precedes;
+        output->int_n_sep_by_space = values->int_n_sep_by_space;
+        output->int_p_sign_posn = values->int_p_sign_posn;
+        output->int_n_sign_posn = values->int_n_sign_posn;
+    }
+    freelocale(selected);
+    return valid;
+#else
+    (void)name;
+    (void)output;
+    (void)canonical;
+    (void)canonical_capacity;
+    return false;
+#endif
+}
+
+inline bool next_codepoint(const char*& input, uint32_t* output) noexcept {
+    const unsigned char* bytes =
+        reinterpret_cast<const unsigned char*>(input);
+    uint32_t value;
+    size_t width;
+    if (!input || !*input || !output) return false;
+    if (bytes[0] < 0x80u) {
+        value = bytes[0];
+        width = 1u;
+    } else if (bytes[0] >= 0xc2u && bytes[0] <= 0xdfu &&
+               bytes[1] >= 0x80u && bytes[1] <= 0xbfu) {
+        value = ((uint32_t)(bytes[0] & 0x1fu) << 6) |
+                (uint32_t)(bytes[1] & 0x3fu);
+        width = 2u;
+    } else if (bytes[0] >= 0xe0u && bytes[0] <= 0xefu &&
+               bytes[1] >= 0x80u && bytes[1] <= 0xbfu &&
+               bytes[2] >= 0x80u && bytes[2] <= 0xbfu &&
+               !(bytes[0] == 0xe0u && bytes[1] < 0xa0u) &&
+               !(bytes[0] == 0xedu && bytes[1] >= 0xa0u)) {
+        value = ((uint32_t)(bytes[0] & 0x0fu) << 12) |
+                ((uint32_t)(bytes[1] & 0x3fu) << 6) |
+                (uint32_t)(bytes[2] & 0x3fu);
+        width = 3u;
+    } else if (bytes[0] >= 0xf0u && bytes[0] <= 0xf4u &&
+               bytes[1] >= 0x80u && bytes[1] <= 0xbfu &&
+               bytes[2] >= 0x80u && bytes[2] <= 0xbfu &&
+               bytes[3] >= 0x80u && bytes[3] <= 0xbfu &&
+               !(bytes[0] == 0xf0u && bytes[1] < 0x90u) &&
+               !(bytes[0] == 0xf4u && bytes[1] >= 0x90u)) {
+        value = ((uint32_t)(bytes[0] & 0x07u) << 18) |
+                ((uint32_t)(bytes[1] & 0x3fu) << 12) |
+                ((uint32_t)(bytes[2] & 0x3fu) << 6) |
+                (uint32_t)(bytes[3] & 0x3fu);
+        width = 4u;
+    } else {
+        return false;
+    }
+    input += width;
+    *output = value;
+    return true;
+}
+
+template<typename CharT>
+inline bool single_character(const char* input, CharT* output) noexcept {
+    const char* cursor = input;
+    uint32_t value;
+    if (!input || !output || !next_codepoint(cursor, &value) || *cursor)
+        return false;
+    if (is_same<CharT, char>::value) {
+        if (value <= 0x7fu) {
+            *output = static_cast<CharT>(value);
+            return true;
+        }
+        /* The standard narrow facet stores one char, while this catalog is
+         * UTF-8.  Preserve the grouping role of Unicode space separators. */
+        if (value == 0x00a0u || value == 0x2007u || value == 0x202fu) {
+            *output = static_cast<CharT>(' ');
+            return true;
+        }
+        return false;
+    }
+    if (value > static_cast<uint32_t>(numeric_limits<CharT>::max()))
+        return false;
+    *output = static_cast<CharT>(value);
+    return true;
+}
+
+template<typename CharT>
+inline bool append_text(basic_string<CharT>& output,
+                        const char* input) {
+    if (!input) return false;
+    if (is_same<CharT, char>::value) {
+        for (const char* cursor = input; *cursor; ++cursor)
+            output += static_cast<CharT>(*cursor);
+        return true;
+    }
+    const char* cursor = input;
+    while (*cursor) {
+        uint32_t value;
+        if (!next_codepoint(cursor, &value)) return false;
+        if (sizeof(CharT) == 2u && value > 0xffffu) {
+            value -= 0x10000u;
+            output += static_cast<CharT>(0xd800u + (value >> 10));
+            output += static_cast<CharT>(0xdc00u + (value & 0x3ffu));
+        } else {
+            if (value > static_cast<uint32_t>(numeric_limits<CharT>::max()))
+                return false;
+            output += static_cast<CharT>(value);
+        }
+    }
+    return true;
+}
 
 enum {
     profile_classic = 0,
@@ -1097,14 +1313,32 @@ public:
 
     explicit numpunct_byname(const char* name, size_t refs = 0)
         : numpunct<CharT>(refs),
-          profile_(__num_punct_detail::profile_for_name(name)) {
+          profile_(__num_punct_detail::profile_for_name(name)),
+          catalog_backed_(false), catalog_decimal_('.'),
+          catalog_thousands_(','), catalog_grouping_() {
+#if RINCXX_HAS_LOCALE_CATALOG
+        __num_punct_detail::catalog_data data;
+        char canonical[64];
+        if (!__num_punct_detail::load_catalog(
+                name, &data, canonical, sizeof(canonical)) ||
+            !__num_punct_detail::single_character(
+                data.decimal_point, &catalog_decimal_) ||
+            !__num_punct_detail::single_character(
+                data.thousands_sep, &catalog_thousands_))
+            __num_punct_detail::invalid_name();
+        for (size_t index = 0u; data.grouping[index] != '\0'; ++index)
+            catalog_grouping_ += data.grouping[index];
+        catalog_backed_ = true;
+#else
         if (profile_ < 0) __num_punct_detail::invalid_name();
+#endif
     }
 
 protected:
     ~numpunct_byname() override = default;
 
     char_type do_decimal_point() const override {
+        if (catalog_backed_) return catalog_decimal_;
         return static_cast<CharT>(
             profile_ == __num_punct_detail::profile_classic ||
             profile_ == __num_punct_detail::profile_en_us ||
@@ -1115,6 +1349,7 @@ protected:
     }
 
     char_type do_thousands_sep() const override {
+        if (catalog_backed_) return catalog_thousands_;
         if (profile_ == __num_punct_detail::profile_de ||
             profile_ == __num_punct_detail::profile_dot_decimal ||
             profile_ == __num_punct_detail::profile_pt_br)
@@ -1125,6 +1360,7 @@ protected:
     }
 
     string do_grouping() const override {
+        if (catalog_backed_) return catalog_grouping_;
         string grouping;
         if (profile_ != __num_punct_detail::profile_classic)
             grouping += static_cast<char>(3);
@@ -1133,6 +1369,10 @@ protected:
 
 private:
     int profile_;
+    bool catalog_backed_;
+    CharT catalog_decimal_;
+    CharT catalog_thousands_;
+    string catalog_grouping_;
 };
 
 template<typename CharT>
@@ -1193,9 +1433,8 @@ struct __named_facet_provider<numpunct<CharT>> {
  * The stream extractors have their own streambuf transaction owner, but a
  * locale consumer also needs the standard num_get facet surface. It handles
  * bounded integral and floating-point fields using the active numpunct
- * separator/grouping policy and boolalpha names. Named-locale facet data is
- * still a small built-in profile set; catalog-backed providers for arbitrary
- * installed locales remain a separate TODO.
+ * separator/grouping policy and boolalpha names. Named locales install
+ * immutable catalog snapshots into their locale facet chain.
  */
 
 namespace __num_get_detail {
@@ -2720,14 +2959,95 @@ public:
 
     explicit moneypunct_byname(const char* name, size_t refs = 0)
         : moneypunct<CharT, Intl>(refs),
-          profile_(__num_punct_detail::profile_for_name(name)) {
+          profile_(__num_punct_detail::profile_for_name(name)),
+          catalog_backed_(false), catalog_decimal_('.'),
+          catalog_thousands_(','), catalog_grouping_(),
+          catalog_curr_symbol_(), catalog_positive_sign_(),
+          catalog_negative_sign_(), catalog_frac_digits_(0) {
+#if RINCXX_HAS_LOCALE_CATALOG
+        __num_punct_detail::catalog_data data;
+        char canonical[64];
+        const char* symbol;
+        const char* decimal;
+        const char* thousands;
+        const char* grouping;
+        const char* positive;
+        const char* negative;
+        char cs_precedes, sep_by_space, sign_posn, negative_sign_posn;
+        if (!__num_punct_detail::load_catalog(
+                name, &data, canonical, sizeof(canonical)))
+            __num_punct_detail::invalid_name();
+        if (Intl) {
+            symbol = data.int_curr_symbol;
+            decimal = data.mon_decimal_point;
+            thousands = data.mon_thousands_sep;
+            grouping = data.mon_grouping;
+            positive = data.positive_sign;
+            negative = data.negative_sign;
+            catalog_frac_digits_ =
+                static_cast<unsigned char>(data.int_frac_digits) == 127u
+                    ? 0 : static_cast<unsigned char>(data.int_frac_digits);
+            cs_precedes = data.int_p_cs_precedes;
+            sep_by_space = data.int_p_sep_by_space;
+            sign_posn = data.int_p_sign_posn;
+        } else {
+            symbol = data.currency_symbol;
+            decimal = data.mon_decimal_point;
+            thousands = data.mon_thousands_sep;
+            grouping = data.mon_grouping;
+            positive = data.positive_sign;
+            negative = data.negative_sign;
+            catalog_frac_digits_ =
+                static_cast<unsigned char>(data.frac_digits) == 127u
+                    ? 0 : static_cast<unsigned char>(data.frac_digits);
+            cs_precedes = data.p_cs_precedes;
+            sep_by_space = data.p_sep_by_space;
+            sign_posn = data.p_sign_posn;
+        }
+        catalog_pos_format_ = make_catalog_pattern(
+            cs_precedes, sep_by_space, sign_posn);
+        cs_precedes = Intl ? data.int_n_cs_precedes : data.n_cs_precedes;
+        sep_by_space = Intl ? data.int_n_sep_by_space : data.n_sep_by_space;
+        negative_sign_posn =
+            Intl ? data.int_n_sign_posn : data.n_sign_posn;
+        catalog_neg_format_ = make_catalog_pattern(
+            cs_precedes, sep_by_space, negative_sign_posn);
+        if (!__num_punct_detail::single_character(
+                decimal, &catalog_decimal_) ||
+            !__num_punct_detail::single_character(
+                thousands, &catalog_thousands_) ||
+            !__num_punct_detail::append_text(
+                catalog_curr_symbol_, symbol) ||
+            !__num_punct_detail::append_text(
+                catalog_positive_sign_, positive) ||
+            !__num_punct_detail::append_text(
+                catalog_negative_sign_, negative))
+            __num_punct_detail::invalid_name();
+        if (static_cast<unsigned char>(sign_posn) == 0u) {
+            catalog_positive_sign_.clear();
+            if (!__num_punct_detail::append_text(
+                    catalog_positive_sign_, "()"))
+                __num_punct_detail::invalid_name();
+        }
+        if (static_cast<unsigned char>(negative_sign_posn) == 0u) {
+            catalog_negative_sign_.clear();
+            if (!__num_punct_detail::append_text(
+                    catalog_negative_sign_, "()"))
+                __num_punct_detail::invalid_name();
+        }
+        for (size_t index = 0u; grouping[index] != '\0'; ++index)
+            catalog_grouping_ += grouping[index];
+        catalog_backed_ = true;
+#else
         if (profile_ < 0) __num_punct_detail::invalid_name();
+#endif
     }
 
 protected:
     ~moneypunct_byname() override = default;
 
     char_type do_decimal_point() const override {
+        if (catalog_backed_) return catalog_decimal_;
         return static_cast<CharT>(
             profile_ == __num_punct_detail::profile_classic ||
             profile_ == __num_punct_detail::profile_en_us ||
@@ -2735,6 +3055,7 @@ protected:
     }
 
     char_type do_thousands_sep() const override {
+        if (catalog_backed_) return catalog_thousands_;
         if (profile_ == __num_punct_detail::profile_fr)
             return static_cast<CharT>(' ');
         if (profile_ == __num_punct_detail::profile_classic ||
@@ -2745,6 +3066,7 @@ protected:
     }
 
     string do_grouping() const override {
+        if (catalog_backed_) return catalog_grouping_;
         string grouping;
         if (profile_ != __num_punct_detail::profile_classic)
             grouping += static_cast<char>(3);
@@ -2752,6 +3074,7 @@ protected:
     }
 
     string_type do_curr_symbol() const override {
+        if (catalog_backed_) return catalog_curr_symbol_;
         string_type symbol;
         if (profile_ == __num_punct_detail::profile_en_us) {
             const char* currency = Intl ? "USD " : "$";
@@ -2790,20 +3113,24 @@ protected:
     }
 
     string_type do_positive_sign() const override {
+        if (catalog_backed_) return catalog_positive_sign_;
         return string_type();
     }
 
     string_type do_negative_sign() const override {
+        if (catalog_backed_) return catalog_negative_sign_;
         string_type sign;
         sign += static_cast<CharT>('-');
         return sign;
     }
 
     int do_frac_digits() const override {
+        if (catalog_backed_) return catalog_frac_digits_;
         return profile_ == __num_punct_detail::profile_ja_jp ? 0 : 2;
     }
 
     pattern do_pos_format() const override {
+        if (catalog_backed_) return catalog_pos_format_;
         pattern value = {{moneypunct<CharT, Intl>::symbol,
                           moneypunct<CharT, Intl>::sign,
                           moneypunct<CharT, Intl>::none,
@@ -2812,6 +3139,7 @@ protected:
     }
 
     pattern do_neg_format() const override {
+        if (catalog_backed_) return catalog_neg_format_;
         pattern value = {{moneypunct<CharT, Intl>::sign,
                           moneypunct<CharT, Intl>::symbol,
                           moneypunct<CharT, Intl>::none,
@@ -2820,7 +3148,72 @@ protected:
     }
 
 private:
+    static void insert_part(char fields[4], size_t* count,
+                            size_t position, char value) noexcept {
+        if (!fields || !count || *count >= 4u || position > *count) return;
+        for (size_t index = *count; index > position; --index)
+            fields[index] = fields[index - 1u];
+        fields[position] = value;
+        ++*count;
+    }
+
+    static pattern make_catalog_pattern(char cs_precedes,
+                                        char sep_by_space,
+                                        char sign_posn) noexcept {
+        char fields[4];
+        size_t count = 0u;
+        const unsigned char cs = static_cast<unsigned char>(cs_precedes);
+        const unsigned char spacing =
+            static_cast<unsigned char>(sep_by_space);
+        const unsigned char sign = static_cast<unsigned char>(sign_posn);
+        const bool symbol_first = cs <= 1u ? cs != 0u : true;
+        const unsigned char effective_sign = sign <= 4u ? sign : 3u;
+        size_t value_index;
+        size_t sign_index;
+        pattern output;
+        fields[count++] = symbol_first ? moneypunct<CharT, Intl>::symbol
+                                       : moneypunct<CharT, Intl>::value;
+        if (spacing == 1u) fields[count++] = money_base::space;
+        fields[count++] = symbol_first ? moneypunct<CharT, Intl>::value
+                                       : moneypunct<CharT, Intl>::symbol;
+        value_index = symbol_first
+            ? (spacing == 1u ? 2u : 1u) : 0u;
+        if (effective_sign == 1u || effective_sign == 0u) {
+            sign_index = 0u;
+        } else if (effective_sign == 2u) {
+            sign_index = count;
+        } else {
+            sign_index = value_index + (effective_sign == 4u ? 1u : 0u);
+        }
+        insert_part(fields, &count, sign_index, money_base::sign);
+        if (spacing == 2u) {
+            size_t symbol = 0u, sign_slot = 0u;
+            for (size_t index = 0u; index < count; ++index) {
+                if (fields[index] == money_base::symbol) symbol = index;
+                if (fields[index] == money_base::sign) sign_slot = index;
+            }
+            if (symbol + 1u == sign_slot)
+                insert_part(fields, &count, sign_slot, money_base::space);
+            else if (sign_slot + 1u == symbol)
+                insert_part(fields, &count, symbol, money_base::space);
+        }
+        for (size_t index = 0u; index < 4u; ++index)
+            output.field[index] = index < count
+                ? fields[index] : money_base::none;
+        return output;
+    }
+
     int profile_;
+    bool catalog_backed_;
+    CharT catalog_decimal_;
+    CharT catalog_thousands_;
+    string catalog_grouping_;
+    string_type catalog_curr_symbol_;
+    string_type catalog_positive_sign_;
+    string_type catalog_negative_sign_;
+    int catalog_frac_digits_;
+    pattern catalog_pos_format_;
+    pattern catalog_neg_format_;
 };
 
 template<typename CharT, bool Intl>
@@ -2875,6 +3268,82 @@ struct __named_facet_provider<moneypunct<CharT, Intl>> {
         return nullptr;
     }
 };
+
+inline locale::locale(const char* name) : name_("C"), facets_(nullptr) {
+    if (!_supported_name(name)) _invalid_locale();
+#if RINCXX_HAS_LOCALE_CATALOG
+    const bool from_environment = name[0] == '\0';
+    __num_punct_detail::catalog_data data;
+    char canonical[64];
+    if (!__num_punct_detail::load_catalog(
+            name, &data, canonical, sizeof(canonical)))
+        _invalid_locale();
+    bool composite_environment = false;
+    if (from_environment) {
+        const int category_mask = (1 << LC_CTYPE) | (1 << LC_NUMERIC) |
+                                  (1 << LC_TIME) | (1 << LC_COLLATE) |
+                                  (1 << LC_MONETARY) | (1 << LC_MESSAGES);
+        locale_t selected = newlocale(category_mask, name, (locale_t)0);
+        if (!selected) _invalid_locale();
+        for (int category = LC_CTYPE; category < LC_ALL; ++category) {
+            const char* category_name = rin_locale_l_name(selected, category);
+            if (!category_name) {
+                freelocale(selected);
+                _invalid_locale();
+            }
+            if (!_text_equal(category_name, canonical))
+                composite_environment = true;
+        }
+        freelocale(selected);
+    }
+    const string public_name = composite_environment ? string("*")
+                                                     : string(canonical);
+    name_ = public_name;
+    if (!composite_environment && _text_equal(canonical, "C")) return;
+    const char* facet_locale_name = composite_environment ? name : canonical;
+    const string canonical_name = facet_locale_name;
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+    try {
+#endif
+    locale numeric_char(
+        *this, new __named_numpunct_holder<char>(canonical_name.c_str()));
+    *this = numeric_char;
+    name_ = public_name;
+    locale numeric_wide(
+        *this, new __named_numpunct_holder<wchar_t>(canonical_name.c_str()));
+    *this = numeric_wide;
+    name_ = public_name;
+    locale monetary_char(
+        *this, new __named_moneypunct_holder<char, false>(
+                   canonical_name.c_str()));
+    *this = monetary_char;
+    name_ = public_name;
+    locale monetary_char_intl(
+        *this, new __named_moneypunct_holder<char, true>(
+                   canonical_name.c_str()));
+    *this = monetary_char_intl;
+    name_ = public_name;
+    locale monetary_wide(
+        *this, new __named_moneypunct_holder<wchar_t, false>(
+                   canonical_name.c_str()));
+    *this = monetary_wide;
+    name_ = public_name;
+    locale monetary_wide_intl(
+        *this, new __named_moneypunct_holder<wchar_t, true>(
+                   canonical_name.c_str()));
+    *this = monetary_wide_intl;
+    name_ = public_name;
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+    } catch (...) {
+        _release_node(facets_);
+        facets_ = nullptr;
+        throw;
+    }
+#endif
+#else
+    name_ = name;
+#endif
+}
 
 /* ═══════════════════════════════════════════════════════════════
  * codecvt_base
@@ -5699,5 +6168,6 @@ CharT tolower(CharT c, const locale& loc) {
 #undef RIN_LOCALE_SPECIALIZATION_DEFINITION
 #undef RINCXX_TM_HAS_GNU_EXTENSIONS
 #undef RINCXX_TM_TIMEZONE_WEAK
+#undef RINCXX_HAS_LOCALE_CATALOG
 
 #endif /* RINCXX_LOCALE_H */
