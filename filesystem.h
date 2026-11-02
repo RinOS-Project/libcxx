@@ -30,6 +30,13 @@
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
+#if defined(RIN_FREESTANDING) && RIN_FREESTANDING && \
+    defined(RIN_USERSPACE) && RIN_USERSPACE
+#include <errno.h>
+#include <sys/random.h>
+#include "rin/fs.h"
+#define RIN_FILESYSTEM_HAS_SDK_PROVIDERS 1
+#endif
 #if __cplusplus >= 202002L
 #include "compare.h"
 #endif
@@ -59,10 +66,79 @@ extern "C" {
     int rin_unlink(const char* path);
     int rin_rename(const char* oldpath, const char* newpath);
     /* 0は公開成功、1は新しいまたは同時刻の宛先を維持したことを示す。 */
+#if !defined(RIN_FILESYSTEM_HAS_SDK_PROVIDERS)
     int rin_rename_if_newer(const char* oldpath, const char* newpath,
                             long long source_mtime) RIN_FILESYSTEM_WEAK_IMPORT;
     int rin_random_get(void* buffer, unsigned int length, unsigned int flags)
         RIN_FILESYSTEM_WEAK_IMPORT;
+#else
+    static inline int rin_rename_if_newer(const char* oldpath,
+                                          const char* newpath,
+                                          long long source_mtime) {
+        RinFsPathRequestV1 request = {};
+        size_t old_length = 0u;
+        size_t new_length = 0u;
+        RinResult result;
+        if (oldpath == nullptr || newpath == nullptr || source_mtime < 0) {
+            errno = EINVAL;
+            return -1;
+        }
+        while (old_length < 4096u && oldpath[old_length] != '\0')
+            ++old_length;
+        while (new_length < 4096u && newpath[new_length] != '\0')
+            ++new_length;
+        if (old_length == 0u || new_length == 0u || old_length >= 4096u ||
+            new_length >= 4096u) {
+            errno = old_length >= 4096u || new_length >= 4096u
+                        ? ENAMETOOLONG : EINVAL;
+            return -1;
+        }
+        request.struct_size = sizeof(request);
+        request.version = RIN_SDK_STRUCT_VERSION_1;
+        request.directory = RIN_HANDLE_INVALID;
+        request.secondary_directory = RIN_HANDLE_INVALID;
+        request.path.address =
+            static_cast<uint64_t>(reinterpret_cast<uintptr_t>(oldpath));
+        request.path.size = old_length;
+        request.secondary_path.address =
+            static_cast<uint64_t>(reinterpret_cast<uintptr_t>(newpath));
+        request.secondary_path.size = new_length;
+        request.reserved[0] = static_cast<uint64_t>(source_mtime);
+        result = rin_path_rename_if_newer_v1(&request);
+        if (result == RIN_SUCCESS) return 0;
+        if (result == RIN_ERROR_EXISTS) return 1;
+        switch (result) {
+        case RIN_ERROR_INVALID_ARGUMENT: errno = EINVAL; break;
+        case RIN_ERROR_NOT_SUPPORTED:
+#if defined(ENOTSUP)
+            errno = ENOTSUP;
+#else
+            errno = EOPNOTSUPP;
+#endif
+            break;
+        case RIN_ERROR_NOT_FOUND: errno = ENOENT; break;
+        case RIN_ERROR_ACCESS_DENIED: errno = EACCES; break;
+        case RIN_ERROR_NO_MEMORY: errno = ENOMEM; break;
+        case RIN_ERROR_BUSY: errno = EBUSY; break;
+        case RIN_ERROR_TIMEOUT: errno = ETIMEDOUT; break;
+        case RIN_ERROR_CANCELLED: errno = EINTR; break;
+        case RIN_ERROR_WOULD_BLOCK: errno = EAGAIN; break;
+        case RIN_ERROR_STALE_HANDLE: errno = EBADF; break;
+        case RIN_ERROR_BUFFER_TOO_SMALL: errno = ENOBUFS; break;
+        case RIN_ERROR_TABLE_FULL:
+        case RIN_ERROR_SYSTEM_TABLE_FULL: errno = ENFILE; break;
+        case RIN_ERROR_LIMIT_EXCEEDED: errno = ENOSPC; break;
+        case RIN_ERROR_WRONG_TYPE: errno = EINVAL; break;
+        case RIN_ERROR_INVALID_ADDRESS: errno = EFAULT; break;
+        case RIN_ERROR_OVERFLOW: errno = EOVERFLOW; break;
+        case RIN_ERROR_INTEGRITY:
+        case RIN_ERROR_ABI_MISMATCH:
+        case RIN_ERROR_IO:
+        default: errno = EIO; break;
+        }
+        return -1;
+    }
+#endif
     int rin_symlink(const char* target, const char* linkpath);
     int rin_link(const char* oldpath, const char* newpath);
     int rin_readlink(const char* path, char* buffer, unsigned long capacity);
@@ -4029,6 +4105,39 @@ namespace detail {
 static constexpr size_t copy_path_capacity = 4096u;
 static constexpr int copy_rename_skipped = 1;
 
+inline bool copy_secure_random(void* buffer, size_t length,
+                               error_code& ec) noexcept {
+#if defined(RIN_FILESYSTEM_HAS_SDK_PROVIDERS)
+    size_t offset = 0u;
+    unsigned char* output = static_cast<unsigned char*>(buffer);
+    while (offset < length) {
+        const ssize_t received = ::getrandom(output + offset,
+                                             length - offset, 0u);
+        if (received > 0) {
+            offset += static_cast<size_t>(received);
+            continue;
+        }
+        if (received < 0 && errno == EINTR) continue;
+        if (received == 0) errno = EIO;
+        ec = make_error_code(filesystem_error_from_errno());
+        return false;
+    }
+    return true;
+#else
+#if defined(__GNUC__) || defined(__clang__)
+    if (!rin_random_get) {
+        ec = make_error_code(errc::function_not_supported);
+        return false;
+    }
+#endif
+    if (rin_random_get(buffer, static_cast<unsigned int>(length), 0u) != 0) {
+        ec = make_error_code(filesystem_error_from_errno());
+        return false;
+    }
+    return true;
+#endif
+}
+
 inline bool copy_paths_equivalent(const path& from,
                                   const path& to) noexcept {
     stat_record source = {};
@@ -4062,16 +4171,7 @@ inline bool copy_staging_path(const char* destination, char* output,
         ec = make_error_code(errc::filename_too_long);
         return false;
     }
-#if defined(__GNUC__) || defined(__clang__)
-    if (!rin_random_get) {
-        ec = make_error_code(errc::function_not_supported);
-        return false;
-    }
-#endif
-    if (rin_random_get(nonce, static_cast<unsigned int>(sizeof(nonce)), 0u) != 0) {
-        ec = make_error_code(filesystem_error_from_errno());
-        return false;
-    }
+    if (!copy_secure_random(nonce, sizeof(nonce), ec)) return false;
     for (size_t index = 0u; index < parent_length; ++index)
         output[index] = destination_text[index];
     for (size_t index = 0u; index < suffix_length; ++index)
@@ -4105,7 +4205,8 @@ inline bool copy_publish_staged_path(const char* staging, const char* to,
                                      error_code& ec,
                                      bool* skipped_out) noexcept {
     if (skipped_out) *skipped_out = false;
-#if defined(__GNUC__) || defined(__clang__)
+#if !defined(RIN_FILESYSTEM_HAS_SDK_PROVIDERS) && \
+    (defined(__GNUC__) || defined(__clang__))
     if (replacement == static_cast<unsigned>(copy_options::update_existing) &&
         !rin_rename_if_newer) {
         ec = make_error_code(errc::function_not_supported);
