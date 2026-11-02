@@ -13,6 +13,7 @@
 #include "__nextafter.h"
 #include "cstdlib.h"
 #include "string.h"
+#include "system_error.h"
 #include "vector.h"
 #include "iosfwd.h"
 #include "pointer_order.h"
@@ -70,11 +71,21 @@ namespace __detail {
 #define RIN_RANDOM_DEVICE_SYSCALL3_INTERNAL 1
 #endif
 
-inline bool __random_device_getentropy(void* buffer, size_t size) noexcept {
-    if (!buffer || size == 0u) return false;
+inline bool __random_device_getentropy(void* buffer, size_t size,
+                                       int* error_out) noexcept {
+    if (error_out) *error_out = 0;
+    if (!buffer || size == 0u) {
+        if (error_out) *error_out = EINVAL;
+        return false;
+    }
     const intptr_t result = RIN_RANDOM_DEVICE_SYSCALL3(
         __NR_getrandom, buffer, size, 0u);
-    return result == (intptr_t)size;
+    if (result == (intptr_t)size) return true;
+    if (error_out) {
+        *error_out = result < 0 ? (int)-result : EIO;
+        if (*error_out == 0) *error_out = EIO;
+    }
+    return false;
 }
 
 inline bool __random_device_platform32_available() noexcept {
@@ -121,29 +132,75 @@ class random_device {
 public:
     using result_type = unsigned int;
 
-    random_device() {}
-    explicit random_device(const string&) {}
+    random_device() noexcept : backend_(backend::automatic), error_(0) {}
+
+    explicit random_device(const string& token)
+        : backend_(backend::automatic), error_(0) {
+        if (token.empty() || token == "default") return;
+        if (token == "platform") {
+            backend_ = backend::platform;
+            return;
+        }
+        if (token == "getrandom") {
+            backend_ = backend::getrandom;
+            return;
+        }
+        backend_ = backend::invalid;
+        error_ = EINVAL;
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+        throw invalid_argument("std::random_device: unsupported token");
+#endif
+    }
 
     random_device(const random_device&) = delete;
     random_device& operator=(const random_device&) = delete;
 
     result_type operator()() {
-        /* Prefer the authenticated kernel/platform owner.  Hosted tools may
-         * not link that owner, so use the same bounded getrandom ABI rather
-         * than leaving an unresolved symbol or manufacturing a value. */
-        if (__detail::__random_device_platform32_available()) {
-            return platform_random32();
-        }
-        result_type value = 0;
-        if (__detail::__random_device_getentropy(&value, sizeof(value))) {
-            return value;
-        }
-        /* A random_device failure must never become deterministic output. */
+        result_type value = 0u;
+        if (try_generate(value)) return value;
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+        throw system_error(error_code(error_ != 0 ? error_ : EIO,
+                                      generic_category()),
+                           "std::random_device");
+#else
+        /* No-exception callers can use try_generate()/last_error(). */
         __builtin_trap();
-        return 0;
+        return 0u;
+#endif
+    }
+
+    bool try_generate(result_type& value) noexcept {
+        value = 0u;
+        if (backend_ == backend::invalid) return false;
+        if (backend_ != backend::getrandom &&
+            __detail::__random_device_platform32_available()) {
+            value = platform_random32();
+            error_ = 0;
+            return true;
+        }
+        if (backend_ == backend::platform) {
+            error_ = ENOTSUP;
+            return false;
+        }
+        if (__detail::__random_device_getentropy(&value, sizeof(value),
+                                                 &error_)) {
+            error_ = 0;
+            return true;
+        }
+        value = 0u;
+        return false;
+    }
+
+    int last_error() const noexcept {
+        return error_;
     }
 
     double entropy() const noexcept {
+        if (backend_ == backend::invalid ||
+            backend_ == backend::getrandom ||
+            (backend_ == backend::platform &&
+             !__detail::__random_device_platform32_available()))
+            return 0.0;
         if (__detail::__random_device_rdrand_available() &&
             platform_has_rdrand()) {
             return 32.0;
@@ -155,6 +212,17 @@ public:
 
     static constexpr result_type min() { return 0; }
     static constexpr result_type max() { return numeric_limits<result_type>::max(); }
+
+private:
+    enum class backend : unsigned char {
+        automatic,
+        platform,
+        getrandom,
+        invalid
+    };
+
+    backend backend_;
+    int error_;
 };
 
 namespace __detail {
