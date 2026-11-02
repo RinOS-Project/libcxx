@@ -56,58 +56,38 @@ public:
     }
 };
 
-class print_file_output_iterator {
-    FILE* stream_;
-
-public:
-    using iterator_category = output_iterator_tag;
-    using value_type = void;
-    using difference_type = ptrdiff_t;
-    using pointer = void;
-    using reference = void;
-
-    explicit print_file_output_iterator(FILE* stream) : stream_(stream) {}
-
-    print_file_output_iterator& operator=(char character) {
-        errno = 0;
-        if (fputc(static_cast<unsigned char>(character), stream_) == EOF) {
-            print_output_failed(errno);
-        }
-        return *this;
-    }
-
-    print_file_output_iterator& operator*() { return *this; }
-    print_file_output_iterator& operator++() { return *this; }
-    print_file_output_iterator operator++(int) { return *this; }
-};
+inline void print_write(FILE* stream, string_view output) {
+    print_file_lock lock(stream);
+    if (output.empty()) return;
+    errno = 0;
+    if (::fwrite(output.data(), sizeof(char), output.size(), stream) !=
+        output.size())
+        print_output_failed(errno);
+}
 
 inline void print_vformat(FILE* stream, string_view format,
                           format_args args) {
-    print_file_lock lock(stream);
-    vformat_to(print_file_output_iterator(stream), format, args);
+    auto output = std::vformat(format, args);
+    print_write(stream, string_view(output.data(), output.size()));
 }
 
 template<class... Args>
 inline void print_format(FILE* stream, format_string<Args...> format,
                          Args&&... args) {
-    print_file_lock lock(stream);
-    format_to(print_file_output_iterator(stream), format,
-              std::forward<Args>(args)...);
+    auto output = std::format(format, std::forward<Args>(args)...);
+    print_write(stream, string_view(output.data(), output.size()));
 }
 
 template<class... Args>
 inline void println_format(FILE* stream, format_string<Args...> format,
                            Args&&... args) {
-    print_file_lock lock(stream);
-    auto output = format_to(print_file_output_iterator(stream), format,
-                            std::forward<Args>(args)...);
-    *output++ = '\n';
+    auto output = std::format(format, std::forward<Args>(args)...);
+    output.push_back('\n');
+    print_write(stream, string_view(output.data(), output.size()));
 }
 
 inline void println_newline(FILE* stream) {
-    print_file_lock lock(stream);
-    print_file_output_iterator output(stream);
-    *output++ = '\n';
+    print_write(stream, string_view("\n", 1u));
 }
 
 } /* namespace detail */
