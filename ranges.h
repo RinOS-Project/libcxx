@@ -5954,24 +5954,24 @@ concept slide_simple_view = view<R> && range<const R> &&
     same_as<sentinel_t<R>, sentinel_t<const R>>;
 
 template<typename T>
-class slide_non_propagating_cache {
+class non_propagating_cache {
     optional<T> value_;
 
 public:
-    constexpr slide_non_propagating_cache() = default;
-    constexpr slide_non_propagating_cache(
-        const slide_non_propagating_cache&) noexcept {}
-    constexpr slide_non_propagating_cache& operator=(
-        const slide_non_propagating_cache&) noexcept {
+    constexpr non_propagating_cache() = default;
+    constexpr non_propagating_cache(
+        const non_propagating_cache&) noexcept {}
+    constexpr non_propagating_cache& operator=(
+        const non_propagating_cache&) noexcept {
         value_.reset();
         return *this;
     }
-    constexpr slide_non_propagating_cache(
-        slide_non_propagating_cache&& other) noexcept {
+    constexpr non_propagating_cache(
+        non_propagating_cache&& other) noexcept {
         other.value_.reset();
     }
-    constexpr slide_non_propagating_cache& operator=(
-        slide_non_propagating_cache&& other) noexcept {
+    constexpr non_propagating_cache& operator=(
+        non_propagating_cache&& other) noexcept {
         value_.reset();
         other.value_.reset();
         return *this;
@@ -6434,122 +6434,212 @@ inline constexpr bool enable_borrowed_range<stride_view<V>> =
  * chunk_by_view - ?? predicate ????????
  * ???????????????????????????????????????????????????????????????*/
 
+template<typename V, bool = forward_range<const V>>
+struct chunk_by_const_cache_storage {};
+
+template<typename V>
+struct chunk_by_const_cache_storage<V, true> {
+    non_propagating_cache<iterator_t<const V>> begin_next_;
+};
+
 template<typename V, typename Pred>
-    requires forward_range<V> && copy_constructible<Pred> &&
+    requires view<V> && forward_range<V> && is_object_v<Pred> &&
+             copy_constructible<Pred> &&
              predicate<Pred&, range_reference_t<V>, range_reference_t<V>>
 class chunk_by_view : public view_interface<chunk_by_view<V, Pred>> {
     V base_;
     Pred pred_;
     using base_iterator = iterator_t<V>;
-    using base_sentinel = sentinel_t<V>;
+    non_propagating_cache<base_iterator> begin_next_;
+    mutable chunk_by_const_cache_storage<V> const_begin_next_;
 
-    template<typename BI, typename BS, typename P>
-    struct sentinel_impl {
-        BS end_;
-        constexpr explicit sentinel_impl(BS end) : end_(end) {}
-    };
-
-    template<typename BI, typename BS, typename P>
-    struct iterator_impl {
-        using iterator_category = input_iterator_tag;
-        using value_type = subrange<BI, BI>;
-        using difference_type = iter_difference_t<BI>;
-        using pointer = void;
-        using reference = value_type;
-        BI current_;
-        BS end_;
-        P pred_;
-
-        iterator_impl() = default;
-        constexpr iterator_impl(BI current, BS end, P pred)
-            : current_(current), end_(end), pred_(pred) {}
-
-        constexpr BI boundary() const {
-            auto last = current_;
-            if (last == end_) return last;
-            auto previous = last;
-            ++last;
-            while (last != end_ &&
-                   std::invoke(*pred_, *previous, *last)) {
-                previous = last;
-                ++last;
-            }
-            return last;
+    template<typename Base, typename Predicate>
+    static constexpr iterator_t<Base> find_next_impl(
+        Base& base, Predicate& pred, iterator_t<Base> current) {
+        auto previous = current;
+        const auto end = ranges::end(base);
+        if (previous == end) return previous;
+        auto next = previous;
+        ++next;
+        while (next != end && std::invoke(pred, *previous, *next)) {
+            previous = next;
+            ++next;
         }
+        return next;
+    }
+
+    template<typename Base, typename Predicate>
+    static constexpr iterator_t<Base> find_prev_impl(
+        Base& base, Predicate& pred, iterator_t<Base> current)
+        requires bidirectional_range<Base> {
+        const auto first = ranges::begin(base);
+        auto previous = current;
+        --previous;
+        while (previous != first) {
+            auto before = previous;
+            --before;
+            if (!std::invoke(pred, *before, *previous)) break;
+            previous = before;
+        }
+        return previous;
+    }
+
+    constexpr base_iterator find_next(base_iterator current) {
+        return find_next_impl(base_, pred_, std::move(current));
+    }
+
+    template<typename Base = const V>
+    constexpr iterator_t<Base> find_next(iterator_t<Base> current) const
+        requires same_as<Base, const V> && forward_range<Base> &&
+                 predicate<const Pred&, range_reference_t<Base>,
+                           range_reference_t<Base>> {
+        return find_next_impl(base_, pred_, std::move(current));
+    }
+
+    constexpr base_iterator find_prev(base_iterator current)
+        requires bidirectional_range<V> {
+        return find_prev_impl(base_, pred_, std::move(current));
+    }
+
+    template<typename Base = const V>
+    constexpr iterator_t<Base> find_prev(iterator_t<Base> current) const
+        requires same_as<Base, const V> && bidirectional_range<Base> &&
+                 predicate<const Pred&, range_reference_t<Base>,
+                           range_reference_t<Base>> {
+        return find_prev_impl(base_, pred_, std::move(current));
+    }
+
+    template<bool Const>
+    class iterator_impl {
+        using Base = conditional_t<Const, const V, V>;
+        using BI = iterator_t<Base>;
+        using Parent = conditional_t<Const, const chunk_by_view,
+                                     chunk_by_view>;
+
+        Parent* parent_ = nullptr;
+        BI current_{};
+        BI next_{};
+
+        template<bool>
+        friend class iterator_impl;
+
+    public:
+        using iterator_category = input_iterator_tag;
+        using iterator_concept = conditional_t<
+            bidirectional_range<Base>, bidirectional_iterator_tag,
+            forward_iterator_tag>;
+        using value_type = subrange<BI>;
+        using difference_type = range_difference_t<Base>;
+
+        constexpr iterator_impl() = default;
+        constexpr iterator_impl(Parent& parent, BI current, BI next)
+            : parent_(std::addressof(parent)), current_(std::move(current)),
+              next_(std::move(next)) {}
+
+        template<bool OtherConst>
+        constexpr iterator_impl(iterator_impl<OtherConst> other)
+            requires Const && (!OtherConst) &&
+                     convertible_to<iterator_t<V>, BI>
+            : parent_(other.parent_), current_(std::move(other.current_)),
+              next_(std::move(other.next_)) {}
 
         constexpr value_type operator*() const {
-            return value_type(current_, boundary());
+            return value_type(current_, next_);
         }
+
         constexpr iterator_impl& operator++() {
-            current_ = boundary();
+            current_ = next_;
+            next_ = parent_->find_next(current_);
             return *this;
         }
+
         constexpr iterator_impl operator++(int) {
             auto copy = *this;
             ++*this;
             return copy;
         }
+
+        constexpr iterator_impl& operator--()
+            requires bidirectional_range<Base> {
+            next_ = current_;
+            current_ = parent_->find_prev(next_);
+            return *this;
+        }
+
+        constexpr iterator_impl operator--(int)
+            requires bidirectional_range<Base> {
+            auto copy = *this;
+            --*this;
+            return copy;
+        }
+
         friend constexpr bool operator==(const iterator_impl& a,
                                          const iterator_impl& b) {
             return a.current_ == b.current_;
         }
-        friend constexpr bool operator!=(const iterator_impl& a,
-                                         const iterator_impl& b) { return !(a == b); }
-        friend constexpr bool operator==(const iterator_impl& i,
-                                         const sentinel_impl<BI, BS, P>& s) {
-            return i.current_ == s.end_;
+
+        friend constexpr bool operator==(const iterator_impl& value,
+                                         default_sentinel_t) {
+            return value.current_ == value.next_;
         }
-        friend constexpr bool operator!=(const iterator_impl& i,
-                                         const sentinel_impl<BI, BS, P>& s) { return !(i == s); }
-        friend constexpr bool operator==(const sentinel_impl<BI, BS, P>& s,
-                                         const iterator_impl& i) { return i == s; }
-        friend constexpr bool operator!=(const sentinel_impl<BI, BS, P>& s,
-                                         const iterator_impl& i) { return !(i == s); }
     };
 
 public:
-    chunk_by_view() = default;
+    chunk_by_view()
+        requires default_initializable<V> && default_initializable<Pred> =
+        default;
+
     constexpr chunk_by_view(V base, Pred pred)
         : base_(std::move(base)), pred_(std::move(pred)) {}
-    constexpr V base() const& { return base_; }
+
+    constexpr V base() const& requires copy_constructible<V> { return base_; }
     constexpr V base() && { return std::move(base_); }
+
+    constexpr const Pred& pred() const noexcept { return pred_; }
+
     constexpr auto begin() {
-        return iterator_impl<base_iterator, base_sentinel, Pred*>(
-            ranges::begin(base_), ranges::end(base_), &pred_);
+        auto first = ranges::begin(base_);
+        if (!begin_next_.has_value()) {
+            begin_next_.emplace(find_next(first));
+        }
+        return iterator_impl<false>(*this, std::move(first),
+                                    begin_next_.value());
     }
+
     constexpr auto end() {
-        return sentinel_impl<base_iterator, base_sentinel, Pred*>(
-            ranges::end(base_));
+        if constexpr (common_range<V>) {
+            auto last = ranges::end(base_);
+            return iterator_impl<false>(*this, last, last);
+        } else {
+            return default_sentinel;
+        }
     }
 
     constexpr auto begin() const
         requires forward_range<const V> &&
                  predicate<const Pred&, range_reference_t<const V>,
                            range_reference_t<const V>> {
-        using const_iterator = iterator_t<const V>;
-        using const_sentinel = sentinel_t<const V>;
-        return iterator_impl<const_iterator, const_sentinel, const Pred*>(
-            ranges::begin(std::as_const(base_)),
-            ranges::end(std::as_const(base_)), &pred_);
+        auto first = ranges::begin(base_);
+        auto& cache = const_begin_next_.begin_next_;
+        if (!cache.has_value()) cache.emplace(find_next(first));
+        return iterator_impl<true>(*this, std::move(first), cache.value());
     }
 
     constexpr auto end() const
         requires forward_range<const V> &&
                  predicate<const Pred&, range_reference_t<const V>,
                            range_reference_t<const V>> {
-        using const_iterator = iterator_t<const V>;
-        using const_sentinel = sentinel_t<const V>;
-        return sentinel_impl<const_iterator, const_sentinel, const Pred*>(
-            ranges::end(std::as_const(base_)));
+        if constexpr (common_range<const V>) {
+            auto last = ranges::end(base_);
+            return iterator_impl<true>(*this, last, last);
+        } else {
+            return default_sentinel;
+        }
     }
 };
 
 template<typename R, typename Pred>
-chunk_by_view(R&&, Pred) -> chunk_by_view<owning_view<R>, Pred>;
-
-template<typename V, typename Pred>
-inline constexpr bool enable_borrowed_range<chunk_by_view<V, Pred>> =
-    borrowed_range<V>;
+chunk_by_view(R&&, Pred) -> chunk_by_view<views::all_t<R>, Pred>;
 #endif
 
 /* ???????????????????????????????????????????????????????????????
