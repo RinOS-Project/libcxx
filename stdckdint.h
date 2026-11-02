@@ -33,7 +33,12 @@ inline constexpr bool standard_signed_or_unsigned_integer =
     is_same<remove_cv_t<T>, long>::value ||
     is_same<remove_cv_t<T>, unsigned long>::value ||
     is_same<remove_cv_t<T>, long long>::value ||
-    is_same<remove_cv_t<T>, unsigned long long>::value;
+    is_same<remove_cv_t<T>, unsigned long long>::value
+#if defined(__SIZEOF_INT128__)
+    || is_same<remove_cv_t<T>, __int128>::value
+    || is_same<remove_cv_t<T>, unsigned __int128>::value
+#endif
+    ;
 
 template<typename Result>
 inline bool checked_result_pointer(Result* result) {
