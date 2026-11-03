@@ -1155,6 +1155,9 @@ public:
 };
 
 template<typename W, typename Bound>
+inline constexpr bool enable_borrowed_range<iota_view<W, Bound>> = true;
+
+template<typename W, typename Bound>
 iota_view(W, Bound) -> iota_view<W, Bound>;
 
 template<typename W>
