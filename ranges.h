@@ -357,6 +357,7 @@ template<typename I>
 struct is_basic_const_iterator : false_type {};
 
 template<typename I>
+    requires input_iterator<I>
 class basic_const_iterator;
 
 namespace detail {
@@ -370,9 +371,11 @@ struct basic_const_iterator_category<I, true> {
 } /* namespace detail */
 
 template<typename I>
+    requires input_iterator<I>
 struct is_basic_const_iterator<basic_const_iterator<I>> : true_type {};
 
 template<typename I>
+    requires input_iterator<I>
 class basic_const_iterator : public detail::basic_const_iterator_category<I> {
     template<typename>
     friend class basic_const_iterator;
@@ -380,6 +383,7 @@ class basic_const_iterator : public detail::basic_const_iterator_category<I> {
     I current_;
 
 public:
+    using iterator_type = I;
     using value_type = iter_value_t<I>;
     using difference_type = iter_difference_t<I>;
     using reference = iter_const_reference_t<I>;
@@ -392,8 +396,19 @@ public:
                       input_iterator_tag>>>>;
 
     constexpr basic_const_iterator() requires default_initializable<I> = default;
-    constexpr explicit basic_const_iterator(I current)
+    constexpr basic_const_iterator(I current)
         : current_(std::move(current)) {}
+
+    template<typename J>
+        requires convertible_to<J, I>
+    constexpr basic_const_iterator(basic_const_iterator<J> current)
+        : current_(std::move(current.current_)) {}
+
+    template<typename T>
+        requires (!is_basic_const_iterator<remove_cvref_t<T>>::value) &&
+                 convertible_to<T, I>
+    constexpr basic_const_iterator(T&& current)
+        : current_(std::forward<T>(current)) {}
 
     constexpr const I& base() const& noexcept { return current_; }
     constexpr I base() && { return std::move(current_); }
@@ -569,6 +584,17 @@ public:
     friend constexpr difference_type operator-(
         const S& sentinel, const basic_const_iterator& iterator) {
         return sentinel - iterator.current_;
+    }
+
+    friend constexpr auto iter_move(const basic_const_iterator& iterator)
+        noexcept(noexcept(static_cast<common_reference_t<
+            const value_type&&, iter_rvalue_reference_t<I>>>(
+                ranges::iter_move(iterator.current_))))
+        -> common_reference_t<const value_type&&, iter_rvalue_reference_t<I>> {
+        using rvalue_reference = common_reference_t<
+            const value_type&&, iter_rvalue_reference_t<I>>;
+        return static_cast<rvalue_reference>(
+            ranges::iter_move(iterator.current_));
     }
 };
 
