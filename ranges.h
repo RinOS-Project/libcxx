@@ -340,6 +340,249 @@ concept maybe_borrowed_range =
 template<typename T>
 concept borrowed_range = range<T> && maybe_borrowed_range<T>;
 
+#if __cplusplus > 202002L
+template<typename I>
+using iter_const_reference_t =
+    common_reference_t<const iter_value_t<I>&&, iter_reference_t<I>>;
+
+template<typename I>
+concept constant_iterator = input_iterator<I> &&
+    same_as<iter_const_reference_t<I>, iter_reference_t<I>>;
+
+template<typename T>
+concept constant_range = input_range<T> &&
+    constant_iterator<iterator_t<T>>;
+
+template<typename I>
+struct is_basic_const_iterator : false_type {};
+
+template<typename I>
+class basic_const_iterator;
+
+namespace detail {
+template<typename I, bool = forward_iterator<I>>
+struct basic_const_iterator_category {};
+
+template<typename I>
+struct basic_const_iterator_category<I, true> {
+    using iterator_category = typename iterator_traits<I>::iterator_category;
+};
+} /* namespace detail */
+
+template<typename I>
+struct is_basic_const_iterator<basic_const_iterator<I>> : true_type {};
+
+template<typename I>
+class basic_const_iterator : public detail::basic_const_iterator_category<I> {
+    I current_;
+
+public:
+    using value_type = iter_value_t<I>;
+    using difference_type = iter_difference_t<I>;
+    using reference = iter_const_reference_t<I>;
+    using pointer = const value_type*;
+    using iterator_concept = conditional_t<
+        contiguous_iterator<I>, contiguous_iterator_tag,
+        conditional_t<random_access_iterator<I>, random_access_iterator_tag,
+        conditional_t<bidirectional_iterator<I>, bidirectional_iterator_tag,
+        conditional_t<forward_iterator<I>, forward_iterator_tag,
+                      input_iterator_tag>>>>;
+
+    constexpr basic_const_iterator() requires default_initializable<I> = default;
+    constexpr explicit basic_const_iterator(I current)
+        : current_(std::move(current)) {}
+
+    constexpr const I& base() const& noexcept { return current_; }
+    constexpr I base() && { return std::move(current_); }
+
+    constexpr reference operator*() const {
+        return static_cast<reference>(*current_);
+    }
+
+    constexpr const value_type* operator->() const
+        requires is_lvalue_reference_v<iter_reference_t<I>> &&
+                 same_as<remove_cvref_t<iter_reference_t<I>>, value_type> {
+        if constexpr (contiguous_iterator<I>)
+            return std::to_address(current_);
+        else
+            return std::addressof(*current_);
+    }
+
+    constexpr basic_const_iterator& operator++() {
+        ++current_;
+        return *this;
+    }
+
+    constexpr void operator++(int) requires (!forward_iterator<I>) {
+        ++current_;
+    }
+
+    constexpr basic_const_iterator operator++(int)
+        requires forward_iterator<I> {
+        auto previous = *this;
+        ++*this;
+        return previous;
+    }
+
+    constexpr basic_const_iterator& operator--()
+        requires bidirectional_iterator<I> {
+        --current_;
+        return *this;
+    }
+
+    constexpr basic_const_iterator operator--(int)
+        requires bidirectional_iterator<I> {
+        auto previous = *this;
+        --*this;
+        return previous;
+    }
+
+    constexpr basic_const_iterator& operator+=(difference_type offset)
+        requires random_access_iterator<I> {
+        current_ += offset;
+        return *this;
+    }
+
+    constexpr basic_const_iterator& operator-=(difference_type offset)
+        requires random_access_iterator<I> {
+        current_ -= offset;
+        return *this;
+    }
+
+    constexpr reference operator[](difference_type offset) const
+        requires random_access_iterator<I> {
+        return static_cast<reference>(current_[offset]);
+    }
+
+    friend constexpr bool operator==(const basic_const_iterator& left,
+                                     const basic_const_iterator& right) {
+        return left.current_ == right.current_;
+    }
+
+    template<typename S>
+        requires (!is_basic_const_iterator<remove_cvref_t<S>>::value) &&
+                 sentinel_for<S, I>
+    friend constexpr bool operator==(const basic_const_iterator& iterator,
+                                     const S& sentinel) {
+        return iterator.current_ == sentinel;
+    }
+
+    template<typename S>
+        requires (!is_basic_const_iterator<remove_cvref_t<S>>::value) &&
+                 sentinel_for<S, I>
+    friend constexpr bool operator==(const S& sentinel,
+                                     const basic_const_iterator& iterator) {
+        return iterator.current_ == sentinel;
+    }
+
+    friend constexpr bool operator<(const basic_const_iterator& left,
+                                    const basic_const_iterator& right)
+        requires random_access_iterator<I> {
+        return left.current_ < right.current_;
+    }
+
+    friend constexpr bool operator>(const basic_const_iterator& left,
+                                    const basic_const_iterator& right)
+        requires random_access_iterator<I> {
+        return right < left;
+    }
+
+    friend constexpr bool operator<=(const basic_const_iterator& left,
+                                     const basic_const_iterator& right)
+        requires random_access_iterator<I> {
+        return !(right < left);
+    }
+
+    friend constexpr bool operator>=(const basic_const_iterator& left,
+                                     const basic_const_iterator& right)
+        requires random_access_iterator<I> {
+        return !(left < right);
+    }
+
+    friend constexpr auto operator<=>(const basic_const_iterator& left,
+                                       const basic_const_iterator& right)
+        requires random_access_iterator<I> && three_way_comparable<I> {
+        return left.current_ <=> right.current_;
+    }
+
+    friend constexpr basic_const_iterator operator+(
+        const basic_const_iterator& iterator, difference_type offset)
+        requires random_access_iterator<I> {
+        return basic_const_iterator(iterator.current_ + offset);
+    }
+
+    friend constexpr basic_const_iterator operator+(
+        difference_type offset, const basic_const_iterator& iterator)
+        requires random_access_iterator<I> {
+        return iterator + offset;
+    }
+
+    friend constexpr basic_const_iterator operator-(
+        const basic_const_iterator& iterator, difference_type offset)
+        requires random_access_iterator<I> {
+        return basic_const_iterator(iterator.current_ - offset);
+    }
+
+    friend constexpr difference_type operator-(
+        const basic_const_iterator& left,
+        const basic_const_iterator& right)
+        requires random_access_iterator<I> {
+        return left.current_ - right.current_;
+    }
+
+    template<typename S>
+        requires sized_sentinel_for<S, I>
+    friend constexpr difference_type operator-(
+        const basic_const_iterator& iterator, const S& sentinel) {
+        return iterator.current_ - sentinel;
+    }
+
+    template<typename S>
+        requires sized_sentinel_for<S, I>
+    friend constexpr difference_type operator-(
+        const S& sentinel, const basic_const_iterator& iterator) {
+        return sentinel - iterator.current_;
+    }
+};
+
+namespace detail {
+template<typename I>
+using const_iterator_adaptor_t =
+    conditional_t<constant_iterator<I>, I, basic_const_iterator<I>>;
+
+template<typename S>
+using const_sentinel_adaptor_t = conditional_t<
+    input_iterator<S>, const_iterator_adaptor_t<S>, S>;
+
+template<typename R>
+constexpr decltype(auto) possibly_const_range(R& range) {
+    if constexpr (constant_range<const R> && !constant_range<R>)
+        return static_cast<const R&>(range);
+    else
+        return (range);
+}
+
+template<typename I>
+constexpr auto make_const_iterator(I&& iterator) {
+    using iterator_type = remove_cvref_t<I>;
+    using result_type = const_iterator_adaptor_t<iterator_type>;
+    return result_type(std::forward<I>(iterator));
+}
+
+template<typename S>
+constexpr auto make_const_sentinel(S&& sentinel) {
+    using sentinel_type = remove_cvref_t<S>;
+    using result_type = const_sentinel_adaptor_t<sentinel_type>;
+    return result_type(std::forward<S>(sentinel));
+}
+
+template<typename T>
+constexpr const T* as_const_pointer(T* pointer) noexcept {
+    return pointer;
+}
+} /* namespace detail */
+#endif
+
 /* A range algorithm returns this marker instead of an iterator when a
  * temporary non-borrowed range would make the iterator dangle. */
 struct dangling {
@@ -543,6 +786,20 @@ struct data_fn {
 };
 
 struct cbegin_fn {
+#if __cplusplus > 202002L
+    template<typename R,
+             enable_if_t<maybe_borrowed_range<R>, int> = 0>
+    constexpr auto operator()(R&& r) const
+        noexcept(noexcept(detail::make_const_iterator(begin_fn{}(
+            detail::possibly_const_range(
+                declval<remove_reference_t<R>&>())))))
+        -> decltype(detail::make_const_iterator(begin_fn{}(
+            detail::possibly_const_range(
+                declval<remove_reference_t<R>&>())))) {
+        return detail::make_const_iterator(
+            begin_fn{}(detail::possibly_const_range(r)));
+    }
+#else
     template<typename R,
              enable_if_t<maybe_borrowed_range<R>, int> = 0>
     constexpr auto operator()(R&& r) const
@@ -550,9 +807,24 @@ struct cbegin_fn {
         -> decltype(begin_fn{}(std::as_const(r))) {
         return begin_fn{}(std::as_const(r));
     }
+#endif
 };
 
 struct cend_fn {
+#if __cplusplus > 202002L
+    template<typename R,
+             enable_if_t<maybe_borrowed_range<R>, int> = 0>
+    constexpr auto operator()(R&& r) const
+        noexcept(noexcept(detail::make_const_sentinel(end_fn{}(
+            detail::possibly_const_range(
+                declval<remove_reference_t<R>&>())))))
+        -> decltype(detail::make_const_sentinel(end_fn{}(
+            detail::possibly_const_range(
+                declval<remove_reference_t<R>&>())))) {
+        return detail::make_const_sentinel(
+            end_fn{}(detail::possibly_const_range(r)));
+    }
+#else
     template<typename R,
              enable_if_t<maybe_borrowed_range<R>, int> = 0>
     constexpr auto operator()(R&& r) const
@@ -560,6 +832,7 @@ struct cend_fn {
         -> decltype(end_fn{}(std::as_const(r))) {
         return end_fn{}(std::as_const(r));
     }
+#endif
 };
 
 struct rbegin_fn {
@@ -649,6 +922,20 @@ struct rend_fn {
 };
 
 struct crbegin_fn {
+#if __cplusplus > 202002L
+    template<typename R,
+             enable_if_t<maybe_borrowed_range<R>, int> = 0>
+    constexpr auto operator()(R&& r) const
+        noexcept(noexcept(detail::make_const_iterator(rbegin_fn{}(
+            detail::possibly_const_range(
+                declval<remove_reference_t<R>&>())))))
+        -> decltype(detail::make_const_iterator(rbegin_fn{}(
+            detail::possibly_const_range(
+                declval<remove_reference_t<R>&>())))) {
+        return detail::make_const_iterator(
+            rbegin_fn{}(detail::possibly_const_range(r)));
+    }
+#else
     template<typename R,
              enable_if_t<maybe_borrowed_range<R>, int> = 0>
     constexpr auto operator()(R&& r) const
@@ -656,9 +943,24 @@ struct crbegin_fn {
         -> decltype(rbegin_fn{}(std::as_const(r))) {
         return rbegin_fn{}(std::as_const(r));
     }
+#endif
 };
 
 struct crend_fn {
+#if __cplusplus > 202002L
+    template<typename R,
+             enable_if_t<maybe_borrowed_range<R>, int> = 0>
+    constexpr auto operator()(R&& r) const
+        noexcept(noexcept(detail::make_const_sentinel(rend_fn{}(
+            detail::possibly_const_range(
+                declval<remove_reference_t<R>&>())))))
+        -> decltype(detail::make_const_sentinel(rend_fn{}(
+            detail::possibly_const_range(
+                declval<remove_reference_t<R>&>())))) {
+        return detail::make_const_sentinel(
+            rend_fn{}(detail::possibly_const_range(r)));
+    }
+#else
     template<typename R,
              enable_if_t<maybe_borrowed_range<R>, int> = 0>
     constexpr auto operator()(R&& r) const
@@ -666,9 +968,24 @@ struct crend_fn {
         -> decltype(rend_fn{}(std::as_const(r))) {
         return rend_fn{}(std::as_const(r));
     }
+#endif
 };
 
 struct cdata_fn {
+#if __cplusplus > 202002L
+    template<typename R,
+             enable_if_t<maybe_borrowed_range<R>, int> = 0>
+    constexpr auto operator()(R&& r) const
+        noexcept(noexcept(detail::as_const_pointer(data_fn{}(
+            detail::possibly_const_range(
+                declval<remove_reference_t<R>&>())))))
+        -> decltype(detail::as_const_pointer(data_fn{}(
+            detail::possibly_const_range(
+                declval<remove_reference_t<R>&>())))) {
+        return detail::as_const_pointer(
+            data_fn{}(detail::possibly_const_range(r)));
+    }
+#else
     template<typename R,
              enable_if_t<maybe_borrowed_range<R>, int> = 0>
     constexpr auto operator()(R&& r) const
@@ -676,6 +993,7 @@ struct cdata_fn {
         -> decltype(data_fn{}(std::as_const(r))) {
         return data_fn{}(std::as_const(r));
     }
+#endif
 };
 
 template<typename R>
@@ -763,16 +1081,6 @@ concept viewable_range = range<T> &&
     (borrowed_range<T> ||
      (view<remove_cvref_t<T>> &&
       constructible_from<remove_cvref_t<T>, T>));
-#endif
-
-#if __cplusplus > 202002L
-template<typename I>
-concept constant_iterator = input_iterator<I> &&
-    same_as<iter_reference_t<I>, const iter_value_t<I>&>;
-
-template<typename T>
-concept constant_range = input_range<T> &&
-    constant_iterator<iterator_t<T>>;
 #endif
 
 /* ???????????????????????????????????????????????????????????????
@@ -3113,101 +3421,6 @@ inline constexpr bool enable_borrowed_range<reverse_view<V>> = borrowed_range<V>
  * as_const_view - const??????????????
  * ???????????????????????????????????????????????????????????????*/
 
-template<typename I>
-class basic_const_iterator;
-
-template<typename T>
-struct is_basic_const_iterator : false_type {};
-
-template<typename I>
-struct is_basic_const_iterator<basic_const_iterator<I>> : true_type {};
-
-template<typename I>
-class basic_const_iterator {
-    I current_;
-
-public:
-    using iterator_category = input_iterator_tag;
-    using value_type = remove_cvref_t<decltype(*declval<I&>())>;
-    using difference_type = iter_difference_t<I>;
-    using pointer = void;
-    using reference = decltype(std::as_const(*declval<I&>()));
-
-    constexpr basic_const_iterator() = default;
-    constexpr explicit basic_const_iterator(I current) : current_(current) {}
-
-    constexpr decltype(auto) operator*() const {
-        return std::as_const(*current_);
-    }
-
-    constexpr basic_const_iterator& operator++() {
-        ++current_;
-        return *this;
-    }
-
-    constexpr basic_const_iterator operator++(int) {
-        auto copy = *this;
-        ++*this;
-        return copy;
-    }
-
-    constexpr const auto* operator->() const
-        requires is_lvalue_reference_v<iter_reference_t<I>> &&
-                 same_as<remove_cvref_t<iter_reference_t<I>>, value_type> {
-        return std::addressof(std::as_const(*current_));
-    }
-
-    friend constexpr bool operator==(const basic_const_iterator& left,
-                                     const basic_const_iterator& right) {
-        return left.current_ == right.current_;
-    }
-
-    friend constexpr bool operator!=(const basic_const_iterator& left,
-                                     const basic_const_iterator& right) {
-        return !(left == right);
-    }
-
-    template<typename S>
-        requires (!is_basic_const_iterator<remove_cvref_t<S>>::value) &&
-                 requires(const I& it, const S& sentinel) {
-            { it == sentinel } -> convertible_to<bool>;
-        }
-    friend constexpr bool operator==(const basic_const_iterator& it,
-                                     const S& sentinel) {
-        return it.current_ == sentinel;
-    }
-
-    template<typename S>
-        requires (!is_basic_const_iterator<remove_cvref_t<S>>::value) &&
-                 requires(const I& it, const S& sentinel) {
-            { it == sentinel } -> convertible_to<bool>;
-        }
-    friend constexpr bool operator==(const S& sentinel,
-                                     const basic_const_iterator& it) {
-        return it == sentinel;
-    }
-
-    template<typename S>
-        requires (!is_basic_const_iterator<remove_cvref_t<S>>::value) &&
-                 requires(const I& it, const S& sentinel) {
-            { it == sentinel } -> convertible_to<bool>;
-        }
-    friend constexpr bool operator!=(const basic_const_iterator& it,
-                                     const S& sentinel) {
-        return !(it == sentinel);
-    }
-
-    template<typename S>
-        requires (!is_basic_const_iterator<remove_cvref_t<S>>::value) &&
-                 requires(const I& it, const S& sentinel) {
-            { it == sentinel } -> convertible_to<bool>;
-        }
-    friend constexpr bool operator!=(const S& sentinel,
-                                     const basic_const_iterator& it) {
-        return !(sentinel == it);
-    }
-};
-
 template<typename V>
     requires view<V> && input_range<V>
 class as_const_view : public view_interface<as_const_view<V>> {
@@ -3221,35 +3434,19 @@ public:
     constexpr V base() && { return std::move(base_); }
 
     constexpr auto begin() {
-        using iterator = iterator_t<V>;
-        return basic_const_iterator<iterator>(ranges::begin(base_));
+        return ranges::cbegin(base_);
     }
 
     constexpr auto end() {
-        using iterator = iterator_t<V>;
-        using sentinel = sentinel_t<V>;
-        if constexpr (is_same_v<iterator, sentinel>) {
-            return basic_const_iterator<iterator>(ranges::end(base_));
-        } else {
-            return ranges::end(base_);
-        }
+        return ranges::cend(base_);
     }
 
-    constexpr auto begin() const {
-        using iterator = decltype(ranges::begin(std::as_const(base_)));
-        return basic_const_iterator<iterator>(
-            ranges::begin(std::as_const(base_)));
+    constexpr auto begin() const requires input_range<const V> {
+        return ranges::cbegin(std::as_const(base_));
     }
 
-    constexpr auto end() const {
-        using iterator = decltype(ranges::begin(std::as_const(base_)));
-        using sentinel = decltype(ranges::end(std::as_const(base_)));
-        if constexpr (is_same_v<iterator, sentinel>) {
-            return basic_const_iterator<iterator>(
-                ranges::end(std::as_const(base_)));
-        } else {
-            return ranges::end(std::as_const(base_));
-        }
+    constexpr auto end() const requires range<const V> {
+        return ranges::cend(std::as_const(base_));
     }
 
     constexpr auto size() requires sized_range<V> {
@@ -5526,19 +5723,36 @@ class repeat_view : public view_interface<repeat_view<T, Bound>> {
     T value_;
     Bound bound_;
 
+    static constexpr void validate_bound(Bound bound) {
+        if constexpr (signed_integral<Bound>) {
+            if (bound < 0) rin_panic("negative repeat bound");
+        }
+    }
+
 public:
     repeat_view() requires default_initializable<T>
         : value_(), bound_() {}
 
-    constexpr explicit repeat_view(T value)
-        requires same_as<Bound, unreachable_sentinel_t>
-        : value_(std::move(value)), bound_() {}
+    constexpr explicit repeat_view(const T& value, Bound bound = Bound())
+        requires copy_constructible<T>
+        : value_(value), bound_(bound) {
+        validate_bound(bound_);
+    }
 
-    constexpr repeat_view(T value, Bound bound)
+    constexpr explicit repeat_view(T&& value, Bound bound = Bound())
         : value_(std::move(value)), bound_(bound) {
-        if constexpr (signed_integral<Bound>) {
-            if (bound < 0) rin_panic("negative repeat bound");
-        }
+        validate_bound(bound_);
+    }
+
+    template<class... TArgs, class... BoundArgs>
+        requires constructible_from<T, TArgs...> &&
+                 constructible_from<Bound, BoundArgs...>
+    constexpr explicit repeat_view(
+        piecewise_construct_t, tuple<TArgs...> value_args,
+        tuple<BoundArgs...> bound_args = tuple<>())
+        : value_(make_from_tuple<T>(std::move(value_args))),
+          bound_(make_from_tuple<Bound>(std::move(bound_args))) {
+        validate_bound(bound_);
     }
 
     constexpr const T& value() const noexcept { return value_; }
