@@ -35,12 +35,6 @@ class span;
 
 namespace detail {
 
-template<class T>
-struct is_span_specialization : false_type {};
-
-template<class T, size_t Extent>
-struct is_span_specialization<span<T, Extent>> : true_type {};
-
 [[noreturn]] inline void span_contract_fail() {
     /* Standard span contract violations cannot produce a usable view. */
     __builtin_trap();

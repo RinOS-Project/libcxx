@@ -23,6 +23,17 @@
 
 namespace std {
 
+template<class T, size_t Extent>
+class span;
+
+namespace detail {
+template<class T>
+struct is_span_specialization : false_type {};
+
+template<class T, size_t Extent>
+struct is_span_specialization<span<T, Extent>> : true_type {};
+}
+
 namespace detail {
 template<typename Container, typename R>
 constexpr Container make_container_from_range(R&& range);
@@ -7906,6 +7917,12 @@ struct as_const_fn {
         auto view = all(std::forward<R>(range));
         if constexpr (constant_range<decltype(view)>) {
             return view;
+        } else if constexpr (std::detail::is_span_specialization<
+                                 remove_cvref_t<R>>::value) {
+            using span_type = remove_cvref_t<R>;
+            using const_span = std::span<
+                const typename span_type::element_type, span_type::extent>;
+            return const_span(std::forward<R>(range));
         } else if constexpr (is_empty_view<remove_cvref_t<R>>::value) {
             using element_type = typename
                 is_empty_view<remove_cvref_t<R>>::element_type;
