@@ -834,14 +834,11 @@ public:
     /* The range customization point returns iterator/sentinel values.  Using
      * references here makes iterator_t<subrange<...>> become I& and causes
      * the iterator concepts to reject otherwise valid pointer iterators. */
-    constexpr I begin() & noexcept { return begin_; }
-    constexpr I begin() const& noexcept { return begin_; }
-    constexpr S end() & noexcept { return end_; }
-    constexpr S end() const& noexcept { return end_; }
-    constexpr I&& begin() && noexcept { return std::move(begin_); }
-    constexpr const I&& begin() const&& noexcept { return std::move(begin_); }
-    constexpr S&& end() && noexcept { return std::move(end_); }
-    constexpr const S&& end() const&& noexcept { return std::move(end_); }
+    constexpr I begin() const requires copyable<I> { return begin_; }
+    constexpr I begin() requires (!copyable<I>) {
+        return std::move(begin_);
+    }
+    constexpr S end() const { return end_; }
 
     constexpr auto size() const requires sized_sentinel_for<S, I> {
         return end_ - begin_;
