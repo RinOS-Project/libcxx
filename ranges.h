@@ -1516,52 +1516,84 @@ inline constexpr bool enable_borrowed_range<owning_view<R>> =
 namespace detail {
 
 template<typename W>
-concept iota_value = copy_constructible<W> && equality_comparable<W> &&
-    requires(W value) {
-        { ++value } -> same_as<W&>;
-        value++;
-    };
+concept iota_value = weakly_incrementable<W> && copyable<W>;
 
-template<typename W>
-concept iota_decrementable = requires(W value) {
-    { --value } -> same_as<W&>;
-    value--;
+template<typename W, typename Bound>
+concept iota_weakly_equality_comparable_with = requires(
+    const W& value, const Bound& bound) {
+    { value == bound } -> boolean_testable;
+    { value != bound } -> boolean_testable;
+    { bound == value } -> boolean_testable;
+    { bound != value } -> boolean_testable;
 };
 
 template<typename W>
-concept iota_random_access = iota_decrementable<W> &&
-    requires(W value, ptrdiff_t offset) {
+inline constexpr bool iota_integer_like =
+    integral<W> && !same_as<remove_cv_t<W>, bool>;
+
+template<typename W, bool Integral = integral<W>,
+         bool WiderIteratorDifference =
+             (sizeof(iter_difference_t<W>) > sizeof(W))>
+struct iota_difference_type {
+    using type = iter_difference_t<W>;
+};
+
+template<typename W>
+struct iota_difference_type<W, true, false> {
+#if defined(__SIZEOF_INT128__)
+    using type = conditional_t<(sizeof(long long) > sizeof(W)), long long,
+        conditional_t<(sizeof(__int128) > sizeof(W)), __int128,
+                      make_signed_t<W>>>;
+#else
+    using type = conditional_t<(sizeof(long long) > sizeof(W)), long long,
+                               make_signed_t<W>>;
+#endif
+};
+
+template<typename W>
+using iota_difference_t = typename iota_difference_type<W>::type;
+
+template<bool Present>
+struct iota_iterator_category_base {};
+
+template<>
+struct iota_iterator_category_base<true> {
+    using iterator_category = input_iterator_tag;
+};
+
+template<typename W>
+concept iota_decrementable = incrementable<W> && requires(W value) {
+    { --value } -> same_as<W&>;
+    { value-- } -> same_as<W>;
+};
+
+template<typename W>
+concept iota_advanceable = iota_decrementable<W> && totally_ordered<W> &&
+    requires(W value, const W other, iota_difference_t<W> offset) {
         { value += offset } -> same_as<W&>;
         { value -= offset } -> same_as<W&>;
-        value + offset;
-        value - offset;
-        value - value;
+        W(other + offset);
+        W(offset + other);
+        W(other - offset);
+        { other - other } -> convertible_to<iota_difference_t<W>>;
     };
 
 template<typename W, typename Bound>
-concept iota_bounded = copy_constructible<Bound> &&
-    requires(const W& value, const Bound& bound) {
-        static_cast<bool>(value == bound);
-        static_cast<bool>(value < bound);
-        static_cast<size_t>(bound - value);
-    };
+concept iota_bounded = semiregular<Bound> &&
+    iota_weakly_equality_comparable_with<W, Bound>;
 
 template<typename W, typename Bound>
-constexpr size_t iota_distance(W first, Bound last) {
-    if constexpr (integral<W> && integral<Bound>) {
+constexpr auto iota_distance(W first, Bound last) {
+    if constexpr (iota_integer_like<W> && iota_integer_like<Bound>) {
         using common = common_type_t<W, Bound>;
         using unsigned_common = make_unsigned_t<common>;
-        const unsigned_common delta =
+        return static_cast<unsigned_common>(
             static_cast<unsigned_common>(last) -
-            static_cast<unsigned_common>(first);
-        if constexpr (sizeof(unsigned_common) > sizeof(size_t)) {
-            const unsigned_common maximum =
-                static_cast<unsigned_common>(static_cast<size_t>(-1));
-            if (delta > maximum) return static_cast<size_t>(-1);
-        }
-        return static_cast<size_t>(delta);
+            static_cast<unsigned_common>(first));
     } else {
-        return static_cast<size_t>(last - first);
+        using difference = iter_difference_t<W>;
+        using unsigned_difference = make_unsigned_t<difference>;
+        return static_cast<unsigned_difference>(last - first);
     }
 }
 
@@ -1572,29 +1604,39 @@ template<typename W, typename Bound = unreachable_sentinel_t>
              (same_as<Bound, unreachable_sentinel_t> ||
               detail::iota_bounded<W, Bound>)
 class iota_view : public view_interface<iota_view<W, Bound>> {
-    W value_;
-    Bound bound_;
+    W value_ = W();
+    Bound bound_ = Bound();
 
-    struct iterator {
-        using iterator_category = conditional_t<
-            detail::iota_random_access<W>, random_access_iterator_tag,
+    struct iterator : detail::iota_iterator_category_base<
+        incrementable<W> && integral<detail::iota_difference_t<W>>> {
+        using difference_type = detail::iota_difference_t<W>;
+        using iterator_concept = conditional_t<
+            detail::iota_advanceable<W>, random_access_iterator_tag,
             conditional_t<detail::iota_decrementable<W>,
                           bidirectional_iterator_tag,
-                          forward_iterator_tag>>;
-        using iterator_concept = iterator_category;
+                          conditional_t<incrementable<W>,
+                                        forward_iterator_tag,
+                                        input_iterator_tag>>>;
         using value_type = W;
-        using difference_type = ptrdiff_t;
-        using pointer = const W*;
+        using pointer = void;
         using reference = W;
 
-        W value_{};
+        W value_ = W();
 
         constexpr iterator() = default;
         constexpr explicit iterator(W value) : value_(std::move(value)) {}
 
-        constexpr W operator*() const { return value_; }
+        constexpr W operator*() const
+            noexcept(is_nothrow_copy_constructible_v<W>) { return value_; }
         constexpr iterator& operator++() { ++value_; return *this; }
-        constexpr iterator operator++(int) { auto copy = *this; ++*this; return copy; }
+        constexpr void operator++(int)
+            requires (!incrementable<W>) { ++*this; }
+        constexpr iterator operator++(int)
+            requires incrementable<W> {
+            auto copy = *this;
+            ++*this;
+            return copy;
+        }
 
         constexpr iterator& operator--()
             requires detail::iota_decrementable<W> {
@@ -1606,45 +1648,103 @@ class iota_view : public view_interface<iota_view<W, Bound>> {
         }
 
         constexpr iterator& operator+=(difference_type offset)
-            requires detail::iota_random_access<W> {
-            value_ += offset; return *this;
+            requires detail::iota_advanceable<W> {
+            if constexpr (detail::iota_integer_like<W> &&
+                          unsigned_integral<W>) {
+                if (offset >= difference_type(0)) {
+                    value_ += static_cast<W>(offset);
+                } else {
+                    using unsigned_difference =
+                        make_unsigned_t<difference_type>;
+                    const unsigned_difference magnitude =
+                        static_cast<unsigned_difference>(-(offset + 1)) + 1u;
+                    value_ -= static_cast<W>(magnitude);
+                }
+            } else {
+                value_ += offset;
+            }
+            return *this;
         }
         constexpr iterator& operator-=(difference_type offset)
-            requires detail::iota_random_access<W> {
-            value_ -= offset; return *this;
+            requires detail::iota_advanceable<W> {
+            if constexpr (detail::iota_integer_like<W> &&
+                          unsigned_integral<W>) {
+                if (offset >= difference_type(0)) {
+                    value_ -= static_cast<W>(offset);
+                } else {
+                    using unsigned_difference =
+                        make_unsigned_t<difference_type>;
+                    const unsigned_difference magnitude =
+                        static_cast<unsigned_difference>(-(offset + 1)) + 1u;
+                    value_ += static_cast<W>(magnitude);
+                }
+            } else {
+                value_ -= offset;
+            }
+            return *this;
         }
         constexpr W operator[](difference_type offset) const
-            requires detail::iota_random_access<W> {
-            return value_ + offset;
+            requires detail::iota_advanceable<W> {
+            return W(value_ + offset);
         }
 
-        friend constexpr bool operator==(iterator left, iterator right)
-        { return left.value_ == right.value_; }
-        friend constexpr bool operator!=(iterator left, iterator right)
-        { return !(left == right); }
+        friend constexpr bool operator==(const iterator& left,
+                                         const iterator& right)
+            requires equality_comparable<W> {
+            return left.value_ == right.value_;
+        }
 
-        friend constexpr bool operator<(iterator left, iterator right)
-            requires detail::iota_random_access<W> { return left.value_ < right.value_; }
-        friend constexpr bool operator>(iterator left, iterator right)
-            requires detail::iota_random_access<W> { return right < left; }
-        friend constexpr bool operator<=(iterator left, iterator right)
-            requires detail::iota_random_access<W> { return !(right < left); }
-        friend constexpr bool operator>=(iterator left, iterator right)
-            requires detail::iota_random_access<W> { return !(left < right); }
-        friend constexpr iterator operator+(iterator value, difference_type offset)
-            requires detail::iota_random_access<W> { value += offset; return value; }
-        friend constexpr iterator operator+(difference_type offset, iterator value)
-            requires detail::iota_random_access<W> { value += offset; return value; }
-        friend constexpr iterator operator-(iterator value, difference_type offset)
-            requires detail::iota_random_access<W> { value -= offset; return value; }
-        friend constexpr difference_type operator-(iterator left, iterator right)
-            requires detail::iota_random_access<W> {
-            if constexpr (integral<W>) {
-                if (right.value_ <= left.value_)
-                    return static_cast<difference_type>(
-                        detail::iota_distance(right.value_, left.value_));
-                return -static_cast<difference_type>(
-                    detail::iota_distance(left.value_, right.value_));
+        friend constexpr bool operator<(const iterator& left,
+                                        const iterator& right)
+            requires totally_ordered<W> {
+            return left.value_ < right.value_;
+        }
+        friend constexpr bool operator>(const iterator& left,
+                                        const iterator& right)
+            requires totally_ordered<W> { return right < left; }
+        friend constexpr bool operator<=(const iterator& left,
+                                         const iterator& right)
+            requires totally_ordered<W> { return !(right < left); }
+        friend constexpr bool operator>=(const iterator& left,
+                                         const iterator& right)
+            requires totally_ordered<W> { return !(left < right); }
+        friend constexpr auto operator<=>(const iterator& left,
+                                          const iterator& right)
+            requires totally_ordered<W> && three_way_comparable<W> {
+            return left.value_ <=> right.value_;
+        }
+        friend constexpr iterator operator+(iterator value,
+                                            difference_type offset)
+            requires detail::iota_advanceable<W> {
+            value += offset;
+            return value;
+        }
+        friend constexpr iterator operator+(difference_type offset,
+                                            iterator value)
+            requires detail::iota_advanceable<W> {
+            value += offset;
+            return value;
+        }
+        friend constexpr iterator operator-(iterator value,
+                                            difference_type offset)
+            requires detail::iota_advanceable<W> {
+            value -= offset;
+            return value;
+        }
+        friend constexpr difference_type operator-(const iterator& left,
+                                                   const iterator& right)
+            requires detail::iota_advanceable<W> {
+            if constexpr (detail::iota_integer_like<W>) {
+                if constexpr (signed_integral<W>) {
+                    return static_cast<difference_type>(left.value_) -
+                           static_cast<difference_type>(right.value_);
+                } else {
+                    return right.value_ > left.value_
+                        ? static_cast<difference_type>(-static_cast<difference_type>(
+                              right.value_ - left.value_))
+                        : static_cast<difference_type>(
+                              left.value_ - right.value_);
+                }
             } else {
                 return static_cast<difference_type>(left.value_ - right.value_);
             }
@@ -1653,53 +1753,82 @@ class iota_view : public view_interface<iota_view<W, Bound>> {
 
     struct bound_sentinel {
         Bound bound_{};
-        W start_{};
-        bool empty_ = false;
 
         constexpr bound_sentinel() = default;
-        constexpr bound_sentinel(Bound bound, W start, bool empty)
-            : bound_(std::move(bound)), start_(std::move(start)), empty_(empty) {}
+        constexpr explicit bound_sentinel(Bound bound)
+            : bound_(std::move(bound)) {}
 
-        friend constexpr bool operator==(iterator value, bound_sentinel bound)
-        { return value.value_ == (bound.empty_ ? bound.start_ : bound.bound_); }
-        friend constexpr bool operator!=(iterator value, bound_sentinel bound)
-        { return !(value == bound); }
-        friend constexpr bool operator==(bound_sentinel bound, iterator value)
-        { return value == bound; }
-        friend constexpr bool operator!=(bound_sentinel bound, iterator value)
-        { return !(value == bound); }
+        friend constexpr bool operator==(const iterator& value,
+                                         const bound_sentinel& bound) {
+            return value.value_ == bound.bound_;
+        }
+
+        friend constexpr bool operator==(const bound_sentinel& bound,
+                                         const iterator& value) {
+            return value == bound;
+        }
+
+        friend constexpr iter_difference_t<W> operator-(
+            const iterator& value, const bound_sentinel& bound)
+            requires sized_sentinel_for<Bound, W> {
+            return static_cast<iter_difference_t<W>>(
+                value.value_ - bound.bound_);
+        }
+
+        friend constexpr iter_difference_t<W> operator-(
+            const bound_sentinel& bound, const iterator& value)
+            requires sized_sentinel_for<Bound, W> {
+            return static_cast<iter_difference_t<W>>(
+                bound.bound_ - value.value_);
+        }
     };
 
+    using end_type = conditional_t<same_as<W, Bound>, iterator,
+        conditional_t<same_as<Bound, unreachable_sentinel_t>, Bound,
+                      bound_sentinel>>;
+
+    static constexpr Bound bound_from_end(end_type last) {
+        if constexpr (same_as<W, Bound>)
+            return std::move(last.value_);
+        else if constexpr (same_as<Bound, unreachable_sentinel_t>)
+            return std::move(last);
+        else
+            return std::move(last.bound_);
+    }
+
 public:
-    iota_view() = default;
+    iota_view() requires default_initializable<W> = default;
     constexpr explicit iota_view(W value)
-        requires same_as<Bound, unreachable_sentinel_t>
         : value_(std::move(value)), bound_() {}
-    constexpr iota_view(W value, Bound bound)
+    constexpr explicit iota_view(type_identity_t<W> value,
+                                 type_identity_t<Bound> bound)
         : value_(std::move(value)), bound_(std::move(bound)) {}
+
+    constexpr explicit iota_view(iterator first, end_type last)
+        : value_(std::move(first.value_)),
+          bound_(bound_from_end(std::move(last))) {}
 
     constexpr iterator begin() const { return iterator(value_); }
 
-    constexpr bool empty() const
-        requires (!same_as<Bound, unreachable_sentinel_t>) {
-        return !(value_ < bound_);
-    }
-    constexpr bool empty() const
-        requires same_as<Bound, unreachable_sentinel_t> { return false; }
+    constexpr bool empty() const { return value_ == bound_; }
 
     constexpr auto end() const {
         if constexpr (same_as<Bound, unreachable_sentinel_t>) {
             return unreachable_sentinel;
-        } else if constexpr (same_as<W, Bound>) {
-            return iterator(empty() ? value_ : bound_);
         } else {
-            return bound_sentinel(bound_, value_, empty());
+            return bound_sentinel(bound_);
         }
     }
 
-    constexpr size_t size() const
-        requires (!same_as<Bound, unreachable_sentinel_t>) {
-        if (empty()) return 0;
+    constexpr iterator end() const requires same_as<W, Bound> {
+        return iterator(bound_);
+    }
+
+    constexpr auto size() const
+        requires ((same_as<W, Bound> && detail::iota_advanceable<W>) ||
+                  (detail::iota_integer_like<W> &&
+                   detail::iota_integer_like<Bound>) ||
+                  sized_sentinel_for<Bound, W>) {
         return detail::iota_distance(value_, bound_);
     }
 };
@@ -1708,6 +1837,9 @@ template<typename W, typename Bound>
 inline constexpr bool enable_borrowed_range<iota_view<W, Bound>> = true;
 
 template<typename W, typename Bound>
+    requires (!detail::iota_integer_like<W> ||
+              !detail::iota_integer_like<Bound> ||
+              (signed_integral<W> == signed_integral<Bound>))
 iota_view(W, Bound) -> iota_view<W, Bound>;
 
 template<typename W>
