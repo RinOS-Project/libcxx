@@ -2640,6 +2640,10 @@ round(const time_point<Clock, Duration>& tp) {
 
 } /* namespace std */
 
+#if __cplusplus >= 202002L && !defined(RINCXX_MUTEX_CHRONO_BOOTSTRAP)
+#include "chrono_tzdb.h"
+#endif
+
 #undef RIN_CHRONO_CONSTEXPR14
 
 #endif /* __cplusplus */
