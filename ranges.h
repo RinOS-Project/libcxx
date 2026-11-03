@@ -5936,6 +5936,41 @@ template<typename V>
 inline constexpr bool enable_borrowed_range<enumerate_view<V>> =
     borrowed_range<V>;
 
+namespace detail {
+template<typename T>
+concept integer_like_with_usable_difference_type =
+    signed_integral<T> ||
+    (integral<T> && weakly_incrementable<T> &&
+     signed_integral<iter_difference_t<T>>);
+
+template<typename T, bool Signed = signed_integral<T>,
+         bool WiderIteratorDifference =
+             (sizeof(iter_difference_t<T>) > sizeof(T))>
+struct repeat_iterator_difference {
+    using type = T;
+};
+
+template<typename T>
+struct repeat_iterator_difference<T, false, true> {
+    using type = iter_difference_t<T>;
+};
+
+template<typename T>
+struct repeat_iterator_difference<T, false, false> {
+#if defined(__SIZEOF_INT128__)
+    using type = conditional_t<(sizeof(__int128) > sizeof(T)), __int128,
+                               make_signed_t<T>>;
+#else
+    using type = conditional_t<(sizeof(long long) > sizeof(T)), long long,
+                               make_signed_t<T>>;
+#endif
+};
+
+template<typename T>
+using repeat_iterator_difference_t =
+    typename repeat_iterator_difference<T>::type;
+} /* namespace detail */
+
 /* ???????????????????????????????????????????????????????????????
  * repeat_view - ???? bounded?unbounded ?????
  * ???????????????????????????????????????????????????????????????*/
@@ -5945,8 +5980,7 @@ template<typename T, typename Bound = unreachable_sentinel_t>
              same_as<T, remove_cv_t<T>> &&
              semiregular<Bound> &&
              (same_as<Bound, unreachable_sentinel_t> ||
-              (integral<Bound> &&
-               !same_as<remove_cv_t<Bound>, bool>))
+              detail::integer_like_with_usable_difference_type<Bound>)
 class repeat_view : public view_interface<repeat_view<T, Bound>> {
     static constexpr bool bounded =
         !same_as<Bound, unreachable_sentinel_t>;
@@ -5956,8 +5990,8 @@ class repeat_view : public view_interface<repeat_view<T, Bound>> {
         using iterator_category = random_access_iterator_tag;
         using iterator_concept = random_access_iterator_tag;
         using value_type = T;
-        using difference_type = conditional_t<
-            signed_integral<index_type>, index_type, ptrdiff_t>;
+        using difference_type =
+            detail::repeat_iterator_difference_t<index_type>;
         using pointer = const T*;
         using reference = const T&;
 
@@ -6047,7 +6081,7 @@ class repeat_view : public view_interface<repeat_view<T, Bound>> {
 
     };
 
-    T value_;
+    detail::reinitializable_box<T> value_;
     Bound bound_;
 
     static constexpr void validate_bound(Bound bound) {
@@ -6057,8 +6091,7 @@ class repeat_view : public view_interface<repeat_view<T, Bound>> {
     }
 
 public:
-    repeat_view() requires default_initializable<T>
-        : value_(), bound_() {}
+    repeat_view() requires default_initializable<T> = default;
 
     constexpr explicit repeat_view(const T& value, Bound bound = Bound())
         requires copy_constructible<T>
@@ -6082,15 +6115,16 @@ public:
         validate_bound(bound_);
     }
 
-    constexpr const T& value() const noexcept { return value_; }
+    constexpr const T& value() const noexcept { return value_.get(); }
 
     constexpr auto begin() const {
-        return iterator(&value_, 0);
+        return iterator(std::addressof(value_.get()), 0);
     }
 
     constexpr auto end() const
         requires (!same_as<Bound, unreachable_sentinel_t>) {
-        return iterator(&value_, static_cast<index_type>(bound_));
+        return iterator(std::addressof(value_.get()),
+                        static_cast<index_type>(bound_));
     }
 
     constexpr auto end() const
