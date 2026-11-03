@@ -903,20 +903,14 @@ public:
     constexpr ref_view(R& r) noexcept : range_(&r) {}
 
     constexpr R& base() const { return *range_; }
-    constexpr iterator_t<R> begin() { return ranges::begin(*range_); }
-    constexpr auto begin() const requires range<const R> {
-        return ranges::begin(std::as_const(*range_));
-    }
-    constexpr sentinel_t<R> end() { return ranges::end(*range_); }
-    constexpr auto end() const requires range<const R> {
-        return ranges::end(std::as_const(*range_));
-    }
+    constexpr iterator_t<R> begin() const { return ranges::begin(*range_); }
+    constexpr sentinel_t<R> end() const { return ranges::end(*range_); }
 
-    constexpr auto size() const requires sized_range<const R> {
-        return ranges::size(std::as_const(*range_));
+    constexpr auto size() const requires sized_range<R> {
+        return ranges::size(*range_);
     }
-    constexpr auto data() const requires contiguous_range<const R> {
-        return ranges::data(std::as_const(*range_));
+    constexpr auto data() const requires contiguous_range<R> {
+        return ranges::data(*range_);
     }
 };
 
