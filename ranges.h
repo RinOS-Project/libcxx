@@ -1284,7 +1284,8 @@ class join_view : public view_interface<join_view<V>> {
         using iterator_category = input_iterator_tag;
         using iterator_concept = input_iterator_tag;
         using value_type = range_value_t<InnerRange>;
-        using difference_type = range_difference_t<InnerRange>;
+        using difference_type = common_type_t<range_difference_t<Base>,
+                                              range_difference_t<InnerRange>>;
         using pointer = void;
         using reference = range_reference_t<InnerRange>;
 
@@ -1332,6 +1333,18 @@ class join_view : public view_interface<join_view<V>> {
             auto copy = *this;
             ++*this;
             return copy;
+        }
+
+        friend constexpr decltype(auto) iter_move(const iterator_impl& value)
+            noexcept(noexcept(ranges::iter_move(value.inner_))) {
+            return ranges::iter_move(value.inner_);
+        }
+
+        friend constexpr void iter_swap(const iterator_impl& left,
+                                        const iterator_impl& right)
+            noexcept(noexcept(ranges::iter_swap(left.inner_, right.inner_)))
+            requires indirectly_swappable<iterator_t<InnerRange>> {
+            ranges::iter_swap(left.inner_, right.inner_);
         }
 
         friend constexpr bool operator==(const iterator_impl& left,
