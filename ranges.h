@@ -7871,6 +7871,10 @@ struct as_const_fn {
         auto view = all(std::forward<R>(range));
         if constexpr (constant_range<decltype(view)>) {
             return view;
+        } else if constexpr (is_lvalue_reference_v<R> &&
+                             constant_range<const remove_reference_t<R>> &&
+                             !view<remove_cvref_t<R>>) {
+            return all(std::as_const(range));
         } else {
             return as_const_view<decltype(view)>(std::move(view));
         }
