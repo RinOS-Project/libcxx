@@ -5510,28 +5510,15 @@ class repeat_view : public view_interface<repeat_view<T, Bound>> {
 
         friend constexpr bool operator==(const iterator& left,
                                          const iterator& right) {
-            return left.value_ == right.value_ &&
-                   left.index_ == right.index_;
+            return left.index_ == right.index_;
         }
         friend constexpr bool operator!=(const iterator& left,
                                          const iterator& right) {
             return !(left == right);
         }
-        friend constexpr bool operator<(const iterator& left,
-                                        const iterator& right) {
-            return left.index_ < right.index_;
-        }
-        friend constexpr bool operator>(const iterator& left,
-                                        const iterator& right) {
-            return right < left;
-        }
-        friend constexpr bool operator<=(const iterator& left,
-                                         const iterator& right) {
-            return !(right < left);
-        }
-        friend constexpr bool operator>=(const iterator& left,
-                                         const iterator& right) {
-            return !(left < right);
+        friend constexpr auto operator<=>(const iterator& left,
+                                          const iterator& right) {
+            return left.index_ <=> right.index_;
         }
 
     };
