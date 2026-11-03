@@ -996,14 +996,16 @@ struct int_formatter {
             ++it;
         }
 
+        /* The locale option precedes the presentation type in std-format-spec. */
+        if (it != end && *it == 'L') {
+            localized_ = true;
+            ++it;
+        }
+
         /* 型指定子 */
         if (it != end && (*it == 'd' || *it == 'x' || *it == 'X' ||
                          *it == 'o' || *it == 'b' || *it == 'B')) {
             type_ = *it++;
-        }
-        if (it != end && *it == 'L') {
-            localized_ = true;
-            ++it;
         }
 
         return it;
@@ -1246,14 +1248,15 @@ struct float_formatter {
                 ++it;
             }
         }
+        /* The locale option precedes the presentation type in std-format-spec. */
+        if (it != end && *it == 'L') {
+            localized_ = true;
+            ++it;
+        }
         if (it != end && (*it == 'a' || *it == 'A' || *it == 'e' ||
                           *it == 'E' || *it == 'f' || *it == 'F' ||
                           *it == 'g' || *it == 'G')) {
             type_ = *it++;
-        }
-        if (it != end && *it == 'L') {
-            localized_ = true;
-            ++it;
         }
         return it;
     }
@@ -1866,26 +1869,25 @@ struct formatter<bool, char> {
         const auto begin = ctx.begin();
         const auto end = ctx.end();
         if (begin != end) {
-            const char type = *(end - 1) == 'L' && begin != end - 1
-                ? *(end - 2) : *(end - 1);
+            const char type = *(end - 1);
             if (type == 'b' || type == 'B' || type == 'd' || type == 'o' ||
                 type == 'x' || type == 'X') {
                 numeric_presentation_ = true;
                 return integer_formatter_.parse(ctx);
             }
-            if (*(end - 1) == 'L') {
-                format_parse_context localized_context(
-                    string_view(begin,
-                                static_cast<size_t>(end - begin - 1)));
-                if (string_formatter_.parse(localized_context) !=
-                    localized_context.end()) {
-                    return begin;
-                }
-                localized_ = true;
-                return end;
-            }
         }
-        return string_formatter_.parse(ctx);
+        auto parsed = string_formatter_.parse(ctx);
+        if (parsed != end && *parsed == 'L') {
+            /* L precedes the optional `s` type. Reject the non-standard `sL`. */
+            if (parsed != begin && *(parsed - 1) == 's') return begin;
+            ++parsed;
+            if (parsed != end && *parsed == 's') ++parsed;
+            if (parsed == end) {
+                localized_ = true;
+            }
+            return parsed;
+        }
+        return parsed;
     }
 
     template<typename FormatContext>
@@ -2512,26 +2514,25 @@ struct formatter<bool, wchar_t> {
         const auto begin = ctx.begin();
         const auto end = ctx.end();
         if (begin != end) {
-            const wchar_t type = *(end - 1) == L'L' && begin != end - 1
-                ? *(end - 2) : *(end - 1);
+            const wchar_t type = *(end - 1);
             if (type == L'b' || type == L'B' || type == L'd' || type == L'o' ||
                 type == L'x' || type == L'X') {
                 numeric_presentation_ = true;
                 return integer_formatter_.parse(ctx);
             }
-            if (*(end - 1) == L'L') {
-                wformat_parse_context localized_context(
-                    wstring_view(begin,
-                                 static_cast<size_t>(end - begin - 1)));
-                if (string_formatter_.parse(localized_context) !=
-                    localized_context.end()) {
-                    return begin;
-                }
-                localized_ = true;
-                return end;
-            }
         }
-        return string_formatter_.parse(ctx);
+        auto parsed = string_formatter_.parse(ctx);
+        if (parsed != end && *parsed == L'L') {
+            /* L precedes the optional `s` type. Reject the non-standard `sL`. */
+            if (parsed != begin && *(parsed - 1) == L's') return begin;
+            ++parsed;
+            if (parsed != end && *parsed == L's') ++parsed;
+            if (parsed == end) {
+                localized_ = true;
+            }
+            return parsed;
+        }
+        return parsed;
     }
 
     template<typename FormatContext>
