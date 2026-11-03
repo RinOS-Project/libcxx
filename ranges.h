@@ -7869,7 +7869,11 @@ struct as_const_fn {
         requires as_const_viewable<R>
     constexpr auto operator()(R&& range) const {
         auto view = all(std::forward<R>(range));
-        return as_const_view<decltype(view)>(std::move(view));
+        if constexpr (constant_range<decltype(view)>) {
+            return view;
+        } else {
+            return as_const_view<decltype(view)>(std::move(view));
+        }
     }
 };
 inline constexpr as_const_fn as_const{};
