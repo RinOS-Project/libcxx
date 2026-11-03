@@ -413,6 +413,20 @@ public:
     constexpr const I& base() const& noexcept { return current_; }
     constexpr I base() && { return std::move(current_); }
 
+    template<typename CI>
+        requires (!is_basic_const_iterator<remove_cvref_t<CI>>::value) &&
+                 constant_iterator<CI> && convertible_to<const I&, CI>
+    constexpr operator CI() const& {
+        return current_;
+    }
+
+    template<typename CI>
+        requires (!is_basic_const_iterator<remove_cvref_t<CI>>::value) &&
+                 constant_iterator<CI> && convertible_to<I, CI>
+    constexpr operator CI() && {
+        return std::move(current_);
+    }
+
     constexpr reference operator*() const {
         return static_cast<reference>(*current_);
     }
@@ -1646,32 +1660,129 @@ struct is_empty_view<empty_view<T>> : true_type {
  * single_view - ???????
  * ???????????????????????????????????????????????????????????????*/
 
+namespace detail {
+template<typename T>
+class reinitializable_box {
+    union slot {
+        unsigned char empty;
+        T value;
+
+        constexpr slot() noexcept : empty(0u) {}
+        constexpr ~slot() {}
+    } slots_[2];
+    size_t active_ = 0u;
+
+    template<typename... Args>
+    constexpr void construct(size_t index, Args&&... args)
+        noexcept(is_nothrow_constructible_v<T, Args&&...>) {
+        std::construct_at(std::addressof(slots_[index].value),
+                          std::forward<Args>(args)...);
+    }
+
+    constexpr T* active_value() noexcept {
+        return std::addressof(slots_[active_].value);
+    }
+
+    constexpr const T* active_value() const noexcept {
+        return std::addressof(slots_[active_].value);
+    }
+
+public:
+    constexpr reinitializable_box() requires default_initializable<T> {
+        construct(0u);
+    }
+
+    constexpr explicit reinitializable_box(const T& value)
+        requires copy_constructible<T> {
+        construct(0u, value);
+    }
+
+    constexpr explicit reinitializable_box(T&& value) {
+        construct(0u, std::move(value));
+    }
+
+    template<typename... Args>
+        requires constructible_from<T, Args...>
+    constexpr explicit reinitializable_box(in_place_t, Args&&... args) {
+        construct(0u, std::forward<Args>(args)...);
+    }
+
+    constexpr reinitializable_box(const reinitializable_box& other)
+        requires copy_constructible<T> {
+        construct(0u, other.get());
+    }
+
+    reinitializable_box(const reinitializable_box&)
+        requires (!copy_constructible<T>) = delete;
+
+    constexpr reinitializable_box(reinitializable_box&& other)
+        noexcept(is_nothrow_move_constructible_v<T>) {
+        construct(0u, std::move(other.get()));
+    }
+
+    constexpr ~reinitializable_box() {
+        std::destroy_at(active_value());
+    }
+
+    constexpr reinitializable_box& operator=(
+        const reinitializable_box& other)
+        noexcept(is_nothrow_copy_constructible_v<T>)
+        requires copy_constructible<T> {
+        if (this == std::addressof(other)) return *this;
+        const size_t replacement = 1u - active_;
+        construct(replacement, other.get());
+        std::destroy_at(active_value());
+        active_ = replacement;
+        return *this;
+    }
+
+    constexpr reinitializable_box& operator=(const reinitializable_box&)
+        requires (!copy_constructible<T>) = delete;
+
+    constexpr reinitializable_box& operator=(reinitializable_box&& other)
+        noexcept(is_nothrow_move_constructible_v<T>) {
+        if (this == std::addressof(other)) return *this;
+        const size_t replacement = 1u - active_;
+        construct(replacement, std::move(other.get()));
+        std::destroy_at(active_value());
+        active_ = replacement;
+        return *this;
+    }
+
+    constexpr T& get() noexcept { return *active_value(); }
+    constexpr const T& get() const noexcept { return *active_value(); }
+};
+} /* namespace detail */
+
 template<typename T>
     requires move_constructible<T> && is_object_v<T> &&
              same_as<T, remove_cv_t<T>>
 class single_view : public view_interface<single_view<T>> {
-    T value_;
+    detail::reinitializable_box<T> value_;
 
 public:
     single_view() requires default_initializable<T> = default;
     constexpr explicit single_view(const T& value)
         requires copy_constructible<T>
         : value_(value) {}
-    constexpr explicit single_view(T&& value) : value_(std::move(value)) {}
+    constexpr explicit single_view(T&& value)
+        : value_(std::move(value)) {}
 
     template<typename... Args>
         requires constructible_from<T, Args...>
     constexpr explicit single_view(in_place_t, Args&&... args)
-        : value_(std::forward<Args>(args)...) {}
+        : value_(in_place, std::forward<Args>(args)...) {}
 
-    constexpr T* begin() noexcept { return &value_; }
-    constexpr const T* begin() const noexcept { return &value_; }
-    constexpr T* end() noexcept { return &value_ + 1; }
-    constexpr const T* end() const noexcept { return &value_ + 1; }
+    constexpr T* begin() noexcept { return std::addressof(value_.get()); }
+    constexpr const T* begin() const noexcept {
+        return std::addressof(value_.get());
+    }
+    constexpr T* end() noexcept { return begin() + 1; }
+    constexpr const T* end() const noexcept { return begin() + 1; }
     static constexpr bool empty() noexcept { return false; }
     static constexpr size_t size() noexcept { return 1; }
-    constexpr T* data() noexcept { return &value_; }
-    constexpr const T* data() const noexcept { return &value_; }
+    constexpr T* data() noexcept { return begin(); }
+    constexpr const T* data() const noexcept { return begin(); }
 };
 
 template<typename T>
