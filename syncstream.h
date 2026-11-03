@@ -19,13 +19,62 @@ namespace std {
 
 namespace __syncstream_detail {
 
-/* A single emission gate makes writes from syncbuf objects that wrap the
- * same streambuf indivisible. Serializing unrelated streambufs as well is a
- * conservative fallback that avoids a global registry with its own lifetime
- * and allocation failure rules. */
-inline recursive_mutex& emission_mutex() {
-    static recursive_mutex value;
+/* Syncbufs for one wrapped buffer share a gate. The registry lock is held
+ * only while looking up or releasing that gate; emitting to unrelated
+ * buffers never serializes their writes. */
+struct emission_gate {
+    const void* wrapped;
+    size_t references;
+    recursive_mutex mutex;
+    emission_gate* next;
+
+    emission_gate(const void* buffer, emission_gate* next_gate)
+        : wrapped(buffer), references(1u), next(next_gate) {}
+};
+
+inline emission_gate*& emission_gate_list() {
+    static emission_gate* value = nullptr;
     return value;
+}
+
+inline mutex& emission_gate_registry_mutex() {
+    static mutex value;
+    return value;
+}
+
+inline emission_gate* acquire_emission_gate(const void* wrapped) {
+    if (wrapped == nullptr) return nullptr;
+    lock_guard<mutex> lock(emission_gate_registry_mutex());
+    emission_gate*& gates = emission_gate_list();
+    for (emission_gate* gate = gates; gate != nullptr; gate = gate->next) {
+        if (gate->wrapped == wrapped) {
+            ++gate->references;
+            return gate;
+        }
+    }
+    emission_gate* gate = new emission_gate(wrapped, gates);
+    gates = gate;
+    return gate;
+}
+
+inline void release_emission_gate(emission_gate* gate) {
+    if (gate == nullptr) return;
+    bool destroy = false;
+    {
+        lock_guard<mutex> lock(emission_gate_registry_mutex());
+        if (gate->references > 1u) {
+            --gate->references;
+        } else {
+            emission_gate** link = &emission_gate_list();
+            while (*link != nullptr && *link != gate)
+                link = &(*link)->next;
+            if (*link == gate) {
+                *link = gate->next;
+                destroy = true;
+            }
+        }
+    }
+    if (destroy) delete gate;
 }
 
 template<typename CharT, typename Traits>
@@ -51,6 +100,8 @@ class basic_syncbuf : public basic_streambuf<CharT, Traits>,
 public:
     using char_type = CharT;
     using traits_type = Traits;
+    using pos_type = typename traits_type::pos_type;
+    using off_type = typename traits_type::off_type;
     using allocator_type = Allocator;
     using streambuf_type = basic_streambuf<CharT, Traits>;
     using ostream_type = basic_ostream<CharT, Traits>;
@@ -61,6 +112,8 @@ private:
     streambuf_type* wrapped_;
     string_type pending_;
     bool emit_on_sync_;
+    bool sync_pending_;
+    __syncstream_detail::emission_gate* emission_gate_;
 
 protected:
     int_type overflow(int_type value = traits_type::eof()) override {
@@ -77,14 +130,24 @@ protected:
     }
 
     int sync() override {
+        sync_pending_ = true;
         if (!emit_on_sync_) return 0;
         return emit() ? 0 : -1;
     }
 
 public:
-    explicit basic_syncbuf(streambuf_type* wrapped,
-                           const allocator_type& allocator = allocator_type())
-        : wrapped_(wrapped), pending_(allocator), emit_on_sync_(false) {}
+    basic_syncbuf()
+        : basic_syncbuf(static_cast<streambuf_type*>(nullptr)) {}
+
+    explicit basic_syncbuf(streambuf_type* wrapped)
+        : basic_syncbuf(wrapped, allocator_type()) {}
+
+    basic_syncbuf(streambuf_type* wrapped,
+                  const allocator_type& allocator)
+        : wrapped_(wrapped), pending_(allocator), emit_on_sync_(false),
+          sync_pending_(false),
+          emission_gate_(
+              __syncstream_detail::acquire_emission_gate(wrapped)) {}
 
     explicit basic_syncbuf(ostream_type& wrapped,
                            const allocator_type& allocator = allocator_type())
@@ -96,33 +159,84 @@ public:
     basic_syncbuf(basic_syncbuf&& other)
         : streambuf_type(), wrapped_(other.wrapped_),
           pending_(std::move(other.pending_)),
-          emit_on_sync_(other.emit_on_sync_) {
+          emit_on_sync_(other.emit_on_sync_),
+          sync_pending_(other.sync_pending_),
+          emission_gate_(other.emission_gate_) {
+        other.pending_.clear();
         other.wrapped_ = nullptr;
         other.emit_on_sync_ = false;
+        other.sync_pending_ = false;
+        other.emission_gate_ = nullptr;
     }
 
     basic_syncbuf(basic_syncbuf&& other, const allocator_type& allocator)
         : streambuf_type(), wrapped_(other.wrapped_),
           pending_(std::move(other.pending_), allocator),
-          emit_on_sync_(other.emit_on_sync_) {
+          emit_on_sync_(other.emit_on_sync_),
+          sync_pending_(other.sync_pending_),
+          emission_gate_(other.emission_gate_) {
+        other.pending_.clear();
         other.wrapped_ = nullptr;
         other.emit_on_sync_ = false;
+        other.sync_pending_ = false;
+        other.emission_gate_ = nullptr;
     }
 
     basic_syncbuf& operator=(basic_syncbuf&& other) {
         if (this == &other) return *this;
         (void)emit();
-        wrapped_ = other.wrapped_;
+        streambuf_type* wrapped = other.wrapped_;
+        const bool emit_on_sync = other.emit_on_sync_;
+        const bool sync_pending = other.sync_pending_;
+        __syncstream_detail::emission_gate* gate = other.emission_gate_;
         pending_ = std::move(other.pending_);
-        emit_on_sync_ = other.emit_on_sync_;
+        __syncstream_detail::release_emission_gate(emission_gate_);
+        wrapped_ = wrapped;
+        emit_on_sync_ = emit_on_sync;
+        sync_pending_ = sync_pending;
+        emission_gate_ = gate;
+        other.pending_.clear();
         other.wrapped_ = nullptr;
         other.emit_on_sync_ = false;
+        other.sync_pending_ = false;
+        other.emission_gate_ = nullptr;
         return *this;
     }
 
-    ~basic_syncbuf() override { (void)emit(); }
+    ~basic_syncbuf() override {
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+        try {
+#endif
+        (void)emit();
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+        } catch (...) {
+        }
+#endif
+        __syncstream_detail::release_emission_gate(emission_gate_);
+    }
+
+    void swap(basic_syncbuf& other) {
+        if (this == &other) return;
+        pending_.swap(other.pending_);
+        streambuf_type* wrapped = wrapped_;
+        wrapped_ = other.wrapped_;
+        other.wrapped_ = wrapped;
+        const bool emit_on_sync = emit_on_sync_;
+        emit_on_sync_ = other.emit_on_sync_;
+        other.emit_on_sync_ = emit_on_sync;
+        const bool sync_pending = sync_pending_;
+        sync_pending_ = other.sync_pending_;
+        other.sync_pending_ = sync_pending;
+        __syncstream_detail::emission_gate* gate = emission_gate_;
+        emission_gate_ = other.emission_gate_;
+        other.emission_gate_ = gate;
+    }
 
     streambuf_type* get_wrapped() const noexcept { return wrapped_; }
+
+    allocator_type get_allocator() const noexcept {
+        return pending_.get_allocator();
+    }
 
     bool get_emit_on_sync() const noexcept { return emit_on_sync_; }
 
@@ -131,9 +245,16 @@ public:
     bool emit() { return emit_controlled(); }
 
     bool emit_controlled() override {
-        if (wrapped_ == nullptr) return pending_.empty();
+        if (wrapped_ == nullptr) {
+            sync_pending_ = false;
+            return false;
+        }
+        if (emission_gate_ == nullptr) return false;
         lock_guard<recursive_mutex> lock(
-            __syncstream_detail::emission_mutex());
+            emission_gate_->mutex);
+        const bool flush_wrapped = sync_pending_;
+        sync_pending_ = false;
+        bool success = true;
         if (!pending_.empty()) {
             const streamsize requested =
                 static_cast<streamsize>(pending_.size());
@@ -142,10 +263,10 @@ public:
             if (written > requested) written = requested;
             if (written != 0)
                 pending_.erase(0u, static_cast<size_t>(written));
-            if (written != requested) return false;
+            success = written == requested;
         }
-        if (emit_on_sync_ && wrapped_->pubsync() == -1) return false;
-        return true;
+        if (flush_wrapped && wrapped_->pubsync() == -1) success = false;
+        return success;
     }
 
     void set_emit_on_sync_controlled(bool value) override {
@@ -153,12 +274,20 @@ public:
     }
 };
 
+template<typename CharT, typename Traits, typename Allocator>
+void swap(basic_syncbuf<CharT, Traits, Allocator>& left,
+          basic_syncbuf<CharT, Traits, Allocator>& right) {
+    left.swap(right);
+}
+
 template<typename CharT, typename Traits = char_traits<CharT>,
          typename Allocator = allocator<CharT>>
 class basic_osyncstream : public basic_ostream<CharT, Traits> {
 public:
     using char_type = CharT;
     using traits_type = Traits;
+    using pos_type = typename traits_type::pos_type;
+    using off_type = typename traits_type::off_type;
     using allocator_type = Allocator;
     using ostream_type = basic_ostream<CharT, Traits>;
     using streambuf_type = basic_streambuf<CharT, Traits>;
@@ -168,9 +297,12 @@ private:
     syncbuf_type buffer_;
 
 public:
-    explicit basic_osyncstream(streambuf_type* wrapped,
-                               const allocator_type& allocator = allocator_type())
+    basic_osyncstream(streambuf_type* wrapped,
+                      const allocator_type& allocator)
         : ostream_type(&buffer_), buffer_(wrapped, allocator) {}
+
+    explicit basic_osyncstream(streambuf_type* wrapped)
+        : basic_osyncstream(wrapped, allocator_type()) {}
 
     explicit basic_osyncstream(ostream_type& wrapped,
                                const allocator_type& allocator = allocator_type())
@@ -179,7 +311,7 @@ public:
     basic_osyncstream(const basic_osyncstream&) = delete;
     basic_osyncstream& operator=(const basic_osyncstream&) = delete;
 
-    basic_osyncstream(basic_osyncstream&& other)
+    basic_osyncstream(basic_osyncstream&& other) noexcept
         : ostream_type(std::move(other)), buffer_(std::move(other.buffer_)) {
         this->set_rdbuf(&buffer_);
     }
@@ -200,10 +332,21 @@ public:
         return buffer_.get_wrapped();
     }
 
-    bool emit() {
-        const bool result = buffer_.emit();
-        if (!result) this->setstate(ios_base::badbit);
-        return result;
+    void emit() {
+        typename ostream_type::sentry sentry(*this);
+        if (!sentry) return;
+        bool success = false;
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+        try {
+#endif
+            success = buffer_.emit();
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+        } catch (...) {
+            if (this->__setstate_from_callback(ios_base::badbit)) throw;
+            return;
+        }
+#endif
+        if (!success) this->setstate(ios_base::badbit);
     }
 
     bool get_emit_on_sync() const noexcept {

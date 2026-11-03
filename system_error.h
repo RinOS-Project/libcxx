@@ -6,6 +6,12 @@
 #ifndef RINCXX_SYSTEM_ERROR_H
 #define RINCXX_SYSTEM_ERROR_H
 
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+namespace std {
+[[noreturn]] void __throw_system_error(int error, const char* operation);
+}
+#endif
+
 #include "rincxx.h"
 #include "cerrno.h"
 #include "cstddef.h"
@@ -740,6 +746,13 @@ public:
 
     const error_code& code() const noexcept { return code_; }
 };
+
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+[[noreturn]] inline void __throw_system_error(int error,
+                                              const char* operation) {
+    throw system_error(error, system_category(), operation);
+}
+#endif
 
 /* ═══════════════════════════════════════════════════════════════
  * make_error_code / make_error_condition

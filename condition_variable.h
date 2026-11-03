@@ -357,7 +357,7 @@ inline bool __condition_variable_registry_signal(
 [[noreturn]] inline void condition_variable_operation_failed(
     int error, const char* operation) {
 #if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
-    throw system_error(error, system_category(), operation);
+    __throw_system_error(error, operation);
 #else
     (void)error;
     (void)operation;

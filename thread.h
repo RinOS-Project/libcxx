@@ -45,7 +45,7 @@ int try_start_thread(thread& output, Callable&& function, Args&&... args);
     /* POSIX pthread APIs return errno values directly.  The standard thread
      * operations expose those failures through system_category(), rather
      * than recategorizing a platform result as a generic condition. */
-    throw system_error(error, system_category(), operation);
+    __throw_system_error(error, operation);
 #else
     (void)error;
     (void)operation;

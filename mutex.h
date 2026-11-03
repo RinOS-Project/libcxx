@@ -34,7 +34,7 @@ namespace detail {
 [[noreturn]] inline void mutex_operation_failed(int error,
                                                  const char* operation) {
 #if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
-    throw system_error(error, system_category(), operation);
+    __throw_system_error(error, operation);
 #else
     (void)error;
     (void)operation;
