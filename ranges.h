@@ -5664,7 +5664,8 @@ class repeat_view : public view_interface<repeat_view<T, Bound>> {
         using iterator_category = random_access_iterator_tag;
         using iterator_concept = random_access_iterator_tag;
         using value_type = T;
-        using difference_type = ptrdiff_t;
+        using difference_type = conditional_t<
+            signed_integral<index_type>, index_type, ptrdiff_t>;
         using pointer = const T*;
         using reference = const T&;
 
