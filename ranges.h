@@ -731,7 +731,6 @@ inline constexpr bool enable_view =
 template<typename T>
 concept view = range<T> && movable<T> && enable_view<T>;
 
-#if __cplusplus > 202002L
 namespace detail {
 template<typename T>
 struct is_initializer_list : false_type {};
@@ -739,7 +738,6 @@ struct is_initializer_list : false_type {};
 template<typename T>
 struct is_initializer_list<initializer_list<T>> : true_type {};
 } /* namespace detail */
-#endif
 
 template<typename T>
 concept viewable_range = range<T> &&
@@ -924,11 +922,13 @@ inline constexpr bool enable_borrowed_range<ref_view<R>> = true;
  * ???????????????????????????????????????????????????????????????*/
 
 template<typename R>
+    requires range<R> && movable<R> &&
+             !detail::is_initializer_list<remove_cv_t<R>>::value
 class owning_view : public view_interface<owning_view<R>> {
     R range_;
 
 public:
-    owning_view() = default;
+    owning_view() requires default_initializable<R> = default;
     constexpr owning_view(R&& r) : range_(std::move(r)) {}
 
     owning_view(const owning_view&) = delete;
@@ -939,6 +939,7 @@ public:
     constexpr R& base() & noexcept { return range_; }
     constexpr const R& base() const& noexcept { return range_; }
     constexpr R&& base() && noexcept { return std::move(range_); }
+    constexpr const R&& base() const&& noexcept { return std::move(range_); }
 
     constexpr iterator_t<R> begin() { return ranges::begin(range_); }
     constexpr sentinel_t<R> end() { return ranges::end(range_); }
