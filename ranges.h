@@ -3251,8 +3251,7 @@ public:
 };
 
 template<typename R>
-    requires viewable_range<R> && input_range<R>
-as_const_view(R&&) -> as_const_view<owning_view<R>>;
+as_const_view(R&&) -> as_const_view<views::all_t<R>>;
 
 template<typename V>
 inline constexpr bool enable_borrowed_range<as_const_view<V>> =
