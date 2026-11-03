@@ -251,6 +251,9 @@ template<typename R>
 using range_reference_t = iter_reference_t<iterator_t<R>>;
 
 template<typename R>
+using range_rvalue_reference_t = iter_rvalue_reference_t<iterator_t<R>>;
+
+template<typename R>
 using range_difference_t = iter_difference_t<iterator_t<R>>;
 
 /* ???????????????????????????????????????????????????????????????
@@ -310,6 +313,7 @@ concept sized_range = range<T> &&
      detail::has_sized_sentinel<T>::value ||
      is_array<remove_reference_t<T>>::value);
 
+
 /* borrowed_range - ????????????????? */
 template<typename T>
 inline constexpr bool enable_borrowed_range = false;
@@ -342,7 +346,7 @@ using borrowed_iterator_t = conditional_t<borrowed_range<R>, iterator_t<R>,
  * begin / end ??????????????
  * ???????????????????????????????????????????????????????????????*/
 
-namespace __cpo {
+inline namespace __cpo {
 
 struct begin_fn {
     template<typename R,
@@ -678,7 +682,7 @@ struct ssize_fn {
     }
 };
 
-} /* namespace __cpo */
+} /* inline namespace __cpo */
 
 inline constexpr __cpo::begin_fn begin{};
 inline constexpr __cpo::end_fn end{};
@@ -693,6 +697,26 @@ inline constexpr __cpo::crbegin_fn crbegin{};
 inline constexpr __cpo::crend_fn crend{};
 inline constexpr __cpo::cdata_fn cdata{};
 inline constexpr __cpo::ssize_fn ssize{};
+
+template<input_or_output_iterator I, sentinel_for<I> S>
+constexpr iter_difference_t<I> distance(I first, S last) {
+    if constexpr (sized_sentinel_for<S, I>) {
+        return static_cast<iter_difference_t<I>>(last - first);
+    } else {
+        iter_difference_t<I> count = 0;
+        for (; first != last; ++first) ++count;
+        return count;
+    }
+}
+
+template<input_range R>
+constexpr range_difference_t<R> distance(R&& range) {
+    if constexpr (sized_range<R>) {
+        return static_cast<range_difference_t<R>>(ranges::size(range));
+    } else {
+        return ranges::distance(ranges::begin(range), ranges::end(range));
+    }
+}
 
 /* ???????????????????????????????????????????????????????????????
  * view_base - ??????????
@@ -3084,7 +3108,11 @@ public:
         return copy;
     }
 
-    constexpr auto operator->() const { return current_; }
+    constexpr const auto* operator->() const
+        requires is_lvalue_reference_v<iter_reference_t<I>> &&
+                 same_as<remove_cvref_t<iter_reference_t<I>>, value_type> {
+        return std::addressof(std::as_const(*current_));
+    }
 
     friend constexpr bool operator==(const basic_const_iterator& left,
                                      const basic_const_iterator& right) {
@@ -3251,6 +3279,11 @@ class zip_view : public view_interface<zip_view<Views...>> {
     template<bool Const>
     class iterator : public zip_iterator_category_base<
                          zip_all_forward<Const, Views...>> {
+    public:
+        using difference_type = common_type_t<
+            range_difference_t<zip_maybe_const_t<Const, Views>>...>;
+
+    private:
         using iterator_tuple = tuple<
             iterator_t<zip_maybe_const_t<Const, Views>>...>;
 
@@ -3367,8 +3400,6 @@ class zip_view : public view_interface<zip_view<Views...>> {
                 bidirectional_iterator_tag,
                 conditional_t<zip_all_forward<Const, Views...>,
                               forward_iterator_tag, input_iterator_tag>>>;
-        using difference_type = common_type_t<
-            range_difference_t<zip_maybe_const_t<Const, Views>>...>;
         using value_type = tuple<
             range_value_t<zip_maybe_const_t<Const, Views>>...>;
         using reference = tuple<
@@ -3708,9 +3739,6 @@ public:
         return size_impl(make_index_sequence<sizeof...(Views)>{});
     }
 };
-
-template<typename... Rs>
-zip_view(Rs&&...) -> zip_view<views::all_t<Rs>...>;
 
 template<typename... Views>
 inline constexpr bool enable_borrowed_range<zip_view<Views...>> =
@@ -4191,8 +4219,6 @@ inline constexpr bool enable_borrowed_range<
 
 
 
-
-
 /* ???????????????????????????????????????????????????????????????
  * pairwise_view - ????????????
  * ???????????????????????????????????????????????????????????????*/
@@ -4589,6 +4615,12 @@ class cartesian_product_view
             iterator_t<first_base>, iterator_t<cartesian_maybe_const_t<Const, Vs>>...>;
         using sentinel_tuple = tuple<
             sentinel_t<first_base>, sentinel_t<cartesian_maybe_const_t<Const, Vs>>...>;
+    public:
+        using difference_type = common_type_t<
+            iter_difference_t<iterator_t<first_base>>,
+            iter_difference_t<iterator_t<cartesian_maybe_const_t<Const, Vs>>>...>;
+
+    private:
 
         template<size_t Index>
         using base_type = tuple_element_t<Index, base_types>;
@@ -4796,9 +4828,6 @@ class cartesian_product_view
                                  range_value_t<cartesian_maybe_const_t<Const, Vs>>...>;
         using reference = tuple<range_reference_t<first_base>,
                                 range_reference_t<cartesian_maybe_const_t<Const, Vs>>...>;
-        using difference_type = common_type_t<
-            iter_difference_t<iterator_t<first_base>>,
-            iter_difference_t<iterator_t<cartesian_maybe_const_t<Const, Vs>>>...>;
         using pointer = void;
 
         constexpr iterator() = default;
@@ -5069,10 +5098,6 @@ public:
     }
 };
 
-template<typename First, typename... Vs>
-cartesian_product_view(First&&, Vs&&...)
-    -> cartesian_product_view<views::all_t<First>, views::all_t<Vs>...>;
-
 /* ???????????????????????????????????????????????????????????????
  * enumerate_view - index ????????
  * ???????????????????????????????????????????????????????????????*/
@@ -5340,9 +5365,6 @@ public:
     constexpr V base() const& requires copy_constructible<V> { return base_; }
     constexpr V base() && { return std::move(base_); }
 };
-
-template<typename R>
-enumerate_view(R&&) -> enumerate_view<views::all_t<R>>;
 
 template<typename V>
 inline constexpr bool enable_borrowed_range<enumerate_view<V>> =
@@ -5996,8 +6018,8 @@ class slide_view : public view_interface<slide_view<V>> {
 
     V base_;
     difference_type count_{};
-    slide_non_propagating_cache<base_iterator> first_cache_;
-    slide_non_propagating_cache<base_iterator> last_cache_;
+    non_propagating_cache<base_iterator> first_cache_;
+    non_propagating_cache<base_iterator> last_cache_;
 
     struct sentinel_impl;
 
@@ -6298,10 +6320,6 @@ public:
         return result > 0 ? static_cast<size_type>(result) : size_type(0);
     }
 };
-
-template<typename R>
-slide_view(R&&, range_difference_t<views::all_t<R>>)
-    -> slide_view<views::all_t<R>>;
 
 template<typename V>
 inline constexpr bool enable_borrowed_range<slide_view<V>> =
@@ -6655,10 +6673,6 @@ public:
     }
 };
 
-template<typename R>
-stride_view(R&&, range_difference_t<views::all_t<R>>)
-    -> stride_view<views::all_t<R>>;
-
 template<typename V>
 inline constexpr bool enable_borrowed_range<stride_view<V>> =
     borrowed_range<V>;
@@ -6873,8 +6887,6 @@ public:
     }
 };
 
-template<typename R, typename Pred>
-chunk_by_view(R&&, Pred) -> chunk_by_view<views::all_t<R>, Pred>;
 #endif
 
 /* ???????????????????????????????????????????????????????????????
@@ -6953,6 +6965,9 @@ struct all_fn {
     }
 };
 inline constexpr all_fn all{};
+
+template<typename R>
+using all_t = decltype(all(std::declval<R>()));
 
 template<typename R>
     requires all_viewable<R>
@@ -7876,7 +7891,7 @@ concept zip_transform_viewable = (zip_viewable<Rs> && ...) &&
 
 struct zip_fn {
     constexpr auto operator()() const {
-        return empty(tuple<>{});
+        return empty_view<tuple<>>{};
     }
 
     template<typename... Rs>
@@ -7940,7 +7955,7 @@ constexpr auto operator|(R&& range, pairwise_fn) {
 
 struct cartesian_product_fn {
     constexpr auto operator()() const {
-        return single(tuple<>{});
+        return single_view<tuple<>>{};
     }
 
     template<typename R, typename... Rs>
@@ -7953,7 +7968,7 @@ struct cartesian_product_fn {
             std::move(first_view), all(std::forward<Rs>(rest))...);
     }
 };
-inline constexpr cartesian_product_fn cartesian_product{};inline constexpr cartesian_product_fn cartesian_product{};
+inline constexpr cartesian_product_fn cartesian_product{};
 
 #if __cplusplus > 202002L
 template<typename R>
@@ -8180,6 +8195,29 @@ constexpr auto operator|(R&& range, chunk_by_adaptor<Pred> adaptor) {
 #endif
 
 } /* namespace views */
+
+template<typename... Rs>
+zip_view(Rs&&...) -> zip_view<views::all_t<Rs>...>;
+
+template<typename First, typename... Vs>
+cartesian_product_view(First&&, Vs&&...)
+    -> cartesian_product_view<views::all_t<First>, views::all_t<Vs>...>;
+
+template<typename R>
+enumerate_view(R&&) -> enumerate_view<views::all_t<R>>;
+
+#if __cplusplus > 202002L
+template<typename R>
+slide_view(R&&, range_difference_t<views::all_t<R>>)
+    -> slide_view<views::all_t<R>>;
+
+template<typename R>
+stride_view(R&&, range_difference_t<views::all_t<R>>)
+    -> stride_view<views::all_t<R>>;
+
+template<typename R, typename Pred>
+chunk_by_view(R&&, Pred) -> chunk_by_view<views::all_t<R>, Pred>;
+#endif
 
 #if __cplusplus > 202002L
 template<typename V, typename F>
