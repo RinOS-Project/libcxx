@@ -1178,6 +1178,9 @@ public:
 };
 
 template<typename T>
+inline constexpr bool enable_borrowed_range<empty_view<T>> = true;
+
+template<typename T>
 struct is_empty_view : false_type {};
 
 template<typename T>
