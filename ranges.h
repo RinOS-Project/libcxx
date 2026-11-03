@@ -1189,14 +1189,16 @@ struct is_empty_view<empty_view<T>> : true_type {
  * ???????????????????????????????????????????????????????????????*/
 
 template<typename T>
-    requires copy_constructible<T> && is_object_v<T> &&
+    requires move_constructible<T> && is_object_v<T> &&
              same_as<T, remove_cv_t<T>>
 class single_view : public view_interface<single_view<T>> {
     T value_;
 
 public:
     single_view() requires default_initializable<T> = default;
-    constexpr explicit single_view(const T& value) : value_(value) {}
+    constexpr explicit single_view(const T& value)
+        requires copy_constructible<T>
+        : value_(value) {}
     constexpr explicit single_view(T&& value) : value_(std::move(value)) {}
 
     constexpr T* begin() noexcept { return &value_; }
@@ -6909,7 +6911,7 @@ inline constexpr empty_view<T> empty{};
 
 /* single */
 template<typename T>
-concept single_viewable = copy_constructible<decay_t<T>> &&
+concept single_viewable = move_constructible<decay_t<T>> &&
     is_object_v<decay_t<T>>;
 
 struct single_fn {
