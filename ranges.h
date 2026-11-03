@@ -5651,7 +5651,10 @@ inline constexpr bool enable_borrowed_range<enumerate_view<V>> =
 template<typename T, typename Bound = unreachable_sentinel_t>
     requires move_constructible<T> && is_object_v<T> &&
              same_as<T, remove_cv_t<T>> &&
-             (same_as<Bound, unreachable_sentinel_t> || integral<Bound>)
+             semiregular<Bound> &&
+             (same_as<Bound, unreachable_sentinel_t> ||
+              (integral<Bound> &&
+               !same_as<remove_cv_t<Bound>, bool>))
 class repeat_view : public view_interface<repeat_view<T, Bound>> {
     static constexpr bool bounded =
         !same_as<Bound, unreachable_sentinel_t>;
