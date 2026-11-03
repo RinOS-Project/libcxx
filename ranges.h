@@ -545,6 +545,88 @@ public:
         return left.current_ <=> right.current_;
     }
 
+    template<typename J>
+        requires (!same_as<remove_cvref_t<J>, basic_const_iterator>) &&
+                 random_access_iterator<I> && totally_ordered_with<I, J>
+    friend constexpr bool operator<(const basic_const_iterator& left,
+                                    const J& right) {
+        return left.current_ < right;
+    }
+
+    template<typename J>
+        requires (!same_as<remove_cvref_t<J>, basic_const_iterator>) &&
+                 random_access_iterator<I> && totally_ordered_with<I, J>
+    friend constexpr bool operator>(const basic_const_iterator& left,
+                                    const J& right) {
+        return left.current_ > right;
+    }
+
+    template<typename J>
+        requires (!same_as<remove_cvref_t<J>, basic_const_iterator>) &&
+                 random_access_iterator<I> && totally_ordered_with<I, J>
+    friend constexpr bool operator<=(const basic_const_iterator& left,
+                                     const J& right) {
+        return left.current_ <= right;
+    }
+
+    template<typename J>
+        requires (!same_as<remove_cvref_t<J>, basic_const_iterator>) &&
+                 random_access_iterator<I> && totally_ordered_with<I, J>
+    friend constexpr bool operator>=(const basic_const_iterator& left,
+                                     const J& right) {
+        return left.current_ >= right;
+    }
+
+    template<typename J>
+        requires (!same_as<remove_cvref_t<J>, basic_const_iterator>) &&
+                 random_access_iterator<I> && totally_ordered_with<I, J> &&
+                 three_way_comparable_with<I, J>
+    friend constexpr auto operator<=>(const basic_const_iterator& left,
+                                       const J& right) {
+        return left.current_ <=> right;
+    }
+
+    template<typename J>
+        requires (!is_basic_const_iterator<remove_cvref_t<J>>::value) &&
+                 random_access_iterator<I> && totally_ordered_with<I, J>
+    friend constexpr bool operator<(const J& left,
+                                    const basic_const_iterator& right) {
+        return left < right.current_;
+    }
+
+    template<typename J>
+        requires (!is_basic_const_iterator<remove_cvref_t<J>>::value) &&
+                 random_access_iterator<I> && totally_ordered_with<I, J>
+    friend constexpr bool operator>(const J& left,
+                                    const basic_const_iterator& right) {
+        return left > right.current_;
+    }
+
+    template<typename J>
+        requires (!is_basic_const_iterator<remove_cvref_t<J>>::value) &&
+                 random_access_iterator<I> && totally_ordered_with<I, J>
+    friend constexpr bool operator<=(const J& left,
+                                     const basic_const_iterator& right) {
+        return left <= right.current_;
+    }
+
+    template<typename J>
+        requires (!is_basic_const_iterator<remove_cvref_t<J>>::value) &&
+                 random_access_iterator<I> && totally_ordered_with<I, J>
+    friend constexpr bool operator>=(const J& left,
+                                     const basic_const_iterator& right) {
+        return left >= right.current_;
+    }
+
+    template<typename J>
+        requires (!is_basic_const_iterator<remove_cvref_t<J>>::value) &&
+                 random_access_iterator<I> && totally_ordered_with<I, J> &&
+                 three_way_comparable_with<I, J>
+    friend constexpr auto operator<=>(const J& left,
+                                       const basic_const_iterator& right) {
+        return left <=> right.current_;
+    }
+
     friend constexpr basic_const_iterator operator+(
         const basic_const_iterator& iterator, difference_type offset)
         requires random_access_iterator<I> {
