@@ -3744,32 +3744,38 @@ inline constexpr bool enable_borrowed_range<reverse_view<V>> = borrowed_range<V>
  * as_const_view - const??????????????
  * ???????????????????????????????????????????????????????????????*/
 
+template<typename R>
+concept as_const_simple_view =
+    view<R> && range<const R> &&
+    same_as<iterator_t<R>, iterator_t<const R>> &&
+    same_as<sentinel_t<R>, sentinel_t<const R>>;
+
 template<typename V>
     requires view<V> && input_range<V>
 class as_const_view : public view_interface<as_const_view<V>> {
     V base_;
 
 public:
-    as_const_view() = default;
+    as_const_view() requires default_initializable<V> = default;
     constexpr explicit as_const_view(V base) : base_(std::move(base)) {}
 
-    constexpr V base() const& { return base_; }
+    constexpr V base() const& requires copy_constructible<V> { return base_; }
     constexpr V base() && { return std::move(base_); }
 
-    constexpr auto begin() {
+    constexpr auto begin() requires (!as_const_simple_view<V>) {
         return ranges::cbegin(base_);
     }
 
-    constexpr auto end() {
+    constexpr auto end() requires (!as_const_simple_view<V>) {
         return ranges::cend(base_);
     }
 
-    constexpr auto begin() const requires input_range<const V> {
-        return ranges::cbegin(std::as_const(base_));
+    constexpr auto begin() const requires range<const V> {
+        return ranges::cbegin(base_);
     }
 
     constexpr auto end() const requires range<const V> {
-        return ranges::cend(std::as_const(base_));
+        return ranges::cend(base_);
     }
 
     constexpr auto size() requires sized_range<V> {
