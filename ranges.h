@@ -1201,18 +1201,22 @@ public:
         : value_(value) {}
     constexpr explicit single_view(T&& value) : value_(std::move(value)) {}
 
+    template<typename... Args>
+        requires constructible_from<T, Args...>
+    constexpr explicit single_view(in_place_t, Args&&... args)
+        : value_(std::forward<Args>(args)...) {}
+
     constexpr T* begin() noexcept { return &value_; }
     constexpr const T* begin() const noexcept { return &value_; }
     constexpr T* end() noexcept { return &value_ + 1; }
     constexpr const T* end() const noexcept { return &value_ + 1; }
+    static constexpr bool empty() noexcept { return false; }
     static constexpr size_t size() noexcept { return 1; }
     constexpr T* data() noexcept { return &value_; }
     constexpr const T* data() const noexcept { return &value_; }
 };
 
 template<typename T>
-    requires copy_constructible<T> && is_object_v<T> &&
-             same_as<T, remove_cv_t<T>>
 single_view(T) -> single_view<T>;
 
 /* ???????????????????????????????????????????????????????????????
