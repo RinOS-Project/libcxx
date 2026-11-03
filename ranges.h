@@ -933,9 +933,9 @@ public:
     owning_view() = default;
     constexpr owning_view(R&& r) : range_(std::move(r)) {}
 
-    owning_view(const owning_view&) = default;
+    owning_view(const owning_view&) = delete;
     owning_view(owning_view&&) = default;
-    owning_view& operator=(const owning_view&) = default;
+    owning_view& operator=(const owning_view&) = delete;
     owning_view& operator=(owning_view&&) = default;
 
     constexpr R& base() & noexcept { return range_; }
