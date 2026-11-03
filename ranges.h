@@ -827,6 +827,7 @@ public:
     constexpr subrange(I begin, S end) : begin_(begin), end_(end) {}
 
     template<typename R>
+        requires borrowed_range<R>
     constexpr subrange(R&& r)
         : begin_(ranges::begin(r)), end_(ranges::end(r)) {}
 
