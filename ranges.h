@@ -5392,7 +5392,7 @@ class repeat_view : public view_interface<repeat_view<T, Bound>> {
     using index_type = conditional_t<bounded, Bound, ptrdiff_t>;
 
     struct iterator {
-        using iterator_category = input_iterator_tag;
+        using iterator_category = random_access_iterator_tag;
         using iterator_concept = random_access_iterator_tag;
         using value_type = T;
         using difference_type = ptrdiff_t;
