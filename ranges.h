@@ -1366,7 +1366,7 @@ public:
     join_view() = default;
     constexpr explicit join_view(V base) : base_(std::move(base)) {}
 
-    constexpr V base() const& { return base_; }
+    constexpr V base() const& requires copy_constructible<V> { return base_; }
     constexpr V base() && { return std::move(base_); }
 
     constexpr auto begin() {
@@ -3218,6 +3218,10 @@ public:
     }
 
     constexpr auto size() requires sized_range<V> {
+        return ranges::size(base_);
+    }
+
+    constexpr auto size() const requires sized_range<const V> {
         return ranges::size(base_);
     }
 };
