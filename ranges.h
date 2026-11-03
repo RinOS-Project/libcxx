@@ -374,6 +374,9 @@ struct is_basic_const_iterator<basic_const_iterator<I>> : true_type {};
 
 template<typename I>
 class basic_const_iterator : public detail::basic_const_iterator_category<I> {
+    template<typename>
+    friend class basic_const_iterator;
+
     I current_;
 
 public:
@@ -459,6 +462,14 @@ public:
         return left.current_ == right.current_;
     }
 
+    template<typename J>
+        requires (!same_as<I, J>) &&
+                 (sentinel_for<J, I> || sentinel_for<I, J>)
+    friend constexpr bool operator==(const basic_const_iterator& left,
+                                     const basic_const_iterator<J>& right) {
+        return left.current_ == right.current_;
+    }
+
     template<typename S>
         requires (!is_basic_const_iterator<remove_cvref_t<S>>::value) &&
                  sentinel_for<S, I>
@@ -530,6 +541,22 @@ public:
         return left.current_ - right.current_;
     }
 
+    template<typename J>
+        requires (!same_as<I, J>) && sized_sentinel_for<J, I>
+    friend constexpr difference_type operator-(
+        const basic_const_iterator& left,
+        const basic_const_iterator<J>& right) {
+        return left.current_ - right.current_;
+    }
+
+    template<typename J>
+        requires (!same_as<I, J>) && sized_sentinel_for<I, J>
+    friend constexpr iter_difference_t<J> operator-(
+        const basic_const_iterator<J>& left,
+        const basic_const_iterator& right) {
+        return left.current_ - right.current_;
+    }
+
     template<typename S>
         requires sized_sentinel_for<S, I>
     friend constexpr difference_type operator-(
@@ -563,14 +590,18 @@ constexpr decltype(auto) possibly_const_range(R& range) {
 }
 
 template<typename I>
-constexpr auto make_const_iterator(I&& iterator) {
+constexpr auto make_const_iterator(I&& iterator)
+    noexcept(noexcept(const_iterator_adaptor_t<remove_cvref_t<I>>(
+        std::forward<I>(iterator)))) {
     using iterator_type = remove_cvref_t<I>;
     using result_type = const_iterator_adaptor_t<iterator_type>;
     return result_type(std::forward<I>(iterator));
 }
 
 template<typename S>
-constexpr auto make_const_sentinel(S&& sentinel) {
+constexpr auto make_const_sentinel(S&& sentinel)
+    noexcept(noexcept(const_sentinel_adaptor_t<remove_cvref_t<S>>(
+        std::forward<S>(sentinel)))) {
     using sentinel_type = remove_cvref_t<S>;
     using result_type = const_sentinel_adaptor_t<sentinel_type>;
     return result_type(std::forward<S>(sentinel));
