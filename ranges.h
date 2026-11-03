@@ -1119,6 +1119,7 @@ concept viewable_range = range<T> &&
  * ???????????????????????????????????????????????????????????????*/
 
 template<typename Derived>
+    requires is_class_v<Derived> && same_as<Derived, remove_cv_t<Derived>>
 class view_interface : public view_base {
     constexpr Derived& derived() noexcept {
         return static_cast<Derived&>(*this);
@@ -1128,35 +1129,107 @@ class view_interface : public view_base {
     }
 
 public:
-    constexpr bool empty() {
-        return ranges::begin(derived()) == ranges::end(derived());
+    constexpr bool empty()
+        requires sized_range<Derived> || forward_range<Derived> {
+        if constexpr (sized_range<Derived>)
+            return ranges::size(derived()) == 0;
+        else
+            return ranges::begin(derived()) == ranges::end(derived());
     }
 
-    constexpr explicit operator bool() {
-        return !empty();
+    constexpr bool empty() const
+        requires sized_range<const Derived> || forward_range<const Derived> {
+        if constexpr (sized_range<const Derived>)
+            return ranges::size(derived()) == 0;
+        else
+            return ranges::begin(derived()) == ranges::end(derived());
     }
 
-    template<typename R = Derived>
-    constexpr auto size() -> decltype(ranges::end(declval<R&>()) - ranges::begin(declval<R&>())) {
-        return ranges::end(derived()) - ranges::begin(derived());
+    constexpr explicit operator bool()
+        requires requires { ranges::empty(derived()); } {
+        return !ranges::empty(derived());
     }
 
-    template<typename R = Derived>
-    constexpr auto front() -> decltype(*ranges::begin(declval<R&>())) {
+    constexpr explicit operator bool() const
+        requires requires { ranges::empty(derived()); } {
+        return !ranges::empty(derived());
+    }
+
+    constexpr auto size()
+        requires forward_range<Derived> &&
+                 sized_sentinel_for<sentinel_t<Derived>, iterator_t<Derived>> {
+        using size_type = make_unsigned_t<range_difference_t<Derived>>;
+        return static_cast<size_type>(
+            ranges::end(derived()) - ranges::begin(derived()));
+    }
+
+    constexpr auto size() const
+        requires forward_range<const Derived> &&
+                 sized_sentinel_for<sentinel_t<const Derived>,
+                                    iterator_t<const Derived>> {
+        using size_type = make_unsigned_t<range_difference_t<const Derived>>;
+        return static_cast<size_type>(
+            ranges::end(derived()) - ranges::begin(derived()));
+    }
+
+#if __cplusplus > 202002L
+    constexpr auto cbegin() requires input_range<Derived> {
+        return ranges::cbegin(derived());
+    }
+
+    constexpr auto cbegin() const requires input_range<const Derived> {
+        return ranges::cbegin(derived());
+    }
+
+    constexpr auto cend() requires input_range<Derived> {
+        return ranges::cend(derived());
+    }
+
+    constexpr auto cend() const requires input_range<const Derived> {
+        return ranges::cend(derived());
+    }
+#endif
+
+    constexpr decltype(auto) front() requires forward_range<Derived> {
         return *ranges::begin(derived());
     }
 
-    template<typename R = Derived>
-    constexpr auto back() -> decltype(*--ranges::end(declval<R&>())) {
+    constexpr decltype(auto) front() const
+        requires forward_range<const Derived> {
+        return *ranges::begin(derived());
+    }
+
+    constexpr decltype(auto) back()
+        requires bidirectional_range<Derived> && common_range<Derived> {
         auto it = ranges::end(derived());
         --it;
         return *it;
     }
 
-    template<typename R = Derived>
-    constexpr auto operator[](range_difference_t<R> n)
-        -> decltype(ranges::begin(declval<R&>())[n]) {
+    constexpr decltype(auto) back() const
+        requires bidirectional_range<const Derived> &&
+                 common_range<const Derived> {
+        auto it = ranges::end(derived());
+        --it;
+        return *it;
+    }
+
+    template<random_access_range R = Derived>
+    constexpr decltype(auto) operator[](range_difference_t<R> n) {
         return ranges::begin(derived())[n];
+    }
+
+    template<random_access_range R = const Derived>
+    constexpr decltype(auto) operator[](range_difference_t<R> n) const {
+        return ranges::begin(derived())[n];
+    }
+
+    constexpr auto data() requires contiguous_range<Derived> {
+        return ranges::data(derived());
+    }
+
+    constexpr auto data() const requires contiguous_range<const Derived> {
+        return ranges::data(derived());
     }
 };
 
