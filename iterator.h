@@ -326,7 +326,7 @@ struct has_adl_iter_move<I, void_t<
     decltype(adl_iter_move(declval<I&>()))>> : true_type {};
 } /* namespace detail */
 
-namespace __cpo {
+inline namespace __cpo {
 struct iter_move_fn {
     template<typename I,
              enable_if_t<detail::has_adl_iter_move<I>::value, int> = 0>
@@ -349,9 +349,8 @@ struct iter_move_fn {
             *static_cast<I&&>(value))>&&>(*static_cast<I&&>(value));
     }
 };
-} /* namespace __cpo */
-
-inline constexpr __cpo::iter_move_fn iter_move{};
+inline constexpr iter_move_fn iter_move{};
+} /* inline namespace __cpo */
 
 namespace detail {
 void iter_swap() = delete;
@@ -383,7 +382,7 @@ struct has_iter_swap_move<I, J, void_t<
     : true_type {};
 } /* namespace detail */
 
-namespace __cpo {
+inline namespace __cpo {
 struct iter_swap_fn {
     template<typename I, typename J,
              enable_if_t<detail::has_adl_iter_swap<I, J>::value, int> = 0>
@@ -429,9 +428,8 @@ struct iter_swap_fn {
         *static_cast<J&&>(right) = static_cast<value_type&&>(temporary);
     }
 };
-} /* namespace __cpo */
-
-inline constexpr __cpo::iter_swap_fn iter_swap{};
+inline constexpr iter_swap_fn iter_swap{};
+} /* inline namespace __cpo */
 } /* namespace ranges */
 
 template<typename I>
@@ -484,6 +482,15 @@ concept indirectly_writable = requires(Out&& output, T&& value) {
     const_cast<const iter_reference_t<Out>&&>(
         *static_cast<Out&&>(output)) = static_cast<T&&>(value);
 };
+
+template<typename I1, typename I2 = I1>
+concept indirectly_swappable = indirectly_readable<I1> &&
+    indirectly_readable<I2> && requires(const I1 first, const I2 second) {
+        ranges::iter_swap(first, second);
+        ranges::iter_swap(second, first);
+        ranges::iter_swap(first, first);
+        ranges::iter_swap(second, second);
+    };
 
 template<typename S, typename I>
 concept sentinel_for = semiregular<S> && input_or_output_iterator<I> &&

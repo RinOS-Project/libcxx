@@ -1468,7 +1468,7 @@ inline constexpr bool enable_borrowed_range<ref_view<R>> = true;
 
 template<typename R>
     requires range<R> && movable<R> &&
-             !detail::is_initializer_list<remove_cv_t<R>>::value
+             (!detail::is_initializer_list<remove_cv_t<R>>::value)
 class owning_view : public view_interface<owning_view<R>> {
     R range_;
 
@@ -1509,6 +1509,31 @@ template<typename R>
 inline constexpr bool enable_borrowed_range<owning_view<R>> =
     enable_borrowed_range<R>;
 
+namespace views {
+
+template<typename R>
+concept all_viewable = viewable_range<R>;
+
+struct all_fn {
+    template<typename R>
+        requires all_viewable<R>
+    constexpr auto operator()(R&& r) const {
+        if constexpr (view<decay_t<R>>) {
+            return std::forward<R>(r);
+        } else if constexpr (is_lvalue_reference_v<R>) {
+            return ref_view(r);
+        } else {
+            return owning_view(std::forward<R>(r));
+        }
+    }
+};
+inline constexpr all_fn all{};
+
+template<typename R>
+using all_t = decltype(all(std::declval<R>()));
+
+} /* namespace views */
+
 /* ???????????????????????????????????????????????????????????????
  * iota_view - ????
  * ???????????????????????????????????????????????????????????????*/
@@ -1521,10 +1546,10 @@ concept iota_value = weakly_incrementable<W> && copyable<W>;
 template<typename W, typename Bound>
 concept iota_weakly_equality_comparable_with = requires(
     const W& value, const Bound& bound) {
-    { value == bound } -> boolean_testable;
-    { value != bound } -> boolean_testable;
-    { bound == value } -> boolean_testable;
-    { bound != value } -> boolean_testable;
+    { value == bound } -> std::detail::boolean_testable;
+    { value != bound } -> std::detail::boolean_testable;
+    { bound == value } -> std::detail::boolean_testable;
+    { bound != value } -> std::detail::boolean_testable;
 };
 
 template<typename W>
@@ -7884,27 +7909,6 @@ inline constexpr iota_fn iota{};
 
 /* all - ????????? */
 template<typename R>
-concept all_viewable = viewable_range<R>;
-
-struct all_fn {
-    template<typename R>
-        requires all_viewable<R>
-    constexpr auto operator()(R&& r) const {
-        if constexpr (view<decay_t<R>>) {
-            return std::forward<R>(r);
-        } else if constexpr (is_lvalue_reference_v<R>) {
-            return ref_view(r);
-        } else {
-            return owning_view(std::forward<R>(r));
-        }
-    }
-};
-inline constexpr all_fn all{};
-
-template<typename R>
-using all_t = decltype(all(std::declval<R>()));
-
-template<typename R>
     requires all_viewable<R>
 constexpr auto operator|(R&& r, all_fn) {
     return all(std::forward<R>(r));
@@ -8832,7 +8836,7 @@ struct as_const_fn {
             return empty_view<const element_type>{};
         } else if constexpr (is_lvalue_reference_v<R> &&
                              constant_range<const remove_reference_t<R>> &&
-                             !view<remove_cvref_t<R>>) {
+                             !std::ranges::view<remove_cvref_t<R>>) {
             return all(std::as_const(range));
         } else {
             return as_const_view<decltype(view)>(std::move(view));
