@@ -14,7 +14,6 @@
 #include "cstdint.h"
 #include "type_traits.h"
 #include "cstring.h"
-#include "memory.h"
 #include "pointer_order.h"
 
 /* The hosted Linux regression build opts into the native futex wait path.
@@ -1123,6 +1122,67 @@ public:
 
 } /* namespace __detail */
 
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_ATOMIC_MIN_MAX)
+namespace __detail {
+
+template<typename T>
+struct __atomic_minmax_enabled
+    : integral_constant<bool,
+          (is_integral<T>::value && !is_same<T, bool>::value) ||
+          is_floating_point<T>::value || detail::is_object_pointer<T>::value> {};
+
+template<typename T>
+inline bool __atomic_minmax_less(T left, T right) noexcept {
+    if constexpr (is_floating_point<T>::value) {
+        const bool left_nan = __builtin_isnan(left);
+        const bool right_nan = __builtin_isnan(right);
+        if (left_nan) return false;
+        if (right_nan) return true;
+        if (left == static_cast<T>(0) && right == static_cast<T>(0))
+            return __builtin_signbit(left) && !__builtin_signbit(right);
+        return left < right;
+    } else if constexpr (detail::is_object_pointer<T>::value) {
+        return detail::object_pointer_total_less(left, right);
+    } else {
+        return left < right;
+    }
+}
+
+template<bool Maximum, typename T>
+inline T __atomic_minmax_value(T current, T operand) noexcept {
+    if constexpr (is_floating_point<T>::value) {
+        const bool current_nan = __builtin_isnan(current);
+        const bool operand_nan = __builtin_isnan(operand);
+        /* fetch_min/max permit either numeric operand or a NaN when exactly
+         * one input is NaN. Prefer the numeric value; for two NaNs retain
+         * the current payload. */
+        if (current_nan) return operand_nan ? current : operand;
+        if (operand_nan) return current;
+    }
+    if constexpr (Maximum)
+        return __atomic_minmax_less(current, operand) ? operand : current;
+    else
+        return __atomic_minmax_less(operand, current) ? operand : current;
+}
+
+template<typename Atomic, typename T>
+inline T __atomic_minmax_update(Atomic& object, T operand,
+                                memory_order order,
+                                bool maximum) noexcept {
+    T current = object.load(memory_order_relaxed);
+    for (;;) {
+        const T desired = maximum
+            ? __atomic_minmax_value<true>(current, operand)
+            : __atomic_minmax_value<false>(current, operand);
+        if (object.compare_exchange_weak(current, desired, order,
+                                         memory_order_relaxed))
+            return current;
+    }
+}
+
+} /* namespace __detail */
+#endif
+
 /* ═══════════════════════════════════════════════════════════════
  * atomic<T> - generic atomic type
  * ═══════════════════════════════════════════════════════════════*/
@@ -1263,6 +1323,32 @@ public:
                 return old;
             }
         }
+    }
+#endif
+
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_ATOMIC_MIN_MAX)
+    template<typename U = T>
+    typename enable_if<__detail::__atomic_minmax_enabled<U>::value, U>::type
+    fetch_max(U arg, memory_order order = memory_order_seq_cst) noexcept {
+        return __detail::__atomic_minmax_update(*this, arg, order, true);
+    }
+
+    template<typename U = T>
+    typename enable_if<__detail::__atomic_minmax_enabled<U>::value, U>::type
+    fetch_min(U arg, memory_order order = memory_order_seq_cst) noexcept {
+        return __detail::__atomic_minmax_update(*this, arg, order, false);
+    }
+
+    template<typename U = T>
+    typename enable_if<__detail::__atomic_minmax_enabled<U>::value, void>::type
+    store_max(U arg, memory_order order = memory_order_seq_cst) noexcept {
+        (void)__detail::__atomic_minmax_update(*this, arg, order, true);
+    }
+
+    template<typename U = T>
+    typename enable_if<__detail::__atomic_minmax_enabled<U>::value, void>::type
+    store_min(U arg, memory_order order = memory_order_seq_cst) noexcept {
+        (void)__detail::__atomic_minmax_update(*this, arg, order, false);
     }
 #endif
 
@@ -1427,6 +1513,32 @@ public:
         return old_val;
     }
 
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_ATOMIC_MIN_MAX)
+    template<typename U = T>
+    typename enable_if<is_object<U>::value, U*>::type
+    fetch_max(U* arg, memory_order order = memory_order_seq_cst) noexcept {
+        return __detail::__atomic_minmax_update(*this, arg, order, true);
+    }
+
+    template<typename U = T>
+    typename enable_if<is_object<U>::value, U*>::type
+    fetch_min(U* arg, memory_order order = memory_order_seq_cst) noexcept {
+        return __detail::__atomic_minmax_update(*this, arg, order, false);
+    }
+
+    template<typename U = T>
+    typename enable_if<is_object<U>::value, void>::type
+    store_max(U* arg, memory_order order = memory_order_seq_cst) noexcept {
+        (void)__detail::__atomic_minmax_update(*this, arg, order, true);
+    }
+
+    template<typename U = T>
+    typename enable_if<is_object<U>::value, void>::type
+    store_min(U* arg, memory_order order = memory_order_seq_cst) noexcept {
+        (void)__detail::__atomic_minmax_update(*this, arg, order, false);
+    }
+#endif
+
     T* operator++() noexcept { return fetch_add(1) + 1; }
     T* operator++(int) noexcept { return fetch_add(1); }
     T* operator--() noexcept { return fetch_sub(1) - 1; }
@@ -1452,6 +1564,10 @@ public:
  * reporting a non-lock-free implementation.  The gate also keeps the
  * reference-count increments/decrements inside each snapshot transaction.
  * ═══════════════════════════════════════════════════════════════*/
+} /* namespace std */
+#include "memory.h"
+namespace std {
+
 
 #if __cplusplus >= 202002L
 template<class T>
@@ -1984,6 +2100,32 @@ public:
     }
 #endif
 
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_ATOMIC_MIN_MAX)
+    template<typename U = T>
+    typename enable_if<__detail::__atomic_minmax_enabled<U>::value, U>::type
+    fetch_max(U arg, memory_order order = memory_order_seq_cst) const noexcept {
+        return __detail::__atomic_minmax_update(*this, arg, order, true);
+    }
+
+    template<typename U = T>
+    typename enable_if<__detail::__atomic_minmax_enabled<U>::value, U>::type
+    fetch_min(U arg, memory_order order = memory_order_seq_cst) const noexcept {
+        return __detail::__atomic_minmax_update(*this, arg, order, false);
+    }
+
+    template<typename U = T>
+    typename enable_if<__detail::__atomic_minmax_enabled<U>::value, void>::type
+    store_max(U arg, memory_order order = memory_order_seq_cst) const noexcept {
+        (void)__detail::__atomic_minmax_update(*this, arg, order, true);
+    }
+
+    template<typename U = T>
+    typename enable_if<__detail::__atomic_minmax_enabled<U>::value, void>::type
+    store_min(U arg, memory_order order = memory_order_seq_cst) const noexcept {
+        (void)__detail::__atomic_minmax_update(*this, arg, order, false);
+    }
+#endif
+
     /* Integral operators */
     template<typename U = T>
     typename enable_if<is_integral<U>::value && !is_same<U, bool>::value, T>::type
@@ -2242,6 +2384,56 @@ template<class T>
 T atomic_fetch_xor_explicit(atomic<T>* obj, T arg, memory_order order) noexcept {
     return obj->fetch_xor(arg, order);
 }
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_ATOMIC_MIN_MAX)
+template<class T>
+typename enable_if<__detail::__atomic_minmax_enabled<T>::value, T>::type
+atomic_fetch_max(atomic<T>* obj, T arg) noexcept {
+    return obj->fetch_max(arg);
+}
+
+template<class T>
+typename enable_if<__detail::__atomic_minmax_enabled<T>::value, T>::type
+atomic_fetch_max_explicit(atomic<T>* obj, T arg, memory_order order) noexcept {
+    return obj->fetch_max(arg, order);
+}
+
+template<class T>
+typename enable_if<__detail::__atomic_minmax_enabled<T>::value, T>::type
+atomic_fetch_min(atomic<T>* obj, T arg) noexcept {
+    return obj->fetch_min(arg);
+}
+
+template<class T>
+typename enable_if<__detail::__atomic_minmax_enabled<T>::value, T>::type
+atomic_fetch_min_explicit(atomic<T>* obj, T arg, memory_order order) noexcept {
+    return obj->fetch_min(arg, order);
+}
+
+template<class T>
+typename enable_if<__detail::__atomic_minmax_enabled<T>::value, void>::type
+atomic_store_max(atomic<T>* obj, T arg) noexcept {
+    obj->store_max(arg);
+}
+
+template<class T>
+typename enable_if<__detail::__atomic_minmax_enabled<T>::value, void>::type
+atomic_store_max_explicit(atomic<T>* obj, T arg, memory_order order) noexcept {
+    obj->store_max(arg, order);
+}
+
+template<class T>
+typename enable_if<__detail::__atomic_minmax_enabled<T>::value, void>::type
+atomic_store_min(atomic<T>* obj, T arg) noexcept {
+    obj->store_min(arg);
+}
+
+template<class T>
+typename enable_if<__detail::__atomic_minmax_enabled<T>::value, void>::type
+atomic_store_min_explicit(atomic<T>* obj, T arg, memory_order order) noexcept {
+    obj->store_min(arg, order);
+}
+#endif
+
 
 } /* namespace std */
 

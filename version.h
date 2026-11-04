@@ -315,6 +315,11 @@
  * RinOS specific version info
  * ===================================================================*/
 
+#if defined(__cplusplus) && \
+    (__cplusplus > 202302L || defined(RIN_ENABLE_CXX26_ATOMIC_MIN_MAX))
+#define __cpp_lib_atomic_min_max           202403L
+#endif
+
 #define __RINOS_LIBCXX__                    1
 #define __RINOS_LIBCXX_VERSION__            20240101L
 #define __RINOS_LIBCXX_VERSION_MAJOR__      1
