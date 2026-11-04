@@ -12,3 +12,8 @@
     (__cplusplus > 202302L || defined(RIN_ENABLE_CXX26_INPLACE_VECTOR))
 #define __cpp_lib_inplace_vector 202406L
 #endif
+
+#if defined(__cplusplus) && __cplusplus > 202002L && \
+    (__cplusplus > 202302L || defined(RIN_ENABLE_CXX26_HIVE))
+#define __cpp_lib_hive 202502L
+#endif
