@@ -8283,15 +8283,22 @@ constexpr auto operator|(R&& range, lazy_split_pattern_adaptor<P> adaptor) {
 
 /* adjacent<N> */
 template<size_t N, typename R>
-concept adjacent_extent_viewable = (N > 0) && adjacent_viewable<R>;
+concept adjacent_extent_viewable =
+    ((N == 0u) && forward_range<R>) ||
+    ((N > 0u) && adjacent_viewable<R>);
 
 template<size_t N>
 struct adjacent_adaptor {
     template<typename R>
         requires adjacent_extent_viewable<N, R>
     constexpr auto operator()(R&& range) const {
-        auto view = all(std::forward<R>(range));
-        return adjacent_view<decltype(view), N>(std::move(view));
+        if constexpr (N == 0u) {
+            (void)range;
+            return empty_view<tuple<>>{};
+        } else {
+            auto view = all(std::forward<R>(range));
+            return adjacent_view<decltype(view), N>(std::move(view));
+        }
     }
 };
 
@@ -8303,7 +8310,7 @@ struct adjacent_fn {
         return adjacent_adaptor<N>{}(std::forward<R>(range));
     }
 
-    constexpr auto operator()() const requires (N > 0) {
+    constexpr auto operator()() const {
         return adjacent_adaptor<N>{};
     }
 };
@@ -8335,10 +8342,15 @@ concept adjacent_transform_invocable =
 
 template<size_t N, typename R, typename F>
 concept adjacent_transform_viewable =
-    (N > 0) && adjacent_viewable<R> &&
-    copy_constructible<decay_t<F>> &&
-    adjacent_transform_invocable<
-        decay_t<F>, range_reference_t<decltype(adjacent<N>(declval<R>()))>>;
+    (((N == 0u) && forward_range<R> &&
+      move_constructible<decay_t<F>> &&
+      regular_invocable<decay_t<F>&> &&
+      is_object_v<decay_t<invoke_result_t<decay_t<F>&>>>) ||
+     ((N > 0u) && adjacent_viewable<R> &&
+      copy_constructible<decay_t<F>> &&
+      adjacent_transform_invocable<
+          decay_t<F>,
+          range_reference_t<decltype(adjacent<N>(declval<R>()))>>));
 
 template<typename R, typename F>
 concept transform_viewable = viewable_range<R> && input_range<R> &&
@@ -8523,8 +8535,16 @@ struct adjacent_transform_fn {
     template<typename R, typename F>
         requires adjacent_transform_viewable<N, R, F>
     constexpr auto operator()(R&& range, F&& function) const {
-        return adjacent_transform_adaptor<N, decay_t<F>>{
-            std::forward<F>(function)}(std::forward<R>(range));
+        if constexpr (N == 0u) {
+            using result_type =
+                decay_t<invoke_result_t<decay_t<F>&>>;
+            (void)range;
+            (void)function;
+            return empty_view<result_type>{};
+        } else {
+            return adjacent_transform_adaptor<N, decay_t<F>>{
+                std::forward<F>(function)}(std::forward<R>(range));
+        }
     }
 
     template<typename F>
@@ -8869,6 +8889,10 @@ concept zip_transform_viewable = (zip_viewable<Rs> && ...) &&
     copy_constructible<decay_t<F>> &&
     regular_invocable<decay_t<F>&, range_reference_t<remove_reference_t<Rs>>...>;
 
+template<typename F>
+concept zip_transform_zero_viewable =
+    move_constructible<decay_t<F>> && regular_invocable<decay_t<F>&> &&
+    is_object_v<decay_t<invoke_result_t<decay_t<F>&>>>;
 
 struct zip_fn {
     constexpr auto operator()() const {
@@ -8885,6 +8909,14 @@ struct zip_fn {
 inline constexpr zip_fn zip{};
 
 struct zip_transform_fn {
+    template<typename F>
+        requires zip_transform_zero_viewable<F>
+    constexpr auto operator()(F&& function) const {
+        using result_type = decay_t<invoke_result_t<decay_t<F>&>>;
+        (void)function;
+        return empty_view<result_type>{};
+    }
+
     template<typename F, typename R1, typename R2>
         requires zip_transform_viewable<F, R1, R2>
     constexpr auto operator()(F&& function, R1&& first, R2&& second) const {
