@@ -1872,6 +1872,13 @@ public:
         return status_;
     }
 
+    template<class CharT, class Traits>
+    friend basic_ostream<CharT, Traits>&
+    operator<<(basic_ostream<CharT, Traits>& os,
+               const directory_entry& entry) {
+        return os << entry.path();
+    }
+
     bool operator==(const directory_entry& rhs) const noexcept { return path_ == rhs.path_; }
     bool operator!=(const directory_entry& rhs) const noexcept { return path_ != rhs.path_; }
     bool operator<(const directory_entry& rhs) const noexcept { return path_ < rhs.path_; }
