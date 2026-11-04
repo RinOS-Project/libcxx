@@ -775,13 +775,15 @@ public:
     friend constexpr bool operator==(inplace_vector, inplace_vector) noexcept {
         return true;
     }
-    friend constexpr strong_ordering operator<=>(inplace_vector,
-                                                  inplace_vector) noexcept
+    friend constexpr auto operator<=>(inplace_vector,
+                                      inplace_vector) noexcept
         requires requires(const T& left, const T& right) {
             detail::synth_three_way(left, right);
         }
     {
-        return strong_ordering::equal;
+        using result_order = common_comparison_category_t<
+            detail::synth_three_way_result_t<T>, strong_ordering>;
+        return static_cast<result_order>(strong_ordering::equal);
     }
     friend constexpr void swap(inplace_vector&, inplace_vector&) noexcept {}
 };
