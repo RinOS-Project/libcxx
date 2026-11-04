@@ -7,8 +7,10 @@
 #define RINCXX_RANDOM_H
 
 #include "rincxx.h"
+#include "version.h"
 #include "limits.h"
 #include "type_traits.h"
+#include "array.h"
 #include "cstdint.h"
 #include "__nextafter.h"
 #include "cstdlib.h"
@@ -1761,6 +1763,360 @@ public:
         for (unsigned long long i = 0; i < z; ++i) (*this)();
     }
 };
+
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_PHILOX_ENGINE)
+namespace __detail {
+
+template<size_t Index, typename UIntType, UIntType First, UIntType... Rest>
+struct __philox_constant_at
+    : __philox_constant_at<Index - 1u, UIntType, Rest...> {};
+
+template<typename UIntType, UIntType First, UIntType... Rest>
+struct __philox_constant_at<0u, UIntType, First, Rest...>
+    : integral_constant<UIntType, First> {};
+
+} /* namespace __detail */
+
+template<typename UIntType, size_t w, size_t n, size_t r,
+         UIntType... consts>
+class philox_engine {
+    static constexpr size_t array_size = n / 2u;
+
+    static constexpr array<UIntType, array_size> __make_multipliers() {
+        if constexpr (array_size == 1u) {
+            return {{
+                __detail::__philox_constant_at<
+                    0u, UIntType, consts...>::value
+            }};
+        } else {
+            return {{
+                __detail::__philox_constant_at<
+                    0u, UIntType, consts...>::value,
+                __detail::__philox_constant_at<
+                    2u, UIntType, consts...>::value
+            }};
+        }
+    }
+
+    static constexpr array<UIntType, array_size> __make_round_consts() {
+        if constexpr (array_size == 1u) {
+            return {{
+                __detail::__philox_constant_at<
+                    1u, UIntType, consts...>::value
+            }};
+        } else {
+            return {{
+                __detail::__philox_constant_at<
+                    1u, UIntType, consts...>::value,
+                __detail::__philox_constant_at<
+                    3u, UIntType, consts...>::value
+            }};
+        }
+    }
+
+public:
+    using result_type = UIntType;
+
+    inline static constexpr size_t word_size = w;
+    inline static constexpr size_t word_count = n;
+    inline static constexpr size_t round_count = r;
+    inline static constexpr array<result_type, array_size> multipliers =
+        __make_multipliers();
+    inline static constexpr array<result_type, array_size> round_consts =
+        __make_round_consts();
+    inline static constexpr result_type default_seed = 20111115u;
+
+private:
+    result_type keys_[array_size];
+    result_type counter_[n];
+    result_type output_[n];
+    size_t index_;
+
+    static_assert(is_unsigned<UIntType>::value,
+                  "philox_engine requires an unsigned result type");
+    static_assert(sizeof...(consts) == n,
+                  "philox_engine requires two constants per counter pair");
+    static_assert(n == 2u || n == 4u,
+                  "philox_engine supports two- and four-word counters");
+    static_assert(r > 0u, "philox_engine requires at least one round");
+    static_assert(w > 0u && w <= numeric_limits<UIntType>::digits,
+                  "philox_engine word width is outside UIntType");
+
+    static constexpr result_type __word_mask() noexcept {
+        if constexpr (w == numeric_limits<result_type>::digits) {
+            return static_cast<result_type>(~static_cast<result_type>(0));
+        } else {
+            return static_cast<result_type>(
+                (static_cast<result_type>(1u) << w) - 1u);
+        }
+    }
+
+    static void __multiply_halves(result_type left, result_type right,
+                                  result_type& high,
+                                  result_type& low) noexcept {
+        if constexpr (w == 1u) {
+            low = static_cast<result_type>(left & right);
+            high = 0u;
+        } else {
+            constexpr size_t half_width = w / 2u;
+            constexpr unsigned long long half_mask =
+                (1ull << half_width) - 1ull;
+            const unsigned long long left_low =
+                static_cast<unsigned long long>(left) & half_mask;
+            const unsigned long long left_high =
+                static_cast<unsigned long long>(left) >> half_width;
+            const unsigned long long right_low =
+                static_cast<unsigned long long>(right) & half_mask;
+            const unsigned long long right_high =
+                static_cast<unsigned long long>(right) >> half_width;
+            const unsigned long long low_product = left_low * right_low;
+            const unsigned long long cross_left = left_low * right_high;
+            const unsigned long long cross_right = left_high * right_low;
+            const unsigned long long middle =
+                (low_product >> half_width) +
+                (cross_left & half_mask) +
+                (cross_right & half_mask);
+            const unsigned long long low_value =
+                ((middle & half_mask) << half_width) |
+                (low_product & half_mask);
+            const unsigned long long high_value =
+                left_high * right_high +
+                (cross_left >> half_width) +
+                (cross_right >> half_width) +
+                (middle >> half_width);
+            low = static_cast<result_type>(low_value) & __word_mask();
+            high = static_cast<result_type>(high_value) & __word_mask();
+        }
+    }
+
+    void __generate_block_from(const result_type* counter,
+                               result_type* output) const noexcept {
+        array<result_type, n> values = {};
+        array<result_type, n> next = {};
+        for (size_t word = 0u; word < n; ++word)
+            values[word] = counter[word] & __word_mask();
+
+        for (size_t round = 0u; round < r; ++round) {
+            array<result_type, n> permuted = {};
+            if constexpr (n == 2u) {
+                permuted = values;
+            } else {
+                /* LWG 4134's four-word P-box is applied at every round. */
+                permuted[0] = values[2];
+                permuted[1] = values[1];
+                permuted[2] = values[0];
+                permuted[3] = values[3];
+            }
+            for (size_t pair = 0u; pair < array_size; ++pair) {
+                result_type high = 0u;
+                result_type low = 0u;
+                __multiply_halves(permuted[2u * pair], multipliers[pair],
+                                  high, low);
+                const result_type round_key = static_cast<result_type>(
+                    keys_[pair] + static_cast<result_type>(round) *
+                                      round_consts[pair]) & __word_mask();
+                next[2u * pair] = static_cast<result_type>(
+                    high ^ round_key ^ permuted[2u * pair + 1u]);
+                next[2u * pair + 1u] = low;
+            }
+            values = next;
+        }
+
+        for (size_t word = 0u; word < n; ++word)
+            output[word] = values[word] & __word_mask();
+    }
+
+    void __increment_counter() noexcept {
+        for (size_t word = 0u; word < n; ++word) {
+            counter_[word] = static_cast<result_type>(
+                counter_[word] + 1u) & __word_mask();
+            if (counter_[word] != 0u) break;
+        }
+    }
+
+    static void __decrement_counter(result_type* counter) noexcept {
+        for (size_t word = 0u; word < n; ++word) {
+            if (counter[word] != 0u) {
+                --counter[word];
+                return;
+            }
+            counter[word] = __word_mask();
+        }
+    }
+
+    template<typename SeedSequence>
+    using __enable_seed_sequence = enable_if_t<
+        __detail::__is_seed_sequence<SeedSequence>::value &&
+        !is_same<remove_cvref_t<SeedSequence>, philox_engine>::value &&
+        !is_convertible<SeedSequence&, result_type>::value>;
+
+public:
+    static constexpr result_type min() noexcept { return 0u; }
+    static constexpr result_type max() noexcept { return __word_mask(); }
+
+    philox_engine() : philox_engine(default_seed) {}
+
+    explicit philox_engine(result_type value) { seed(value); }
+
+    template<typename SeedSequence,
+             typename = __enable_seed_sequence<SeedSequence>>
+    explicit philox_engine(SeedSequence& sequence) {
+        seed(sequence);
+    }
+
+    void seed(result_type value = default_seed) noexcept {
+        for (size_t key = 0u; key < array_size; ++key)
+            keys_[key] = 0u;
+        keys_[0] = value & __word_mask();
+        for (size_t word = 0u; word < n; ++word) {
+            counter_[word] = 0u;
+            output_[word] = 0u;
+        }
+        index_ = n - 1u;
+    }
+
+    template<typename SeedSequence>
+    __enable_seed_sequence<SeedSequence> seed(SeedSequence& sequence) {
+        constexpr size_t words_per_key = (w + 31u) / 32u;
+        uint_least32_t words[array_size * words_per_key];
+        sequence.generate(words, words + array_size * words_per_key);
+        for (size_t key = 0u; key < array_size; ++key) {
+            result_type value = 0u;
+            for (size_t word = 0u; word < words_per_key; ++word) {
+                value |= static_cast<result_type>(
+                             words[key * words_per_key + word])
+                         << (32u * word);
+            }
+            keys_[key] = value & __word_mask();
+        }
+        for (size_t word = 0u; word < n; ++word) {
+            counter_[word] = 0u;
+            output_[word] = 0u;
+        }
+        index_ = n - 1u;
+    }
+
+    void set_counter(const array<result_type, n>& counter) noexcept {
+        for (size_t word = 0u; word < n; ++word)
+            counter_[word] = counter[n - 1u - word] & __word_mask();
+        index_ = n - 1u;
+    }
+
+    result_type operator()() noexcept {
+        ++index_;
+        if (index_ == n) {
+            __generate_block_from(counter_, output_);
+            __increment_counter();
+            index_ = 0u;
+        }
+        return output_[index_];
+    }
+
+    void discard(unsigned long long count) noexcept {
+        while (count != 0u) {
+            (void)(*this)();
+            --count;
+        }
+    }
+
+    friend bool operator==(const philox_engine& left,
+                           const philox_engine& right) noexcept {
+        if (left.index_ != right.index_) return false;
+        for (size_t key = 0u; key < array_size; ++key)
+            if (left.keys_[key] != right.keys_[key]) return false;
+        for (size_t word = 0u; word < n; ++word)
+            if (left.counter_[word] != right.counter_[word]) return false;
+        return true;
+    }
+
+    friend bool operator!=(const philox_engine& left,
+                           const philox_engine& right) noexcept {
+        return !(left == right);
+    }
+
+    template<typename CharT, typename Traits>
+    friend basic_ostream<CharT, Traits>&
+    operator<<(basic_ostream<CharT, Traits>& stream,
+               const philox_engine& engine) {
+        using stream_type = basic_ostream<CharT, Traits>;
+        const typename stream_type::fmtflags flags = stream.flags();
+        const CharT fill = stream.fill();
+        stream.flags(stream_type::dec | stream_type::fixed |
+                     stream_type::left);
+        stream.fill(static_cast<CharT>(' '));
+        bool first = true;
+        for (size_t key = 0u; key < array_size; ++key) {
+            if (!first) stream << static_cast<CharT>(' ');
+            __detail::__random_write_integer(stream, engine.keys_[key]);
+            first = false;
+        }
+        for (size_t word = 0u; word < n; ++word) {
+            stream << static_cast<CharT>(' ');
+            __detail::__random_write_integer(stream, engine.counter_[word]);
+        }
+        stream << static_cast<CharT>(' ');
+        __detail::__random_write_integer(stream, engine.index_);
+        stream.flags(flags);
+        stream.fill(fill);
+        return stream;
+    }
+
+    template<typename CharT, typename Traits>
+    friend basic_istream<CharT, Traits>&
+    operator>>(basic_istream<CharT, Traits>& stream,
+               philox_engine& engine) {
+        using stream_type = basic_istream<CharT, Traits>;
+        const typename stream_type::fmtflags flags = stream.flags();
+        stream.flags(stream_type::dec | stream_type::skipws);
+
+        result_type keys[array_size];
+        result_type counter[n];
+        result_type parsed = 0u;
+        bool valid = true;
+        for (size_t key = 0u; key < array_size && valid; ++key) {
+            valid = __detail::__random_read_decimal(
+                stream, __word_mask(), keys[key]);
+        }
+        for (size_t word = 0u; word < n && valid; ++word) {
+            valid = __detail::__random_read_decimal(
+                stream, __word_mask(), counter[word]);
+        }
+        if (valid) {
+            valid = __detail::__random_read_decimal(
+                stream, static_cast<result_type>(n - 1u), parsed);
+        }
+        if (!valid || stream.fail()) {
+            stream.setstate(stream_type::failbit);
+        } else {
+            for (size_t key = 0u; key < array_size; ++key)
+                engine.keys_[key] = keys[key];
+            for (size_t word = 0u; word < n; ++word)
+                engine.counter_[word] = counter[word];
+            engine.index_ = static_cast<size_t>(parsed);
+            for (size_t word = 0u; word < n; ++word)
+                engine.output_[word] = 0u;
+            if (engine.index_ != n - 1u) {
+                result_type previous_counter[n];
+                for (size_t word = 0u; word < n; ++word)
+                    previous_counter[word] = engine.counter_[word];
+                __decrement_counter(previous_counter);
+                engine.__generate_block_from(previous_counter,
+                                              engine.output_);
+            }
+        }
+        stream.flags(flags);
+        return stream;
+    }
+};
+
+using philox4x32 = philox_engine<
+    uint_fast32_t, 32u, 4u, 10u,
+    0xCD9E8D57u, 0x9E3779B9u, 0xD2511F53u, 0xBB67AE85u>;
+using philox4x64 = philox_engine<
+    uint_fast64_t, 64u, 4u, 10u,
+    0xCA5A826395121157ull, 0x9E3779B97F4A7C15ull,
+    0xD2E7470EE14C6C93ull, 0xBB67AE8584CAA73Bull>;
+#endif
 
 /* デフォルトエンジン */
 using default_random_engine = mt19937;
