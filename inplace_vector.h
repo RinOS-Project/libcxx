@@ -114,7 +114,14 @@ private:
         T elements[N];
 
         constexpr storage_type() noexcept : inactive(0) {}
-        constexpr ~storage_type() {}
+        storage_type(const storage_type&) = default;
+        storage_type(storage_type&&) = default;
+        storage_type& operator=(const storage_type&) = default;
+        storage_type& operator=(storage_type&&) = default;
+        constexpr ~storage_type()
+            requires is_trivially_destructible<T>::value = default;
+        ~storage_type()
+            requires (!is_trivially_destructible<T>::value) {}
     };
 
     storage_type storage_;
@@ -244,12 +251,22 @@ public:
         construct_range(ranges::begin(range), ranges::end(range));
     }
 
-    constexpr inplace_vector(const inplace_vector& other) : inplace_vector() {
+    constexpr inplace_vector(const inplace_vector&)
+        requires is_trivially_copy_constructible<T>::value = default;
+
+    constexpr inplace_vector(const inplace_vector& other)
+        requires (!is_trivially_copy_constructible<T>::value)
+        : inplace_vector() {
         construct_range(other.begin(), other.end());
     }
 
+    constexpr inplace_vector(inplace_vector&&)
+        noexcept(is_nothrow_move_constructible<T>::value)
+        requires is_trivially_move_constructible<T>::value = default;
+
     constexpr inplace_vector(inplace_vector&& other)
         noexcept(is_nothrow_move_constructible<T>::value)
+        requires (!is_trivially_move_constructible<T>::value)
         : inplace_vector() {
 #if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
         try {
@@ -270,16 +287,38 @@ public:
         construct_range(values.begin(), values.end());
     }
 
-    constexpr ~inplace_vector() { clear(); }
+    constexpr ~inplace_vector()
+        requires is_trivially_destructible<T>::value = default;
 
-    constexpr inplace_vector& operator=(const inplace_vector& other) {
+    constexpr ~inplace_vector()
+        requires (!is_trivially_destructible<T>::value) { clear(); }
+
+    constexpr inplace_vector& operator=(const inplace_vector&)
+        requires (is_trivially_destructible<T>::value &&
+                  is_trivially_copy_constructible<T>::value &&
+                  is_trivially_copy_assignable<T>::value) = default;
+
+    constexpr inplace_vector& operator=(const inplace_vector& other)
+        requires (!(is_trivially_destructible<T>::value &&
+                    is_trivially_copy_constructible<T>::value &&
+                    is_trivially_copy_assignable<T>::value)) {
         if (this != &other) assign(other.begin(), other.end());
         return *this;
     }
 
     constexpr inplace_vector& operator=(inplace_vector&& other)
         noexcept(is_nothrow_move_assignable<T>::value &&
-                 is_nothrow_move_constructible<T>::value) {
+                 is_nothrow_move_constructible<T>::value)
+        requires (is_trivially_destructible<T>::value &&
+                  is_trivially_move_constructible<T>::value &&
+                  is_trivially_move_assignable<T>::value) = default;
+
+    constexpr inplace_vector& operator=(inplace_vector&& other)
+        noexcept(is_nothrow_move_assignable<T>::value &&
+                 is_nothrow_move_constructible<T>::value)
+        requires (!(is_trivially_destructible<T>::value &&
+                    is_trivially_move_constructible<T>::value &&
+                    is_trivially_move_assignable<T>::value)) {
         if (this != &other) {
             clear();
 #if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
