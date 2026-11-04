@@ -608,6 +608,12 @@ private:
     template<class R>
     vector stage_compatible_range(R&& range) {
         vector staged(m_alloc);
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_RESERVE_HINT)
+        if constexpr (ranges::approximately_sized_range<R>) {
+            staged.reserve(static_cast<size_type>(
+                ranges::reserve_hint(range)));
+        }
+#endif
         auto first = ranges::begin(range);
         auto last = ranges::end(range);
         for (; first != last; ++first)
@@ -1596,6 +1602,11 @@ public:
         requires detail::container_compatible_range<R, bool>
     vector(from_range_t, R&& range, const Allocator& alloc = Allocator())
         : vector(alloc) {
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_RESERVE_HINT)
+        if constexpr (ranges::approximately_sized_range<R>) {
+            reserve(static_cast<size_type>(ranges::reserve_hint(range)));
+        }
+#endif
         for (auto&& value : range) push_back(static_cast<bool>(value));
     }
 #endif

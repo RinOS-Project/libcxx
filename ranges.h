@@ -62,6 +62,7 @@ namespace detail {
     void begin() = delete;
     void end() = delete;
     void size() = delete;
+    void reserve_hint() = delete;
     void rbegin() = delete;
     void rend() = delete;
 
@@ -84,6 +85,13 @@ namespace detail {
         noexcept(noexcept(size(std::forward<T>(value))))
         -> decltype(size(std::forward<T>(value))) {
         return size(std::forward<T>(value));
+    }
+
+    template<typename T>
+    constexpr auto adl_reserve_hint(T&& value)
+        noexcept(noexcept(reserve_hint(std::forward<T>(value))))
+        -> decltype(reserve_hint(std::forward<T>(value))) {
+        return reserve_hint(std::forward<T>(value));
     }
 
     template<typename T>
@@ -134,18 +142,44 @@ namespace detail {
     struct has_empty<T, void_t<decltype(static_cast<bool>(declval<T&>().empty()))>>
         : true_type {};
 
+    template<typename T>
+    inline constexpr bool integer_like =
+        is_integral<remove_cv_t<remove_reference_t<T>>>::value &&
+        !is_same<remove_cv_t<remove_reference_t<T>>, bool>::value;
+
     template<typename T, typename = void>
     struct has_size : false_type {};
 
     template<typename T>
-    struct has_size<T, void_t<decltype(declval<T&>().size())>> : true_type {};
+    struct has_size<T, void_t<decltype(declval<T&>().size())>>
+        : integral_constant<bool,
+              integer_like<decltype(declval<T&>().size())>> {};
 
     template<typename T, typename = void>
     struct has_adl_size : false_type {};
 
     template<typename T>
     struct has_adl_size<T, void_t<decltype(adl_size(declval<T&>()))>>
-        : true_type {};
+        : integral_constant<bool,
+              integer_like<decltype(adl_size(declval<T&>()))>> {};
+
+    template<typename T, typename = void>
+    struct has_reserve_hint : false_type {};
+
+    template<typename T>
+    struct has_reserve_hint<T,
+        void_t<decltype(declval<T&>().reserve_hint())>>
+        : integral_constant<bool,
+              integer_like<decltype(declval<T&>().reserve_hint())>> {};
+
+    template<typename T, typename = void>
+    struct has_adl_reserve_hint : false_type {};
+
+    template<typename T>
+    struct has_adl_reserve_hint<T,
+        void_t<decltype(adl_reserve_hint(declval<T&>()))>>
+        : integral_constant<bool,
+              integer_like<decltype(adl_reserve_hint(declval<T&>()))>> {};
 
     template<typename T, typename = void>
     struct has_data : false_type {};
@@ -244,6 +278,7 @@ namespace detail {
                decltype(declval<typename range_access<R>::iterator>() -
                         declval<typename range_access<R>::sentinel>())>>
         : integral_constant<bool,
+            forward_iterator<typename range_access<R>::iterator> &&
             sized_sentinel_for<typename range_access<R>::sentinel,
                                typename range_access<R>::iterator>> {};
 
@@ -316,14 +351,6 @@ concept contiguous_range = random_access_range<T> &&
  * sized-sentinel end - begin fallback remains independently available. */
 template<typename T>
 inline constexpr bool disable_sized_range = false;
-
-template<typename T>
-concept sized_range = range<T> &&
-    ((!disable_sized_range<remove_cvref_t<T>> &&
-      (detail::has_size<T>::value || detail::has_adl_size<T>::value)) ||
-     detail::has_sized_sentinel<T>::value ||
-     is_array<remove_reference_t<T>>::value);
-
 
 /* borrowed_range - ????????????????? */
 template<typename T>
@@ -817,9 +844,8 @@ struct size_fn {
                              detail::has_size<remove_reference_t<R>>::value,
                          int> = 0>
     constexpr auto operator()(R&& r) const
-        noexcept(noexcept(std::forward<R>(r).size()))
-        -> decltype(std::forward<R>(r).size()) {
-        return std::forward<R>(r).size();
+        noexcept(noexcept(declval<remove_reference_t<R>&>().size())) {
+        return r.size();
     }
 
     template<typename R,
@@ -828,9 +854,8 @@ struct size_fn {
                              detail::has_adl_size<remove_reference_t<R>>::value,
                          int> = 0>
     constexpr auto operator()(R&& r) const
-        noexcept(noexcept(detail::adl_size(std::forward<R>(r))))
-        -> decltype(detail::adl_size(std::forward<R>(r))) {
-        return detail::adl_size(std::forward<R>(r));
+        noexcept(noexcept(detail::adl_size(declval<remove_reference_t<R>&>()))) {
+        return detail::adl_size(r);
     }
 
     template<typename R,
@@ -840,14 +865,12 @@ struct size_fn {
                              detail::has_sized_sentinel<remove_reference_t<R>>::value,
                          int> = 0>
     constexpr auto operator()(R&& r) const
-        noexcept(noexcept(end_fn{}(std::forward<R>(r)) -
-                          begin_fn{}(std::forward<R>(r))))
-        -> make_unsigned_t<remove_cv_t<decltype(
-            end_fn{}(std::forward<R>(r)) - begin_fn{}(std::forward<R>(r)))>> {
-        using result_type = make_unsigned_t<remove_cv_t<decltype(
-            end_fn{}(std::forward<R>(r)) - begin_fn{}(std::forward<R>(r)))>>;
-        return static_cast<result_type>(
-            end_fn{}(std::forward<R>(r)) - begin_fn{}(std::forward<R>(r)));
+        noexcept(noexcept(end_fn{}(declval<remove_reference_t<R>&>()) -
+                          begin_fn{}(declval<remove_reference_t<R>&>()))) {
+        using difference_type = remove_cv_t<decltype(
+            end_fn{}(r) - begin_fn{}(r))>;
+        using result_type = make_unsigned_t<difference_type>;
+        return static_cast<result_type>(end_fn{}(r) - begin_fn{}(r));
     }
 
     template<typename T, size_t N>
@@ -855,6 +878,48 @@ struct size_fn {
         return N;
     }
 };
+
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_RESERVE_HINT)
+template<typename R, typename = void>
+struct has_size_cpo : false_type {};
+
+template<typename R>
+struct has_size_cpo<R, void_t<decltype(size_fn{}(
+    declval<remove_reference_t<R>&>()))>> : true_type {};
+
+struct reserve_hint_fn {
+    template<typename R,
+             enable_if_t<has_size_cpo<R>::value, int> = 0>
+    constexpr auto operator()(R&& r) const
+        noexcept(noexcept(size_fn{}(r))) {
+        return size_fn{}(r);
+    }
+
+    template<typename R,
+             enable_if_t<!has_size_cpo<R>::value &&
+                             detail::has_reserve_hint<
+                                 remove_reference_t<R>>::value,
+                         int> = 0>
+    constexpr auto operator()(R&& r) const
+        noexcept(noexcept(r.reserve_hint())) {
+        return r.reserve_hint();
+    }
+
+    template<typename R,
+             enable_if_t<!has_size_cpo<R>::value &&
+                             !detail::has_reserve_hint<
+                                 remove_reference_t<R>>::value &&
+                             (is_class<remove_cvref_t<R>>::value ||
+                              is_enum<remove_cvref_t<R>>::value) &&
+                             detail::has_adl_reserve_hint<
+                                 remove_reference_t<R>>::value,
+                         int> = 0>
+    constexpr auto operator()(R&& r) const
+        noexcept(noexcept(detail::adl_reserve_hint(r))) {
+        return detail::adl_reserve_hint(r);
+    }
+};
+#endif
 
 struct empty_fn {
 private:
@@ -1169,6 +1234,9 @@ struct ssize_fn {
 inline constexpr __cpo::begin_fn begin{};
 inline constexpr __cpo::end_fn end{};
 inline constexpr __cpo::size_fn size{};
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_RESERVE_HINT)
+inline constexpr __cpo::reserve_hint_fn reserve_hint{};
+#endif
 inline constexpr __cpo::empty_fn empty{};
 inline constexpr __cpo::data_fn data{};
 inline constexpr __cpo::cbegin_fn cbegin{};
@@ -1179,6 +1247,25 @@ inline constexpr __cpo::crbegin_fn crbegin{};
 inline constexpr __cpo::crend_fn crend{};
 inline constexpr __cpo::cdata_fn cdata{};
 inline constexpr __cpo::ssize_fn ssize{};
+
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_RESERVE_HINT)
+template<typename T>
+concept approximately_sized_range = range<T> && requires(T& t) {
+    ranges::reserve_hint(t);
+};
+
+template<typename T>
+concept sized_range = approximately_sized_range<T> && requires(T& t) {
+    ranges::size(t);
+};
+#else
+template<typename T>
+concept sized_range = range<T> &&
+    ((!disable_sized_range<remove_cvref_t<T>> &&
+      (detail::has_size<T>::value || detail::has_adl_size<T>::value)) ||
+     detail::has_sized_sentinel<T>::value ||
+     is_array<remove_reference_t<T>>::value);
+#endif
 
 template<input_or_output_iterator I, sentinel_for<I> S>
 constexpr iter_difference_t<I> distance(I first, S last) {
@@ -1600,6 +1687,11 @@ public:
     constexpr auto size() const requires sized_range<R> {
         return ranges::size(*range_);
     }
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_RESERVE_HINT)
+    constexpr auto reserve_hint() const requires approximately_sized_range<R> {
+        return ranges::reserve_hint(*range_);
+    }
+#endif
     constexpr auto data() const requires contiguous_range<R> {
         return ranges::data(*range_);
     }
@@ -1650,6 +1742,15 @@ public:
       constexpr auto size() const requires sized_range<const R> {
           return ranges::size(std::as_const(range_));
       }
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_RESERVE_HINT)
+      constexpr auto reserve_hint() requires approximately_sized_range<R> {
+          return ranges::reserve_hint(range_);
+      }
+      constexpr auto reserve_hint() const
+          requires approximately_sized_range<const R> {
+          return ranges::reserve_hint(std::as_const(range_));
+      }
+#endif
 };
 
 template<typename R>
@@ -2946,6 +3047,30 @@ public:
         return second_size > maximum - first_size
             ? maximum : first_size + second_size;
     }
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_RESERVE_HINT)
+    constexpr auto reserve_hint()
+        requires approximately_sized_range<V1> &&
+                 approximately_sized_range<V2> {
+        using common_type = common_type_t<
+            decltype(ranges::reserve_hint(first_)),
+            decltype(ranges::reserve_hint(second_))>;
+        using result_type = make_unsigned_t<common_type>;
+        return static_cast<result_type>(ranges::reserve_hint(first_)) +
+               static_cast<result_type>(ranges::reserve_hint(second_));
+    }
+    constexpr auto reserve_hint() const
+        requires approximately_sized_range<const V1> &&
+                 approximately_sized_range<const V2> {
+        using common_type = common_type_t<
+            decltype(ranges::reserve_hint(std::as_const(first_))),
+            decltype(ranges::reserve_hint(std::as_const(second_)))>;
+        using result_type = make_unsigned_t<common_type>;
+        return static_cast<result_type>(
+                   ranges::reserve_hint(std::as_const(first_))) +
+               static_cast<result_type>(
+                   ranges::reserve_hint(std::as_const(second_)));
+    }
+#endif
 };
 
 template<typename R1, typename R2>
@@ -3605,6 +3730,15 @@ public:
     constexpr auto size() const requires sized_range<const V> {
         return ranges::size(std::as_const(base_));
     }
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_RESERVE_HINT)
+    constexpr auto reserve_hint() requires approximately_sized_range<V> {
+        return ranges::reserve_hint(base_);
+    }
+    constexpr auto reserve_hint() const
+        requires approximately_sized_range<const V> {
+        return ranges::reserve_hint(std::as_const(base_));
+    }
+#endif
 };
 
 template<typename V, typename F>
@@ -4003,6 +4137,15 @@ public:
     constexpr auto size() const requires sized_range<const V> {
         return ranges::size(std::as_const(base_));
     }
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_RESERVE_HINT)
+    constexpr auto reserve_hint() requires approximately_sized_range<V> {
+        return ranges::reserve_hint(base_);
+    }
+    constexpr auto reserve_hint() const
+        requires approximately_sized_range<const V> {
+        return ranges::reserve_hint(std::as_const(base_));
+    }
+#endif
 };
 
 template<typename R>
@@ -4155,6 +4298,32 @@ public:
         const size_type requested = static_cast<size_type>(count_);
         return s < requested ? s : requested;
     }
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_RESERVE_HINT)
+    constexpr auto reserve_hint() {
+        using difference_type = range_difference_t<V>;
+        if constexpr (approximately_sized_range<V>) {
+            const difference_type hint = static_cast<difference_type>(
+                ranges::reserve_hint(base_));
+            return static_cast<make_unsigned_t<difference_type>>(
+                hint < count_ ? hint : count_);
+        }
+        return static_cast<make_unsigned_t<difference_type>>(count_);
+    }
+    constexpr auto reserve_hint() const {
+        if constexpr (approximately_sized_range<const V>) {
+            using difference_type = range_difference_t<const V>;
+            const difference_type hint = static_cast<difference_type>(
+                ranges::reserve_hint(std::as_const(base_)));
+            const difference_type count =
+                static_cast<difference_type>(count_);
+            return static_cast<make_unsigned_t<difference_type>>(
+                hint < count ? hint : count);
+        } else {
+            using difference_type = range_difference_t<V>;
+            return static_cast<make_unsigned_t<difference_type>>(count_);
+        }
+    }
+#endif
 };
 
 template<typename R>
@@ -4219,6 +4388,23 @@ public:
         const size_type requested = static_cast<size_type>(count_);
         return s < requested ? static_cast<size_type>(0) : s - requested;
     }
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_RESERVE_HINT)
+    constexpr auto reserve_hint() requires approximately_sized_range<V> {
+        const auto hint = static_cast<range_difference_t<V>>(
+            ranges::reserve_hint(base_));
+        using size_type = make_unsigned_t<range_difference_t<V>>;
+        return static_cast<size_type>(
+            hint < count_ ? 0 : hint - count_);
+    }
+    constexpr auto reserve_hint() const
+        requires approximately_sized_range<const V> {
+        const auto hint = static_cast<range_difference_t<const V>>(
+            ranges::reserve_hint(std::as_const(base_)));
+        const auto count = static_cast<range_difference_t<const V>>(count_);
+        using size_type = make_unsigned_t<range_difference_t<const V>>;
+        return static_cast<size_type>(hint < count ? 0 : hint - count);
+    }
+#endif
 };
 
 template<typename R>
@@ -4260,6 +4446,15 @@ public:
         requires bidirectional_range<const V> && common_range<const V> {
         return make_reverse_iterator(ranges::begin(std::as_const(base_)));
     }
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_RESERVE_HINT)
+    constexpr auto reserve_hint() requires approximately_sized_range<V> {
+        return ranges::reserve_hint(base_);
+    }
+    constexpr auto reserve_hint() const
+        requires approximately_sized_range<const V> {
+        return ranges::reserve_hint(std::as_const(base_));
+    }
+#endif
 };
 
 template<typename R>
@@ -4314,6 +4509,15 @@ public:
     constexpr auto size() const requires sized_range<const V> {
         return ranges::size(base_);
     }
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_RESERVE_HINT)
+    constexpr auto reserve_hint() requires approximately_sized_range<V> {
+        return ranges::reserve_hint(base_);
+    }
+    constexpr auto reserve_hint() const
+        requires approximately_sized_range<const V> {
+        return ranges::reserve_hint(base_);
+    }
+#endif
 };
 
 template<typename R>
@@ -5452,6 +5656,23 @@ public:
             std::as_const(base_)));
         return count == 0u ? 0u : count - 1u;
     }
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_RESERVE_HINT)
+    constexpr auto reserve_hint() requires approximately_sized_range<V> {
+        using difference_type = range_difference_t<V>;
+        const difference_type hint = static_cast<difference_type>(
+            ranges::reserve_hint(base_));
+        return static_cast<make_unsigned_t<difference_type>>(
+            hint > 0 ? hint - 1 : 0);
+    }
+    constexpr auto reserve_hint() const
+        requires approximately_sized_range<const V> {
+        using difference_type = range_difference_t<const V>;
+        const difference_type hint = static_cast<difference_type>(
+            ranges::reserve_hint(std::as_const(base_)));
+        return static_cast<make_unsigned_t<difference_type>>(
+            hint > 0 ? hint - 1 : 0);
+    }
+#endif
 };
 
 template<typename R>
@@ -5624,6 +5845,27 @@ public:
             ranges::size(std::as_const(base_)));
         return count < N ? 0u : count - N + 1u;
     }
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_RESERVE_HINT)
+    constexpr auto reserve_hint() requires approximately_sized_range<V> {
+        using difference_type = range_difference_t<V>;
+        using common_type = common_type_t<difference_type, size_t>;
+        common_type hint = static_cast<common_type>(
+            ranges::reserve_hint(base_));
+        const common_type overlap = static_cast<common_type>(N - 1);
+        hint -= std::min(hint, overlap);
+        return static_cast<make_unsigned_t<common_type>>(hint);
+    }
+    constexpr auto reserve_hint() const
+        requires approximately_sized_range<const V> {
+        using difference_type = range_difference_t<const V>;
+        using common_type = common_type_t<difference_type, size_t>;
+        common_type hint = static_cast<common_type>(
+            ranges::reserve_hint(std::as_const(base_)));
+        const common_type overlap = static_cast<common_type>(N - 1);
+        hint -= std::min(hint, overlap);
+        return static_cast<make_unsigned_t<common_type>>(hint);
+    }
+#endif
 };
 
 template<typename V, size_t N>
@@ -6464,6 +6706,15 @@ public:
     constexpr auto size() const requires sized_range<const V> {
         return ranges::size(base_);
     }
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_RESERVE_HINT)
+    constexpr auto reserve_hint() requires approximately_sized_range<V> {
+        return ranges::reserve_hint(base_);
+    }
+    constexpr auto reserve_hint() const
+        requires approximately_sized_range<const V> {
+        return ranges::reserve_hint(std::as_const(base_));
+    }
+#endif
 
     constexpr V base() const& requires copy_constructible<V> { return base_; }
     constexpr V base() && { return std::move(base_); }
@@ -6824,6 +7075,27 @@ public:
             ranges::size(std::as_const(base_)));
         return n / count_ + (n % count_ != 0u ? 1u : 0u);
     }
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_RESERVE_HINT)
+    constexpr auto reserve_hint() requires approximately_sized_range<V> {
+        using difference_type = range_difference_t<V>;
+        if (count_ == 0u) return make_unsigned_t<difference_type>(0);
+        const difference_type hint = static_cast<difference_type>(
+            ranges::reserve_hint(base_));
+        const difference_type count = static_cast<difference_type>(count_);
+        return static_cast<make_unsigned_t<difference_type>>(
+            hint / count + (hint % count != 0 ? 1 : 0));
+    }
+    constexpr auto reserve_hint() const
+        requires approximately_sized_range<const V> {
+        using difference_type = range_difference_t<const V>;
+        if (count_ == 0u) return make_unsigned_t<difference_type>(0);
+        const difference_type hint = static_cast<difference_type>(
+            ranges::reserve_hint(std::as_const(base_)));
+        const difference_type count = static_cast<difference_type>(count_);
+        return static_cast<make_unsigned_t<difference_type>>(
+            hint / count + (hint % count != 0 ? 1 : 0));
+    }
+#endif
 };
 
 /* A single-pass source cannot form a chunk by advancing a copy of its
@@ -6954,6 +7226,11 @@ class chunk_view<V> : public view_interface<chunk_view<V>> {
             return available < parent_->remainder_
                 ? available : parent_->remainder_;
         }
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_RESERVE_HINT)
+        constexpr size_t reserve_hint() const noexcept {
+            return parent_->remainder_;
+        }
+#endif
     };
 
     class outer_iterator {
@@ -7089,6 +7366,27 @@ public:
             ranges::size(std::as_const(base_)));
         return n / count_ + (n % count_ != 0u ? 1u : 0u);
     }
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_RESERVE_HINT)
+    constexpr auto reserve_hint() requires approximately_sized_range<V> {
+        using difference_type = range_difference_t<V>;
+        if (count_ == 0u) return make_unsigned_t<difference_type>(0);
+        const difference_type hint = static_cast<difference_type>(
+            ranges::reserve_hint(base_));
+        const difference_type count = static_cast<difference_type>(count_);
+        return static_cast<make_unsigned_t<difference_type>>(
+            hint / count + (hint % count != 0 ? 1 : 0));
+    }
+    constexpr auto reserve_hint() const
+        requires approximately_sized_range<const V> {
+        using difference_type = range_difference_t<const V>;
+        if (count_ == 0u) return make_unsigned_t<difference_type>(0);
+        const difference_type hint = static_cast<difference_type>(
+            ranges::reserve_hint(std::as_const(base_)));
+        const difference_type count = static_cast<difference_type>(count_);
+        return static_cast<make_unsigned_t<difference_type>>(
+            hint / count + (hint % count != 0 ? 1 : 0));
+    }
+#endif
 };
 
 template<typename R>
@@ -7430,6 +7728,23 @@ public:
             distance - static_cast<const_difference_type>(count_) + 1;
         return result > 0 ? static_cast<size_type>(result) : size_type(0);
     }
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_RESERVE_HINT)
+    constexpr auto reserve_hint() requires approximately_sized_range<V> {
+        auto hint = static_cast<difference_type>(ranges::reserve_hint(base_));
+        auto result = hint - count_ + 1;
+        if (result < 0) result = 0;
+        return static_cast<make_unsigned_t<difference_type>>(result);
+    }
+    constexpr auto reserve_hint() const
+        requires approximately_sized_range<const V> {
+        using const_difference_type = range_difference_t<const V>;
+        auto hint = static_cast<const_difference_type>(
+            ranges::reserve_hint(std::as_const(base_)));
+        auto result = hint - static_cast<const_difference_type>(count_) + 1;
+        if (result < 0) result = 0;
+        return static_cast<make_unsigned_t<const_difference_type>>(result);
+    }
+#endif
 };
 
 template<typename V>
@@ -7782,6 +8097,24 @@ public:
         return static_cast<size_type>(
             distance / step + (distance % step != 0 ? 1 : 0));
     }
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_RESERVE_HINT)
+    constexpr auto reserve_hint() requires approximately_sized_range<V> {
+        const difference_type hint = static_cast<difference_type>(
+            ranges::reserve_hint(base_));
+        return static_cast<make_unsigned_t<difference_type>>(
+            div_ceil(hint, step_));
+    }
+    constexpr auto reserve_hint() const
+        requires approximately_sized_range<const V> {
+        using const_difference_type = range_difference_t<const V>;
+        const const_difference_type hint = static_cast<const_difference_type>(
+            ranges::reserve_hint(std::as_const(base_)));
+        const const_difference_type step =
+            static_cast<const_difference_type>(step_);
+        return static_cast<make_unsigned_t<const_difference_type>>(
+            div_ceil(hint, step));
+    }
+#endif
 };
 
 template<typename V>
@@ -8665,6 +8998,15 @@ public:
     constexpr auto size() const requires sized_range<const V> {
         return ranges::size(std::as_const(base_));
     }
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_RESERVE_HINT)
+    constexpr auto reserve_hint() requires approximately_sized_range<V> {
+        return ranges::reserve_hint(base_);
+    }
+    constexpr auto reserve_hint() const
+        requires approximately_sized_range<const V> {
+        return ranges::reserve_hint(std::as_const(base_));
+    }
+#endif
 };
 
 template<size_t N, typename F>
@@ -13645,9 +13987,34 @@ constexpr void append_container_element(Container& container, Ref&& element) {
 
 template<typename Container, typename R>
 constexpr void reserve_container_for_range(Container& container, R&& range) {
-    if constexpr (ranges::detail::reservable_container<Container> &&
-                  ranges::sized_range<R>) {
+    if constexpr (ranges::detail::reservable_container<Container>) {
         using size_type = decltype(ranges::size(container));
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_RESERVE_HINT)
+        if constexpr (ranges::approximately_sized_range<R>) {
+            using difference_type = ranges::range_difference_t<R>;
+            using unsigned_difference_type = make_unsigned_t<difference_type>;
+            using comparison_type =
+                common_type_t<size_type, unsigned_difference_type>;
+            const difference_type signed_hint = static_cast<difference_type>(
+                ranges::reserve_hint(range));
+            if (signed_hint < 0) return;
+
+            const size_type current_size = ranges::size(container);
+            const size_type maximum_size = container.max_size();
+            if (current_size > maximum_size) return;
+
+            const comparison_type additional_size =
+                static_cast<comparison_type>(
+                    static_cast<unsigned_difference_type>(signed_hint));
+            const comparison_type available = static_cast<comparison_type>(
+                maximum_size - current_size);
+            if (additional_size <= available) {
+                container.reserve(static_cast<size_type>(
+                    current_size + static_cast<size_type>(signed_hint)));
+            }
+        }
+#else
+        if constexpr (ranges::sized_range<R>) {
         using range_size_type = remove_cv_t<decltype(ranges::size(range))>;
         using comparison_type = common_type_t<size_type, range_size_type>;
         const comparison_type current_size =
@@ -13660,17 +14027,19 @@ constexpr void reserve_container_for_range(Container& container, R&& range) {
             container.reserve(static_cast<size_type>(
                 current_size + additional_size));
         }
+        }
+#endif
     }
 }
 
 template<typename Container, typename R>
 constexpr void append_container_range(Container& container, R&& range) {
+    reserve_container_for_range(container, range);
     if constexpr (requires {
                       container.append_range(std::forward<R>(range));
                   }) {
         container.append_range(std::forward<R>(range));
     } else {
-        reserve_container_for_range(container, range);
         auto first = ranges::begin(range);
         auto last = ranges::end(range);
         for (; first != last; ++first) {
