@@ -417,7 +417,7 @@ RIN_ALGORITHM_CONSTEXPR14 void heap_sort(RandomIt first, RandomIt last, Compare 
     // Extract elements
     for (difference_type i = n - 1; i > 0; --i) {
         swap(*first, *(first + i));
-        heapify(first, i, 0, comp);
+        heapify(first, i, static_cast<difference_type>(0), comp);
     }
 }
 

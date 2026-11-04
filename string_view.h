@@ -11,7 +11,6 @@
 #if defined(__cplusplus) && __cplusplus >= 201703L
 #include "cstddef.h"
 #include "type_traits.h"
-#include "algorithm.h"
 #include "iterator.h"
 #include "iosfwd.h"  /* For char_traits */
 #include "__string_hash.h"
@@ -26,6 +25,15 @@
 namespace std {
 
 /* char_traits is defined in iosfwd.h */
+
+namespace __detail {
+
+template<typename T>
+constexpr T string_view_min(T lhs, T rhs) noexcept {
+    return rhs < lhs ? rhs : lhs;
+}
+
+} /* namespace __detail */
 
 template<typename CharT, typename Traits = char_traits<CharT>>
 class basic_string_view {
@@ -317,7 +325,7 @@ public:
             __detail::string_position_out_of_range(
                 "basic_string_view::copy position is out of range");
         }
-        size_type rlen = min(count, m_size - pos);
+        size_type rlen = __detail::string_view_min(count, m_size - pos);
         if (rlen != 0) {
             if (!dest) {
                 __detail::string_position_out_of_range(
@@ -333,7 +341,7 @@ public:
             __detail::string_position_out_of_range(
                 "basic_string_view::substr position is out of range");
         }
-        size_type rlen = min(count, m_size - pos);
+        size_type rlen = __detail::string_view_min(count, m_size - pos);
         return basic_string_view(m_data ? m_data + pos : nullptr, rlen);
     }
 
@@ -345,7 +353,7 @@ public:
 #endif
 
     constexpr int compare(basic_string_view v) const noexcept {
-        size_type rlen = min(m_size, v.m_size);
+        size_type rlen = __detail::string_view_min(m_size, v.m_size);
         int result = 0;
         if (rlen != 0) {
             result = Traits::compare(m_data, v.m_data, rlen);
@@ -443,10 +451,10 @@ public:
     }
 
     constexpr size_type rfind(basic_string_view v, size_type pos = npos) const noexcept {
-        if (v.empty()) return min(pos, m_size);
+        if (v.empty()) return __detail::string_view_min(pos, m_size);
         if (v.m_size > m_size) return npos;
 
-        size_type last = min(pos, m_size - v.m_size);
+        size_type last = __detail::string_view_min(pos, m_size - v.m_size);
         for (size_type i = last + 1; i > 0; --i) {
             if (Traits::compare(m_data + i - 1, v.m_data, v.m_size) == 0) {
                 return i - 1;
@@ -457,7 +465,7 @@ public:
 
     constexpr size_type rfind(CharT c, size_type pos = npos) const noexcept {
         if (m_size == 0) return npos;
-        size_type last = min(pos, m_size - 1);
+        size_type last = __detail::string_view_min(pos, m_size - 1);
         for (size_type i = last + 1; i > 0; --i) {
             if (Traits::eq(m_data[i - 1], c)) return i - 1;
         }
@@ -477,7 +485,7 @@ public:
 
     constexpr size_type find_last_of(basic_string_view v, size_type pos = npos) const noexcept {
         if (m_size == 0) return npos;
-        size_type last = min(pos, m_size - 1);
+        size_type last = __detail::string_view_min(pos, m_size - 1);
         for (size_type i = last + 1; i > 0; --i) {
             if (v.find(m_data[i - 1]) != npos) return i - 1;
         }
@@ -520,7 +528,7 @@ public:
 
     constexpr size_type find_last_not_of(basic_string_view v, size_type pos = npos) const noexcept {
         if (m_size == 0) return npos;
-        size_type last = min(pos, m_size - 1);
+        size_type last = __detail::string_view_min(pos, m_size - 1);
         for (size_type i = last + 1; i > 0; --i) {
             if (v.find(m_data[i - 1]) == npos) return i - 1;
         }
@@ -529,7 +537,7 @@ public:
 
     constexpr size_type find_last_not_of(CharT c, size_type pos = npos) const noexcept {
         if (m_size == 0) return npos;
-        size_type last = min(pos, m_size - 1);
+        size_type last = __detail::string_view_min(pos, m_size - 1);
         for (size_type i = last + 1; i > 0; --i) {
             if (!Traits::eq(m_data[i - 1], c)) return i - 1;
         }
