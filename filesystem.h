@@ -2130,9 +2130,12 @@ class directory_iterator {
              * stat callback is available. */
             current->entry.path_ = entry_path;
             current->entry.status_ = file_status();
+            current->entry.status_valid_ = false;
+            current->entry.metadata_valid_ = false;
             current->entry.file_size_ = 0;
             current->entry.hard_link_count_ = 0;
             current->entry.last_write_time_ = file_time_type::min();
+            current->entry.symlink_status_ = file_status();
             current->entry.symlink_status_valid_ = false;
             publish_entry_metadata(current->entry, de.d_type);
             if (current->entry.path() != entry_path) {
