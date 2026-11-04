@@ -183,8 +183,17 @@ public:
                 propagate_on_container_copy_assignment::value;
         Allocator target_alloc = propagate ? other.alloc_ : alloc_;
         if (!other.engaged_) {
-            reset();
-            if constexpr (propagate) alloc_ = other.alloc_;
+            if constexpr (propagate) {
+                Allocator previous_alloc(alloc_);
+                pointer previous_pointer = pointer_;
+                const bool had_previous = engaged_;
+                alloc_ = other.alloc_;
+                pointer_ = pointer{};
+                engaged_ = false;
+                if (had_previous) destroy(previous_alloc, previous_pointer);
+            } else {
+                reset();
+            }
             return *this;
         }
         if (!propagate && engaged_ && alloc_ == other.alloc_) {
@@ -194,10 +203,28 @@ public:
 
         pointer replacement = create(
             target_alloc, *std::to_address(other.pointer_));
-        reset();
-        if constexpr (propagate) alloc_ = other.alloc_;
-        pointer_ = std::move(replacement);
-        engaged_ = true;
+        if constexpr (propagate) {
+            Allocator previous_alloc(alloc_);
+            pointer previous_pointer = pointer_;
+            const bool had_previous = engaged_;
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+            try {
+                alloc_ = other.alloc_;
+            } catch (...) {
+                destroy(target_alloc, replacement);
+                throw;
+            }
+#else
+            alloc_ = other.alloc_;
+#endif
+            pointer_ = std::move(replacement);
+            engaged_ = true;
+            if (had_previous) destroy(previous_alloc, previous_pointer);
+        } else {
+            reset();
+            pointer_ = std::move(replacement);
+            engaged_ = true;
+        }
         return *this;
     }
 
@@ -534,10 +561,30 @@ public:
         Allocator target_alloc = propagate ? other.alloc_ : alloc_;
         void* replacement = other.object_
             ? other.operations_->copy(target_alloc, other.object_) : nullptr;
-        reset();
-        if constexpr (propagate) alloc_ = other.alloc_;
-        object_ = replacement;
-        operations_ = other.object_ ? other.operations_ : nullptr;
+        if constexpr (propagate) {
+            Allocator previous_alloc(alloc_);
+            void* previous_object = object_;
+            const operations* previous_operations = operations_;
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+            try {
+                alloc_ = other.alloc_;
+            } catch (...) {
+                if (replacement)
+                    other.operations_->destroy(target_alloc, replacement);
+                throw;
+            }
+#else
+            alloc_ = other.alloc_;
+#endif
+            object_ = replacement;
+            operations_ = other.object_ ? other.operations_ : nullptr;
+            if (previous_object)
+                previous_operations->destroy(previous_alloc, previous_object);
+        } else {
+            reset();
+            object_ = replacement;
+            operations_ = other.object_ ? other.operations_ : nullptr;
+        }
         return *this;
     }
 
