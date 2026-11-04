@@ -8,11 +8,11 @@
 
 #include "rincxx.h"
 
-#if defined(__cplusplus) && __cplusplus > 202002L
+#if defined(__cplusplus) && \
+    (__cplusplus > 202302L || defined(RIN_ENABLE_CXX26_INPLACE_VECTOR))
 
 #include "algorithm.h"
 #include "compare.h"
-#include "cstdint.h"
 #include "cstdint.h"
 #include "exception.h"
 #include "initializer_list.h"
