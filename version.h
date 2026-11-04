@@ -228,6 +228,12 @@
 #endif
 #endif
 
+/* P2075 Philox engines are C++26 unless a consumer opts into the preview. */
+#if defined(__cplusplus) && \
+    (__cplusplus > 202302L || defined(RIN_ENABLE_CXX26_PHILOX_ENGINE))
+#define __cpp_lib_philox_engine 202406L
+#endif
+
 /* P3044R2 subview API; preview-gated until the C++26 dialect by default. */
 #if defined(__cplusplus) && \
     (__cplusplus > 202302L || defined(RIN_ENABLE_CXX26_STRING_SUBVIEW))
