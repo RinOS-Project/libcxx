@@ -147,7 +147,9 @@ namespace std {
     using ::remove;
     using ::rename;
     using ::tmpfile;
+#if defined(RIN_ENABLE_UNSAFE_LEGACY_STDIO)
     using ::tmpnam;
+#endif
 }
 
 #endif /* __cplusplus */
