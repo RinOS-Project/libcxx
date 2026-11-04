@@ -13,7 +13,6 @@
 
 #include "algorithm.h"
 #include "compare.h"
-#include "cstdint.h"
 #include "exception.h"
 #include "initializer_list.h"
 #include "iterator.h"
@@ -28,42 +27,6 @@
 #endif
 
 namespace std {
-
-/* C++26 optional<T&> is the result type used by the non-throwing append
- * operations. The existing optional<T> implementation predates that
- * specialization, so provide the reference representation here without
- * changing optional's value-storage implementation. */
-template<typename T>
-class optional<T&> {
-    T* value_;
-
-public:
-    using value_type = T;
-
-    constexpr optional() noexcept : value_(nullptr) {}
-    constexpr optional(nullopt_t) noexcept : value_(nullptr) {}
-    constexpr explicit optional(in_place_t, T& value) noexcept
-        : value_(__builtin_addressof(value)) {}
-    constexpr optional(T& value) noexcept
-        : value_(__builtin_addressof(value)) {}
-
-    constexpr optional& operator=(nullopt_t) noexcept {
-        value_ = nullptr;
-        return *this;
-    }
-
-    constexpr T* operator->() const noexcept { return value_; }
-    constexpr T& operator*() const noexcept { return *value_; }
-    constexpr explicit operator bool() const noexcept {
-        return value_ != nullptr;
-    }
-    constexpr bool has_value() const noexcept { return value_ != nullptr; }
-    constexpr T& value() const {
-        if (!value_) detail::optional_access_fail();
-        return *value_;
-    }
-    constexpr void reset() noexcept { value_ = nullptr; }
-};
 
 namespace detail {
 
@@ -148,13 +111,10 @@ private:
     }
 
     constexpr size_t iterator_index(const_iterator position) const {
-        const uintptr_t first = reinterpret_cast<uintptr_t>(data());
-        const uintptr_t address = reinterpret_cast<uintptr_t>(position);
-        const uintptr_t bytes = size_ * sizeof(T);
-        if (address < first || address - first > bytes ||
-            (address - first) % sizeof(T) != 0)
-            detail::inplace_vector_iterator_failure();
-        return static_cast<size_t>((address - first) / sizeof(T));
+        for (size_t index = 0; index <= size_; ++index) {
+            if (position == iterator_at(index)) return index;
+        }
+        detail::inplace_vector_iterator_failure();
     }
 
     constexpr void destroy_from(size_t first) noexcept {
@@ -272,18 +232,23 @@ public:
         noexcept(is_nothrow_move_constructible<T>::value)
         requires (!is_trivially_move_constructible<T>::value)
         : inplace_vector() {
-#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
-        try {
-#endif
-            while (size_ < other.size_) {
+        if constexpr (is_nothrow_move_constructible<T>::value) {
+            while (size_ < other.size_)
                 emplace_back(std::move(*other.slot(size_)));
-            }
+        } else {
 #if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
-        } catch (...) {
-            clear();
-            throw;
-        }
+            try {
 #endif
+                while (size_ < other.size_) {
+                    emplace_back(std::move(*other.slot(size_)));
+                }
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+            } catch (...) {
+                clear();
+                throw;
+            }
+#endif
+        }
         other.clear();
     }
 
@@ -325,17 +290,23 @@ public:
                     is_trivially_move_assignable<T>::value)) {
         if (this != &other) {
             clear();
-#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
-            try {
-#endif
+            if constexpr (is_nothrow_move_assignable<T>::value &&
+                          is_nothrow_move_constructible<T>::value) {
                 while (size_ < other.size_)
                     emplace_back(std::move(*other.slot(size_)));
+            } else {
 #if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
-            } catch (...) {
-                clear();
-                throw;
-            }
+                try {
 #endif
+                    while (size_ < other.size_)
+                        emplace_back(std::move(*other.slot(size_)));
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+                } catch (...) {
+                    clear();
+                    throw;
+                }
+#endif
+            }
             other.clear();
         }
         return *this;
@@ -493,10 +464,10 @@ public:
 
     template<typename... Args>
     constexpr optional<reference> try_emplace_back(Args&&... args) {
-        if (size_ == N) return nullopt;
+        if (size_ == N) return optional<reference>();
         construct_at(slot(size_), std::forward<Args>(args)...);
         ++size_;
-        return optional<reference>(in_place, back());
+        return optional<reference>(back());
     }
 
     constexpr optional<reference> try_push_back(const T& value) {
@@ -768,7 +739,7 @@ public:
 
     template<typename... Args>
     constexpr optional<reference> try_emplace_back(Args&&...) noexcept {
-        return nullopt;
+        return optional<reference>();
     }
     constexpr optional<reference> try_push_back(const T&) noexcept { return nullopt; }
     constexpr optional<reference> try_push_back(T&&) noexcept { return nullopt; }

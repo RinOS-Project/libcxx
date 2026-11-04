@@ -239,7 +239,7 @@ using enable_if_t = typename enable_if<B, T>::type;
 
 /* is_function - 関数型の検出。関数型に const を付けても変化しない性質を利用 */
 template<typename T>
-#if defined(__RINOS__)
+#if defined(__RINOS__) && defined(__clang__)
 struct is_function : integral_constant<bool, __is_function(T)> {};
 #else
 struct is_function : integral_constant<bool,

@@ -1,1 +1,14 @@
 #include "../version.h"
+
+#if defined(__cplusplus) && __cplusplus > 202002L && \
+    (__cplusplus > 202302L || \
+     defined(RIN_ENABLE_CXX26_OPTIONAL_REFERENCE) || \
+     defined(RIN_ENABLE_CXX26_INPLACE_VECTOR))
+#undef __cpp_lib_optional
+#define __cpp_lib_optional 202506L
+#endif
+
+#if defined(__cplusplus) && __cplusplus > 202002L && \
+    (__cplusplus > 202302L || defined(RIN_ENABLE_CXX26_INPLACE_VECTOR))
+#define __cpp_lib_inplace_vector 202406L
+#endif

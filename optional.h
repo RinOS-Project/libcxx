@@ -25,6 +25,15 @@
 #include "type_traits.h"
 #include "utility.h"
 
+#if defined(__cplusplus) && __cplusplus > 202002L && \
+    (__cplusplus > 202302L || \
+     defined(RIN_ENABLE_CXX26_OPTIONAL_REFERENCE) || \
+     defined(RIN_ENABLE_CXX26_INPLACE_VECTOR))
+#undef __cpp_lib_optional
+#define __cpp_lib_optional 202506L
+#define RINXX_OPTIONAL_REFERENCE_ENABLED 1
+#endif
+
 namespace std {
 
 /* ═══════════════════════════════════════════════════════════════
@@ -108,6 +117,22 @@ using optional_le_result = enable_if_t<is_convertible<
 template<typename T, typename U>
 using optional_ge_result = enable_if_t<is_convertible<
     decltype(declval<const T&>() >= declval<const U&>()), bool>::value, bool>;
+
+template<typename Reference, typename Source>
+constexpr bool optional_reference_binds_temporary() noexcept {
+#if defined(__has_builtin)
+#if __has_builtin(__reference_constructs_from_temporary)
+    return __reference_constructs_from_temporary(Reference, Source);
+#endif
+#endif
+    /* Without the compiler lifetime trait, accept only ordinary lvalue
+     * pointer conversions (same type, cv qualification, or derived-to-base).
+     * User-defined reference conversions may bind a temporary. */
+    return !is_lvalue_reference<Source>::value ||
+        !is_convertible<
+            typename remove_reference<Source>::type*,
+            typename remove_reference<Reference>::type*>::value;
+}
 
 #if __cplusplus > 202002L
 struct optional_transform_tag {};
@@ -1040,6 +1065,183 @@ private:
         this->has_value_ = true;
     }
 };
+
+#if defined(RINXX_OPTIONAL_REFERENCE_ENABLED)
+/* C++26 non-owning reference optional. Assignment copies the binding, never
+ * assigns through the referent. */
+template<typename T>
+class optional<T&> {
+    T* value_ = nullptr;
+
+    template<typename U>
+    constexpr void bind(U&& value) noexcept {
+        value_ = __builtin_addressof(static_cast<T&>(std::forward<U>(value)));
+    }
+
+public:
+    using value_type = T;
+    using iterator = T*;
+
+    constexpr optional() noexcept = default;
+    constexpr optional(nullopt_t) noexcept {}
+    constexpr optional(const optional&) noexcept = default;
+
+    template<typename Arg>
+        requires (is_constructible<T&, Arg>::value &&
+                  !detail::optional_reference_binds_temporary<T&, Arg>())
+    constexpr explicit optional(in_place_t, Arg&& value)
+        noexcept(is_nothrow_constructible<T&, Arg>::value) {
+        bind(std::forward<Arg>(value));
+    }
+
+    template<typename U>
+        requires (!is_same<remove_cvref_t<U>, optional>::value &&
+                  !is_same<remove_cvref_t<U>, in_place_t>::value &&
+                  is_constructible<T&, U>::value &&
+                  !detail::optional_reference_binds_temporary<T&, U>())
+    constexpr explicit(!is_convertible<U, T&>::value)
+    optional(U&& value) noexcept(is_nothrow_constructible<T&, U>::value) {
+        bind(std::forward<U>(value));
+    }
+
+    template<typename U>
+        requires (!is_same<remove_cv_t<T>, optional<U>>::value &&
+                  !is_same<T&, U>::value &&
+                  is_constructible<T&, U&>::value &&
+                  !detail::optional_reference_binds_temporary<T&, U&>())
+    constexpr explicit(!is_convertible<U&, T&>::value)
+    optional(optional<U>& other)
+        noexcept(is_nothrow_constructible<T&, U&>::value) {
+        if (other) bind(*other);
+    }
+
+    template<typename U>
+        requires (!is_same<remove_cv_t<T>, optional<U>>::value &&
+                  !is_same<T&, U>::value &&
+                  is_constructible<T&, const U&>::value &&
+                  !detail::optional_reference_binds_temporary<T&, const U&>())
+    constexpr explicit(!is_convertible<const U&, T&>::value)
+    optional(const optional<U>& other)
+        noexcept(is_nothrow_constructible<T&, const U&>::value) {
+        if (other) bind(*other);
+    }
+
+    template<typename U>
+        requires (!is_same<remove_cv_t<T>, optional<U>>::value &&
+                  !is_same<T&, U>::value &&
+                  is_constructible<T&, U>::value &&
+                  !detail::optional_reference_binds_temporary<T&, U>())
+    constexpr explicit(!is_convertible<U, T&>::value)
+    optional(optional<U>&& other)
+        noexcept(is_nothrow_constructible<T&, U>::value) {
+        if (other) bind(*other);
+    }
+
+    template<typename U>
+        requires (!is_same<remove_cv_t<T>, optional<U>>::value &&
+                  !is_same<T&, U>::value &&
+                  is_constructible<T&, U>::value &&
+                  detail::optional_reference_binds_temporary<T&, U>())
+    constexpr optional(optional<U>&&) = delete;
+
+    template<typename U>
+        requires (!is_same<remove_cv_t<T>, optional<U>>::value &&
+                  !is_same<T&, U>::value &&
+                  is_constructible<T&, const U>::value &&
+                  !detail::optional_reference_binds_temporary<T&, const U>())
+    constexpr explicit(!is_convertible<const U, T&>::value)
+    optional(const optional<U>&& other)
+        noexcept(is_nothrow_constructible<T&, const U>::value) {
+        if (other) bind(*other);
+    }
+
+    template<typename U>
+        requires (!is_same<remove_cv_t<T>, optional<U>>::value &&
+                  !is_same<T&, U>::value &&
+                  is_constructible<T&, const U>::value &&
+                  detail::optional_reference_binds_temporary<T&, const U>())
+    constexpr optional(const optional<U>&&) = delete;
+
+    constexpr optional& operator=(nullopt_t) noexcept {
+        value_ = nullptr;
+        return *this;
+    }
+    constexpr optional& operator=(const optional&) noexcept = default;
+
+    template<typename U>
+        requires (is_constructible<T&, U>::value &&
+                  !detail::optional_reference_binds_temporary<T&, U>())
+    constexpr T& emplace(U&& value)
+        noexcept(is_nothrow_constructible<T&, U>::value) {
+        bind(std::forward<U>(value));
+        return *value_;
+    }
+
+    constexpr void swap(optional& other) noexcept {
+        std::swap(value_, other.value_);
+    }
+
+    constexpr iterator begin() const noexcept
+        requires (is_object<T>::value && !is_unbounded_array<T>::value) {
+        return value_;
+    }
+    constexpr iterator end() const noexcept
+        requires (is_object<T>::value && !is_unbounded_array<T>::value) {
+        return value_ ? value_ + 1 : nullptr;
+    }
+
+    constexpr T* operator->() const noexcept { return value_; }
+    constexpr T& operator*() const noexcept { return *value_; }
+    constexpr explicit operator bool() const noexcept { return value_ != nullptr; }
+    constexpr bool has_value() const noexcept { return value_ != nullptr; }
+
+    constexpr T& value() const {
+        if (!value_) detail::optional_access_fail();
+        return *value_;
+    }
+
+    template<typename U = remove_cv_t<T>>
+        requires (is_object<T>::value && !is_array<T>::value &&
+                  is_constructible<remove_cv_t<T>, T&>::value &&
+                  is_convertible<U&&, remove_cv_t<T>>::value)
+    constexpr remove_cv_t<T> value_or(U&& fallback) const {
+        return value_ ? static_cast<remove_cv_t<T>>(*value_)
+                      : static_cast<remove_cv_t<T>>(
+                            std::forward<U>(fallback));
+    }
+
+    template<typename F>
+    constexpr auto and_then(F&& function) const {
+        using result_type = remove_cvref_t<invoke_result_t<F, T&>>;
+        static_assert(detail::is_optional<result_type>::value,
+                      "optional<T&>::and_then callable must return optional");
+        if (value_) return std::invoke(std::forward<F>(function), *value_);
+        return result_type();
+    }
+
+    template<typename F>
+    constexpr auto transform(F&& function) const {
+        using result_type = remove_cv_t<invoke_result_t<F, T&>>;
+        if (value_)
+            return optional<result_type>(
+                std::invoke(std::forward<F>(function), *value_));
+        return optional<result_type>();
+    }
+
+    template<typename F>
+        requires is_invocable<F>::value
+    constexpr optional or_else(F&& function) const {
+        using result_type = remove_cvref_t<invoke_result_t<F>>;
+        static_assert(is_same<result_type, optional>::value,
+                      "optional<T&>::or_else callable must return optional<T&>");
+        if (value_) return *this;
+        return std::invoke(std::forward<F>(function));
+    }
+
+    constexpr void reset() noexcept { value_ = nullptr; }
+};
+#endif
+#undef RINXX_OPTIONAL_REFERENCE_ENABLED
 
 template<typename T>
 #if __cplusplus >= 202002L
