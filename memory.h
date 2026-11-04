@@ -1838,7 +1838,7 @@ public:
     pointer allocate(size_type n) {
         if (n > max_size()) {
 #if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
-            throw bad_array_new_length();
+            __rin_memory_bad_array_new_length();
 #else
             terminate();
 #endif
@@ -2856,4 +2856,7 @@ pair<InputIt, ForwardIt> uninitialized_move_n(InputIt first, Size count, Forward
 } /* namespace std */
 
 #endif /* __cplusplus */
+#if !defined(RINCXX_STRING_H) && !defined(RINCXX_EXCEPTION_IN_PROGRESS)
+#include "exception.h"
+#endif
 #endif /* RINCXX_MEMORY_H */

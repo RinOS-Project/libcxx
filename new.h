@@ -7,7 +7,21 @@
 #define RINCXX_NEW_H
 
 #include "rincxx.h"
-#include "exception.h"
+
+/* exception.h includes string.h, which includes memory.h, which in turn
+ * includes this header.  Publish the declarations used by memory.h before
+ * entering that cycle. */
+namespace std {
+#if defined(_GLIBCXX_CXX_CONFIG_H)
+__attribute__((noreturn)) inline void terminate() noexcept;
+#else
+[[noreturn]] inline void terminate() noexcept;
+#endif
+#if __cplusplus >= 201703L
+enum class align_val_t : size_t {};
+#endif
+[[noreturn]] inline void __rin_memory_bad_array_new_length();
+}
 
 /* These facilities are fully declared below, so publish their standard
  * feature-test values from <new> itself (not only from <version>). */
@@ -74,10 +88,6 @@ extern const nothrow_t nothrow;
 /* ═══════════════════════════════════════════════════════════════
  * align_val_t (C++17)
  * ═══════════════════════════════════════════════════════════════*/
-
-#if __cplusplus >= 201703L
-enum class align_val_t : size_t {};
-#endif
 
 /* ═══════════════════════════════════════════════════════════════
  * destroying_delete_t (C++20)
@@ -174,5 +184,10 @@ void operator delete[](void* ptr, std::align_val_t alignment,
 #endif
 
 #undef RIN_NEW_NODISCARD
+
+#if !defined(RINCXX_MEMORY_H) && !defined(RINCXX_STRING_H) && \
+    !defined(RINCXX_EXCEPTION_IN_PROGRESS)
+#include "exception.h"
+#endif
 
 #endif /* RINCXX_NEW_H */

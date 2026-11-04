@@ -201,6 +201,14 @@ __attribute__((noreturn)) inline void terminate() noexcept;
 [[noreturn]] inline void terminate() noexcept;
 #endif
 
+[[noreturn]] inline void __rin_memory_bad_array_new_length() {
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+    throw bad_array_new_length();
+#else
+    terminate();
+#endif
+}
+
 namespace __exception_ptr {
 class exception_ptr;
 }
@@ -550,6 +558,23 @@ extern "C" {
 #endif
 
 #endif /* _CXXABI_H */
+
+#if __cplusplus >= 201703L && defined(RINCXX_STRING_DEFER_PMR_ALIASES)
+#undef RINCXX_STRING_DEFER_PMR_ALIASES
+#include "memory_resource.h"
+namespace std { namespace pmr {
+template<class CharT, class Traits = std::char_traits<CharT>>
+using basic_string = std::basic_string<
+    CharT, Traits, polymorphic_allocator<CharT>>;
+using string = basic_string<char>;
+using wstring = basic_string<wchar_t>;
+using u16string = basic_string<char16_t>;
+using u32string = basic_string<char32_t>;
+#if defined(__cpp_char8_t)
+using u8string = basic_string<char8_t>;
+#endif
+} }
+#endif
 
 #endif /* __cplusplus */
 #endif /* RINCXX_EXCEPTION_H */
