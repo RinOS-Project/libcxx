@@ -1854,6 +1854,8 @@ template<>
 class tuple<> {
 public:
     constexpr tuple() = default;
+    constexpr tuple(const tuple&) = default;
+    constexpr tuple(tuple&&) = default;
 
     template<typename Alloc>
     constexpr tuple(allocator_arg_t, const Alloc&) {}
