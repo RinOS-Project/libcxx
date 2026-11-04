@@ -1627,7 +1627,7 @@ public:
         metadata_valid_ = false;
         symlink_status_valid_ = false;
         /* stat を呼んで情報を更新する。失敗時は stale cache を
-         * 公開せず、not_found/zero へ閉じる。 */
+         * 公開せず、解決不能なら not_found、それ以外は none に閉じる。 */
         detail::stat_record st = {};
 
         const int stat_result = rin_stat(path_.c_str(), &st);
@@ -1660,12 +1660,21 @@ public:
             status_valid_ = true;
             metadata_valid_ = true;
         } else {
-            status_.type(file_type::not_found);
+            errc failure = errc::io_error;
+            file_type failure_type = file_type::none;
+            if (stat_result != 0) {
+                failure = detail::filesystem_error_from_errno();
+                if (failure == errc::no_such_file_or_directory ||
+                    failure == errc::not_a_directory) {
+                    failure_type = file_type::not_found;
+                }
+            }
+            status_.type(failure_type);
             status_.permissions(perms::unknown);
             file_size_ = 0;
             hard_link_count_ = 0;
             last_write_time_ = file_time_type::min();
-            ec = make_error_code(detail::filesystem_error_from_errno());
+            ec = make_error_code(failure);
         }
     }
 
@@ -1712,9 +1721,18 @@ public:
         const int result = rin_lstat(path_.c_str(), &st);
         volatile detail::stat_record* view = &st;
         if (result != 0 || view->st_size < 0) {
-            symlink_status_ = file_status(file_type::not_found);
+            errc failure = errc::io_error;
+            file_type failure_type = file_type::none;
+            if (result != 0) {
+                failure = detail::filesystem_error_from_errno();
+                if (failure == errc::no_such_file_or_directory ||
+                    failure == errc::not_a_directory) {
+                    failure_type = file_type::not_found;
+                }
+            }
+            symlink_status_ = file_status(failure_type);
             symlink_status_valid_ = false;
-            ec = make_error_code(detail::filesystem_error_from_errno());
+            ec = make_error_code(failure);
             return symlink_status_;
         }
         const unsigned int mode = view->st_mode & 0170000;
@@ -1735,8 +1753,9 @@ public:
     file_status symlink_status() const {
         error_code ec;
         const file_status result = symlink_status(ec);
-        if (ec) detail::filesystem_failure("directory_entry::symlink_status",
-                                           path_, ec);
+        if (result.type() == file_type::none)
+            detail::filesystem_failure("directory_entry::symlink_status",
+                                       path_, ec);
         return result;
     }
 
@@ -1860,8 +1879,8 @@ public:
     file_status status() const {
         error_code ec;
         const file_status value = status(ec);
-        if (ec) detail::filesystem_failure("directory_entry::status",
-                                           path_, ec);
+        if (value.type() == file_type::none)
+            detail::filesystem_failure("directory_entry::status", path_, ec);
         return value;
     }
     file_status status(error_code& ec) const noexcept {
@@ -2880,6 +2899,9 @@ inline recursive_directory_iterator end(recursive_directory_iterator) noexcept {
  * フリー関数
  * ═══════════════════════════════════════════════════════════════*/
 
+inline file_status status(const path& p, error_code& ec) noexcept;
+inline file_status status(const path& p);
+
 /* exists */
 inline bool status_known(file_status value) noexcept {
     return value.type() != file_type::none &&
@@ -2890,27 +2912,18 @@ inline bool exists(file_status value) noexcept {
     return status_known(value) && value.type() != file_type::not_found;
 }
 
-inline bool exists(const directory_entry& entry) noexcept {
+inline bool exists(const directory_entry& entry) {
     return entry.exists();
 }
 
 inline bool exists(const path& p) {
-    error_code ec;
-    directory_entry entry(p, ec);
-    const bool result = !ec && entry.exists();
-    /* A missing leaf is a normal negative query.  Preserve provider errors
-     * for the error-code overload, but keep the throwing convenience form
-     * equivalent to the standard status-known/not-found predicate. */
-    if (ec && ec != make_error_code(errc::no_such_file_or_directory) &&
-        ec != make_error_code(errc::not_a_directory)) {
-        detail::filesystem_failure("exists", p, ec);
-    }
-    return result;
+    return exists(status(p));
 }
 
 inline bool exists(const path& p, error_code& ec) noexcept {
-    directory_entry entry(p, ec);
-    return !ec && entry.exists();
+    const file_status value = status(p, ec);
+    if (status_known(value)) ec.clear();
+    return exists(value);
 }
 
 /* is_directory */
@@ -2918,7 +2931,7 @@ inline bool is_directory(file_status value) noexcept {
     return value.type() == file_type::directory;
 }
 
-inline bool is_directory(const directory_entry& entry) noexcept {
+inline bool is_directory(const directory_entry& entry) {
     return entry.is_directory();
 }
 
@@ -2928,10 +2941,7 @@ inline bool is_directory(const path& p, error_code& ec) noexcept {
 }
 
 inline bool is_directory(const path& p) {
-    error_code ec;
-    const bool result = is_directory(p, ec);
-    if (ec) detail::filesystem_failure("is_directory", p, ec);
-    return result;
+    return is_directory(status(p));
 }
 
 /* is_regular_file */
@@ -2939,7 +2949,7 @@ inline bool is_regular_file(file_status value) noexcept {
     return value.type() == file_type::regular;
 }
 
-inline bool is_regular_file(const directory_entry& entry) noexcept {
+inline bool is_regular_file(const directory_entry& entry) {
     return entry.is_regular_file();
 }
 
@@ -2947,7 +2957,7 @@ inline bool is_symlink(file_status value) noexcept {
     return value.type() == file_type::symlink;
 }
 
-inline bool is_symlink(const directory_entry& entry) noexcept {
+inline bool is_symlink(const directory_entry& entry) {
     return entry.is_symlink();
 }
 
@@ -2955,7 +2965,7 @@ inline bool is_block_file(file_status value) noexcept {
     return value.type() == file_type::block;
 }
 
-inline bool is_block_file(const directory_entry& entry) noexcept {
+inline bool is_block_file(const directory_entry& entry) {
     return entry.is_block_file();
 }
 
@@ -2963,7 +2973,7 @@ inline bool is_character_file(file_status value) noexcept {
     return value.type() == file_type::character;
 }
 
-inline bool is_character_file(const directory_entry& entry) noexcept {
+inline bool is_character_file(const directory_entry& entry) {
     return entry.is_character_file();
 }
 
@@ -2971,7 +2981,7 @@ inline bool is_fifo(file_status value) noexcept {
     return value.type() == file_type::fifo;
 }
 
-inline bool is_fifo(const directory_entry& entry) noexcept {
+inline bool is_fifo(const directory_entry& entry) {
     return entry.is_fifo();
 }
 
@@ -2979,7 +2989,7 @@ inline bool is_socket(file_status value) noexcept {
     return value.type() == file_type::socket;
 }
 
-inline bool is_socket(const directory_entry& entry) noexcept {
+inline bool is_socket(const directory_entry& entry) {
     return entry.is_socket();
 }
 
@@ -2988,7 +2998,7 @@ inline bool is_other(file_status value) noexcept {
            !is_directory(value) && !is_symlink(value);
 }
 
-inline bool is_other(const directory_entry& entry) noexcept {
+inline bool is_other(const directory_entry& entry) {
     return entry.is_other();
 }
 
@@ -2998,8 +3008,17 @@ inline file_status symlink_status(const path& p, error_code& ec) noexcept {
     const int result = rin_lstat(p.c_str(), &st);
     volatile detail::stat_record* view = &st;
     if (result != 0 || view->st_size < 0) {
-        ec = make_error_code(detail::filesystem_error_from_errno());
-        return file_status(file_type::not_found);
+        errc failure = errc::io_error;
+        file_type failure_type = file_type::none;
+        if (result != 0) {
+            failure = detail::filesystem_error_from_errno();
+            if (failure == errc::no_such_file_or_directory ||
+                failure == errc::not_a_directory) {
+                failure_type = file_type::not_found;
+            }
+        }
+        ec = make_error_code(failure);
+        return file_status(failure_type);
     }
     const unsigned int mode = view->st_mode;
     file_type type = file_type::unknown;
@@ -3024,7 +3043,8 @@ inline file_status symlink_status(const path& p, error_code& ec) noexcept {
 inline file_status symlink_status(const path& p) {
     error_code ec;
     const file_status result = symlink_status(p, ec);
-    if (ec) detail::filesystem_failure("symlink_status", p, ec);
+    if (result.type() == file_type::none)
+        detail::filesystem_failure("symlink_status", p, ec);
     return result;
 }
 
@@ -3038,10 +3058,7 @@ inline bool is_symlink(const path& p, error_code& ec) noexcept {
 }
 
 inline bool is_symlink(const path& p) {
-    error_code ec;
-    const bool result = is_symlink(p, ec);
-    if (ec) detail::filesystem_failure("is_symlink", p, ec);
-    return result;
+    return is_symlink(symlink_status(p));
 }
 
 inline bool is_block_file(const path& p, error_code& ec) noexcept {
@@ -3050,10 +3067,7 @@ inline bool is_block_file(const path& p, error_code& ec) noexcept {
 }
 
 inline bool is_block_file(const path& p) {
-    error_code ec;
-    const bool result = is_block_file(p, ec);
-    if (ec) detail::filesystem_failure("is_block_file", p, ec);
-    return result;
+    return is_block_file(status(p));
 }
 
 inline bool is_character_file(const path& p, error_code& ec) noexcept {
@@ -3062,10 +3076,7 @@ inline bool is_character_file(const path& p, error_code& ec) noexcept {
 }
 
 inline bool is_character_file(const path& p) {
-    error_code ec;
-    const bool result = is_character_file(p, ec);
-    if (ec) detail::filesystem_failure("is_character_file", p, ec);
-    return result;
+    return is_character_file(status(p));
 }
 
 inline bool is_fifo(const path& p, error_code& ec) noexcept {
@@ -3074,10 +3085,7 @@ inline bool is_fifo(const path& p, error_code& ec) noexcept {
 }
 
 inline bool is_fifo(const path& p) {
-    error_code ec;
-    const bool result = is_fifo(p, ec);
-    if (ec) detail::filesystem_failure("is_fifo", p, ec);
-    return result;
+    return is_fifo(status(p));
 }
 
 inline bool is_socket(const path& p, error_code& ec) noexcept {
@@ -3086,10 +3094,7 @@ inline bool is_socket(const path& p, error_code& ec) noexcept {
 }
 
 inline bool is_socket(const path& p) {
-    error_code ec;
-    const bool result = is_socket(p, ec);
-    if (ec) detail::filesystem_failure("is_socket", p, ec);
-    return result;
+    return is_socket(status(p));
 }
 
 inline bool is_other(const path& p, error_code& ec) noexcept {
@@ -3098,10 +3103,7 @@ inline bool is_other(const path& p, error_code& ec) noexcept {
 }
 
 inline bool is_other(const path& p) {
-    error_code ec;
-    const bool result = is_other(p, ec);
-    if (ec) detail::filesystem_failure("is_other", p, ec);
-    return result;
+    return is_other(status(p));
 }
 
 inline bool is_regular_file(const path& p, error_code& ec) noexcept {
@@ -3110,10 +3112,7 @@ inline bool is_regular_file(const path& p, error_code& ec) noexcept {
 }
 
 inline bool is_regular_file(const path& p) {
-    error_code ec;
-    const bool result = is_regular_file(p, ec);
-    if (ec) detail::filesystem_failure("is_regular_file", p, ec);
-    return result;
+    return is_regular_file(status(p));
 }
 
 /* file_size */
@@ -5278,13 +5277,14 @@ inline void current_path(const path& p) {
 inline file_status status(const path& p, error_code& ec) noexcept {
     ec.clear();
     directory_entry de(p, ec);
-    return de.status();
+    return de.status(ec);
 }
 
 inline file_status status(const path& p) {
     error_code ec;
     const file_status result = status(p, ec);
-    if (ec) detail::filesystem_failure("status", p, ec);
+    if (result.type() == file_type::none)
+        detail::filesystem_failure("status", p, ec);
     return result;
 }
 
