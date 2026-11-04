@@ -8,7 +8,7 @@
 
 #include "rincxx.h"
 
-#if defined(__cplusplus) && \
+#if defined(__cplusplus) && __cplusplus > 202002L && \
     (__cplusplus > 202302L || defined(RIN_ENABLE_CXX26_INPLACE_VECTOR))
 
 #include "algorithm.h"
@@ -22,6 +22,10 @@
 #include "ranges.h"
 #include "type_traits.h"
 #include "utility.h"
+
+#ifndef __cpp_lib_inplace_vector
+#define __cpp_lib_inplace_vector 202406L
+#endif
 
 namespace std {
 
