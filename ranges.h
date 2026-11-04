@@ -2144,8 +2144,7 @@ public:
 } /* namespace detail */
 
 template<typename T>
-    requires move_constructible<T> && is_object_v<T> &&
-             same_as<T, remove_cv_t<T>>
+    requires move_constructible<T> && is_object_v<T>
 class single_view : public view_interface<single_view<T>> {
     detail::reinitializable_box<T> value_;
 
@@ -8013,8 +8012,9 @@ inline constexpr empty_view<T> empty{};
 
 /* single */
 template<typename T>
-concept single_viewable = move_constructible<decay_t<T>> &&
-    is_object_v<decay_t<T>>;
+concept single_viewable = requires(T&& value) {
+    single_view<decay_t<T>>(std::forward<T>(value));
+};
 
 struct single_fn {
     template<typename T>
