@@ -2565,6 +2565,12 @@ public:
         return left_generation == right_generation;
     }
 
+#if __cplusplus >= 202002L
+    bool operator==(default_sentinel_t) const noexcept {
+        return *this == directory_iterator();
+    }
+#endif
+
     bool operator!=(const directory_iterator& rhs) const {
         return !(*this == rhs);
     }
@@ -2851,6 +2857,12 @@ public:
         return stack_.size() == rhs.stack_.size() &&
                stack_.back() == rhs.stack_.back();
     }
+
+#if __cplusplus >= 202002L
+    bool operator==(default_sentinel_t) const noexcept {
+        return *this == recursive_directory_iterator();
+    }
+#endif
 
     bool operator!=(const recursive_directory_iterator& rhs) const {
         return !(*this == rhs);
