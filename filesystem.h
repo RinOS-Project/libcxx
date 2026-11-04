@@ -3120,7 +3120,7 @@ inline bool is_regular_file(const path& p) {
 inline file_time_type last_write_time(const path& p, error_code& ec) noexcept {
     directory_entry de(p, ec);
     if (ec) return file_time_type::min();
-    return de.last_write_time();
+    return de.last_write_time(ec);
 }
 
 inline file_time_type last_write_time(const path& p) {
@@ -3160,7 +3160,7 @@ inline void last_write_time(const path& p, file_time_type value) {
 inline uintmax_t hard_link_count(const path& p, error_code& ec) noexcept {
     directory_entry de(p, ec);
     if (ec) return static_cast<uintmax_t>(-1);
-    return de.hard_link_count();
+    return de.hard_link_count(ec);
 }
 
 inline uintmax_t hard_link_count(const path& p) {
@@ -3174,12 +3174,7 @@ inline uintmax_t hard_link_count(const path& p) {
 inline uintmax_t file_size(const path& p, error_code& ec) noexcept {
     directory_entry de(p, ec);
     if (ec) return static_cast<uintmax_t>(-1);
-    if (!de.is_regular_file()) {
-        ec = make_error_code(de.is_directory() ? errc::is_a_directory
-                                               : errc::io_error);
-        return static_cast<uintmax_t>(-1);
-    }
-    return de.file_size();
+    return de.file_size(ec);
 }
 
 inline uintmax_t file_size(const path& p) {
