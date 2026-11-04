@@ -1606,9 +1606,19 @@ public:
         refresh();
     }
 
+    void assign(const path_type& p, error_code& ec) {
+        path_ = p;
+        refresh(ec);
+    }
+
     void replace_filename(const path_type& p) {
         path_.replace_filename(p);
         refresh();
+    }
+
+    void replace_filename(const path_type& p, error_code& ec) {
+        path_.replace_filename(p);
+        refresh(ec);
     }
 
     void refresh(error_code& ec) noexcept {
