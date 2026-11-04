@@ -500,6 +500,24 @@ template<size_t I>
 inline constexpr in_place_index_t<I> in_place_index{};
 #endif
 
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_FUNCTION_WRAPPERS)
+/* Minimal C++26 constant_wrapper surface used by function_ref's constant
+ * callable constructors.  It does not advertise the complete utility feature. */
+template<auto X, class T = decltype(X)>
+struct constant_wrapper {
+    static_assert(is_same<T, decltype(X)>::value,
+                  "constant_wrapper's value type is fixed by its argument");
+    static constexpr decltype(auto) value = (X);
+    using type = constant_wrapper;
+    using value_type = decltype(X);
+
+    constexpr operator decltype(value)() const noexcept { return value; }
+};
+
+template<auto X>
+inline constexpr constant_wrapper<X> cw{};
+#endif
+
 /* integer_sequence/make_index_sequence は pair より前で定義済み */
 
 /* ═══════════════════════════════════════════════════════════════

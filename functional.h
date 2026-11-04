@@ -811,9 +811,9 @@ class move_only_function_storage {
     struct callable final : callable_base {
         F function_;
 
-        template<typename Fn>
-        explicit callable(Fn&& function)
-            : function_(std::forward<Fn>(function)) {}
+        template<typename... CtorArgs>
+        explicit callable(CtorArgs&&... args)
+            : function_(std::forward<CtorArgs>(args)...) {}
 
         R invoke(Args&&... args) override {
             if constexpr (is_void<R>::value) {
@@ -1059,6 +1059,728 @@ void swap(move_only_function<Signature>& left,
           move_only_function<Signature>& right) noexcept {
     left.swap(right);
 }
+#endif
+
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_FUNCTION_WRAPPERS)
+/* C++26 copyable type erasure.  Unlike move_only_function this node must be
+ * cloneable; copy-then-swap preserves the target when a copy throws. */
+template<typename>
+class copyable_function;
+
+namespace detail {
+
+template<typename R, int Mode, int CvRefMode, bool NoexceptSignature,
+         typename Owner, typename... Args>
+class copyable_function_storage {
+    static constexpr size_t inline_storage_size = 3 * sizeof(void*);
+    using inline_storage_type = aligned_storage_t<
+        inline_storage_size, alignof(max_align_t)>;
+
+    struct callable_base {
+        virtual ~callable_base() = default;
+        virtual callable_base* clone(void* storage, bool& local) const = 0;
+        virtual callable_base* move_inline(void* storage) noexcept = 0;
+        virtual void destroy(bool local) noexcept = 0;
+        virtual R invoke(Args&&... args) = 0;
+    };
+
+    template<typename F>
+    struct callable final : callable_base {
+        F function_;
+
+        template<typename... CtorArgs>
+        explicit callable(CtorArgs&&... args)
+            : function_(std::forward<CtorArgs>(args)...) {}
+
+        static constexpr bool fits_inline() noexcept {
+            return sizeof(callable) <= inline_storage_size &&
+                alignof(callable) <= alignof(inline_storage_type) &&
+                is_nothrow_move_constructible<F>::value;
+        }
+
+        callable_base* clone(void* storage, bool& local) const override {
+            if constexpr (fits_inline()) {
+                local = true;
+                return new (storage) callable(function_);
+            } else {
+                local = false;
+                return new callable(function_);
+            }
+        }
+
+        callable_base* move_inline(void* storage) noexcept override {
+            return new (storage) callable(std::move(function_));
+        }
+
+        void destroy(bool local) noexcept override {
+            if (local) {
+                this->~callable();
+            } else {
+                delete this;
+            }
+        }
+
+        R invoke(Args&&... args) override {
+            if constexpr (is_void<R>::value) {
+                move_only_function_invoke<Mode>(
+                    function_, std::forward<Args>(args)...);
+            } else {
+                return move_only_function_invoke<Mode>(
+                    function_, std::forward<Args>(args)...);
+            }
+        }
+    };
+
+    callable_base* callable_;
+    bool local_;
+    inline_storage_type storage_;
+
+    template<typename F, typename... CtorArgs>
+    void construct(CtorArgs&&... args) {
+        if constexpr (callable<F>::fits_inline()) {
+            callable_ = new (&storage_)
+                callable<F>(std::forward<CtorArgs>(args)...);
+            local_ = true;
+        } else {
+            callable_ = new callable<F>(
+                std::forward<CtorArgs>(args)...);
+            local_ = false;
+        }
+    }
+
+    void destroy() noexcept {
+        if (callable_) callable_->destroy(local_);
+        callable_ = nullptr;
+        local_ = false;
+    }
+
+    void take_from(copyable_function_storage& other) noexcept {
+        if (!other.callable_) {
+            callable_ = nullptr;
+            local_ = false;
+            return;
+        }
+        if (other.local_) {
+            callable_ = other.callable_->move_inline(&storage_);
+            local_ = true;
+            other.callable_->destroy(true);
+        } else {
+            callable_ = other.callable_;
+            local_ = false;
+        }
+        other.callable_ = nullptr;
+        other.local_ = false;
+    }
+
+public:
+    using result_type = R;
+
+    copyable_function_storage() noexcept
+        : callable_(nullptr), local_(false), storage_{} {}
+    copyable_function_storage(nullptr_t) noexcept
+        : callable_(nullptr), local_(false), storage_{} {}
+
+    template<typename F,
+             typename = enable_if_t<
+                 !is_same<remove_cvref_t<F>, Owner>::value &&
+                 !is_in_place_type_tag<remove_cvref_t<F>>::value &&
+                 is_constructible<decay_t<F>, F>::value &&
+                 is_copy_constructible<decay_t<F>>::value &&
+                 move_only_function_is_callable_from<
+                     R, CvRefMode, Mode, NoexceptSignature,
+                     decay_t<F>, Args...>::value>>
+    copyable_function_storage(F&& function)
+        : callable_(nullptr), local_(false), storage_{} {
+        using target_type = decay_t<F>;
+        if (!functional_is_null_target<target_type>(function)) {
+            construct<target_type>(std::forward<F>(function));
+        }
+    }
+
+    template<typename T, typename... CtorArgs,
+             typename target_type = decay_t<T>,
+             typename = enable_if_t<
+                 is_same<target_type, T>::value &&
+                 is_constructible<target_type, CtorArgs...>::value &&
+                 is_copy_constructible<target_type>::value &&
+                 move_only_function_is_callable_from<
+                     R, CvRefMode, Mode, NoexceptSignature,
+                     target_type, Args...>::value>>
+    explicit copyable_function_storage(
+        in_place_type_t<T>, CtorArgs&&... args)
+        : callable_(nullptr), local_(false), storage_{} {
+        construct<target_type>(std::forward<CtorArgs>(args)...);
+    }
+
+    template<typename T, typename U, typename... CtorArgs,
+             typename target_type = decay_t<T>,
+             typename = enable_if_t<
+                 is_same<target_type, T>::value &&
+                 is_constructible<target_type, initializer_list<U>&,
+                                  CtorArgs...>::value &&
+                 is_copy_constructible<target_type>::value &&
+                 move_only_function_is_callable_from<
+                     R, CvRefMode, Mode, NoexceptSignature,
+                     target_type, Args...>::value>>
+    explicit copyable_function_storage(
+        in_place_type_t<T>, initializer_list<U> init_list,
+        CtorArgs&&... args)
+        : callable_(nullptr), local_(false), storage_{} {
+        construct<target_type>(init_list,
+                               std::forward<CtorArgs>(args)...);
+    }
+
+    copyable_function_storage(const copyable_function_storage& other)
+        : callable_(nullptr), local_(false), storage_{} {
+        if (other.callable_) {
+            callable_ = other.callable_->clone(&storage_, local_);
+        }
+    }
+
+    copyable_function_storage(copyable_function_storage&& other) noexcept
+        : callable_(nullptr), local_(false), storage_{} {
+        take_from(other);
+    }
+
+    copyable_function_storage& operator=(
+        const copyable_function_storage& other) {
+        if (this != &other) {
+            copyable_function_storage replacement(other);
+            swap(replacement);
+        }
+        return *this;
+    }
+
+    copyable_function_storage& operator=(
+        copyable_function_storage&& other) noexcept {
+        if (this != &other) {
+            destroy();
+            take_from(other);
+        }
+        return *this;
+    }
+
+    ~copyable_function_storage() { destroy(); }
+
+    Owner& operator=(nullptr_t) noexcept {
+        destroy();
+        return static_cast<Owner&>(*this);
+    }
+
+    template<typename F,
+             typename = enable_if_t<
+                 !is_same<remove_cvref_t<F>, Owner>::value &&
+                 !is_in_place_type_tag<remove_cvref_t<F>>::value &&
+                 is_constructible<decay_t<F>, F>::value &&
+                 is_copy_constructible<decay_t<F>>::value &&
+                 move_only_function_is_callable_from<
+                     R, CvRefMode, Mode, NoexceptSignature,
+                     decay_t<F>, Args...>::value>>
+    Owner& operator=(F&& function) {
+        copyable_function_storage replacement(std::forward<F>(function));
+        swap(replacement);
+        return static_cast<Owner&>(*this);
+    }
+
+    void swap(copyable_function_storage& other) noexcept {
+        copyable_function_storage temporary;
+        temporary.take_from(*this);
+        take_from(other);
+        other.take_from(temporary);
+    }
+
+    explicit operator bool() const noexcept { return callable_ != nullptr; }
+
+    R invoke(Args... args) const {
+        if (!callable_) functional_empty_call();
+        return callable_->invoke(std::forward<Args>(args)...);
+    }
+};
+
+template<typename Signature, typename Owner>
+class copyable_function_signature;
+
+#define RIN_COPYABLE_FUNCTION_SIGNATURE(SIGNATURE, MODE, CVREF_MODE, NOEXCEPT_SPEC, QUALIFIER) \
+template<typename R, typename... Args, typename Owner> \
+class copyable_function_signature<SIGNATURE, Owner> \
+    : public copyable_function_storage<R, MODE, CVREF_MODE, NOEXCEPT_SPEC, Owner, Args...> { \
+    using base = copyable_function_storage<R, MODE, CVREF_MODE, NOEXCEPT_SPEC, Owner, Args...>; \
+public: \
+    using base::base; \
+    using base::operator=; \
+    R operator()(Args... args) QUALIFIER { \
+        return this->invoke(std::forward<Args>(args)...); \
+    } \
+};
+
+RIN_COPYABLE_FUNCTION_SIGNATURE(R(Args...), 0, 0, false, )
+RIN_COPYABLE_FUNCTION_SIGNATURE(R(Args...) const, 1, 1, false, const)
+RIN_COPYABLE_FUNCTION_SIGNATURE(R(Args...) &, 0, 0, false, &)
+RIN_COPYABLE_FUNCTION_SIGNATURE(R(Args...) const &, 1, 1, false, const &)
+RIN_COPYABLE_FUNCTION_SIGNATURE(R(Args...) &&, 2, 2, false, &&)
+RIN_COPYABLE_FUNCTION_SIGNATURE(R(Args...) const &&, 3, 3, false, const &&)
+RIN_COPYABLE_FUNCTION_SIGNATURE(R(Args...) noexcept, 0, 0, true, noexcept)
+RIN_COPYABLE_FUNCTION_SIGNATURE(R(Args...) const noexcept, 1, 1, true, const noexcept)
+RIN_COPYABLE_FUNCTION_SIGNATURE(R(Args...) & noexcept, 0, 0, true, & noexcept)
+RIN_COPYABLE_FUNCTION_SIGNATURE(R(Args...) const & noexcept, 1, 1, true, const & noexcept)
+RIN_COPYABLE_FUNCTION_SIGNATURE(R(Args...) && noexcept, 2, 2, true, && noexcept)
+RIN_COPYABLE_FUNCTION_SIGNATURE(R(Args...) const && noexcept, 3, 3, true, const && noexcept)
+
+#undef RIN_COPYABLE_FUNCTION_SIGNATURE
+
+} /* namespace detail */
+
+template<typename Signature>
+class copyable_function
+    : public detail::copyable_function_signature<
+          Signature, copyable_function<Signature>> {
+    using base = detail::copyable_function_signature<
+        Signature, copyable_function<Signature>>;
+public:
+    friend bool operator==(const copyable_function& function,
+                           nullptr_t) noexcept {
+        return !function;
+    }
+
+    using base::base;
+    using base::operator=;
+    copyable_function() noexcept = default;
+    copyable_function(const copyable_function&) = default;
+    copyable_function(copyable_function&&) noexcept = default;
+    copyable_function& operator=(const copyable_function&) = default;
+    copyable_function& operator=(copyable_function&&) = default;
+
+    void swap(copyable_function& other) noexcept { base::swap(other); }
+};
+
+template<typename Signature>
+void swap(copyable_function<Signature>& left,
+          copyable_function<Signature>& right) noexcept {
+    left.swap(right);
+}
+
+/* Non-owning type erasure stores object, constant, and function addresses in
+ * a trivially copyable bound entity plus a typed invocation thunk. */
+template<typename>
+class function_ref;
+
+namespace detail {
+
+struct function_ref_bound_entity {
+    void* object;
+    const void* constant;
+    void (*function)();
+};
+
+constexpr function_ref_bound_entity function_ref_bind_object(
+    void* object) noexcept {
+    return {object, nullptr, nullptr};
+}
+
+constexpr function_ref_bound_entity function_ref_bind_function(
+    void (*function)()) noexcept {
+    return {nullptr, nullptr, function};
+}
+
+constexpr function_ref_bound_entity function_ref_bind_constant(
+    const void* constant) noexcept {
+    return {nullptr, constant, nullptr};
+}
+
+constexpr function_ref_bound_entity function_ref_bind_object_and_constant(
+    void* object, const void* constant) noexcept {
+    return {object, constant, nullptr};
+}
+
+template<auto Value, typename F>
+struct function_ref_constant_storage {
+    static constexpr F value = Value;
+};
+
+template<auto Value, typename F>
+constexpr const void* function_ref_constant_address() noexcept {
+    return static_cast<const void*>(
+        std::addressof(function_ref_constant_storage<Value, F>::value));
+}
+
+template<typename R, int CvMode, bool NoexceptSignature,
+         typename Owner, typename... Args>
+class function_ref_storage;
+
+template<typename Signature>
+struct function_ref_signature_traits;
+
+template<typename R, typename... Args>
+struct function_ref_signature_traits<function_ref<R(Args...)>> {
+    using function_type = R(Args...);
+    using object_cvref = int&;
+};
+
+template<typename R, typename... Args>
+struct function_ref_signature_traits<function_ref<R(Args...) const>> {
+    using function_type = R(Args...);
+    using object_cvref = const int&;
+};
+
+template<typename R, typename... Args>
+struct function_ref_signature_traits<function_ref<R(Args...) noexcept>> {
+    using function_type = R(Args...) noexcept;
+    using object_cvref = int&;
+};
+
+template<typename R, typename... Args>
+struct function_ref_signature_traits<
+    function_ref<R(Args...) const noexcept>> {
+    using function_type = R(Args...) noexcept;
+    using object_cvref = const int&;
+};
+
+template<typename To, typename From, typename = void>
+struct function_ref_is_compatible : false_type {};
+
+template<typename To, typename From>
+struct function_ref_is_compatible<
+    To, From,
+    void_t<typename function_ref_signature_traits<To>::function_type,
+           typename function_ref_signature_traits<From>::function_type>>
+    : integral_constant<bool,
+          is_convertible<
+              typename function_ref_signature_traits<From>::function_type&,
+              typename function_ref_signature_traits<To>::function_type&>::value &&
+          is_convertible<
+              typename function_ref_signature_traits<To>::object_cvref,
+              typename function_ref_signature_traits<From>::object_cvref>::value> {};
+
+template<typename T>
+struct is_constant_wrapper : false_type {};
+
+template<auto Value, typename T>
+struct is_constant_wrapper<constant_wrapper<Value, T>> : true_type {};
+
+template<typename R, bool NoexceptSignature, typename F, typename... Args>
+struct function_ref_invocable_from
+    : integral_constant<bool,
+          NoexceptSignature
+              ? is_nothrow_invocable_r<R, F, Args...>::value
+              : is_invocable_r<R, F, Args...>::value> {};
+
+template<typename R, int CvMode, bool NoexceptSignature,
+         typename F, typename... Args>
+struct function_ref_is_callable
+    : move_only_function_is_callable_from<
+          R, CvMode, CvMode, NoexceptSignature, F, Args...> {};
+
+template<typename F>
+struct function_ref_member_call_signature;
+
+#define RIN_FUNCTION_REF_MEMBER_SIGNATURE(CVREF, NOEXCEPT_SPEC) \
+template<typename R, typename C, typename... Args> \
+struct function_ref_member_call_signature< \
+    R (C::*)(Args...) CVREF NOEXCEPT_SPEC> { \
+    using type = R(Args...) NOEXCEPT_SPEC; \
+};
+
+RIN_FUNCTION_REF_MEMBER_SIGNATURE(, )
+RIN_FUNCTION_REF_MEMBER_SIGNATURE(const, )
+RIN_FUNCTION_REF_MEMBER_SIGNATURE(volatile, )
+RIN_FUNCTION_REF_MEMBER_SIGNATURE(const volatile, )
+RIN_FUNCTION_REF_MEMBER_SIGNATURE(&, )
+RIN_FUNCTION_REF_MEMBER_SIGNATURE(const &, )
+RIN_FUNCTION_REF_MEMBER_SIGNATURE(volatile &, )
+RIN_FUNCTION_REF_MEMBER_SIGNATURE(const volatile &, )
+RIN_FUNCTION_REF_MEMBER_SIGNATURE(&&, )
+RIN_FUNCTION_REF_MEMBER_SIGNATURE(const &&, )
+RIN_FUNCTION_REF_MEMBER_SIGNATURE(volatile &&, )
+RIN_FUNCTION_REF_MEMBER_SIGNATURE(const volatile &&, )
+RIN_FUNCTION_REF_MEMBER_SIGNATURE(, noexcept)
+RIN_FUNCTION_REF_MEMBER_SIGNATURE(const, noexcept)
+RIN_FUNCTION_REF_MEMBER_SIGNATURE(volatile, noexcept)
+RIN_FUNCTION_REF_MEMBER_SIGNATURE(const volatile, noexcept)
+RIN_FUNCTION_REF_MEMBER_SIGNATURE(&, noexcept)
+RIN_FUNCTION_REF_MEMBER_SIGNATURE(const &, noexcept)
+RIN_FUNCTION_REF_MEMBER_SIGNATURE(volatile &, noexcept)
+RIN_FUNCTION_REF_MEMBER_SIGNATURE(const volatile &, noexcept)
+RIN_FUNCTION_REF_MEMBER_SIGNATURE(&&, noexcept)
+RIN_FUNCTION_REF_MEMBER_SIGNATURE(const &&, noexcept)
+RIN_FUNCTION_REF_MEMBER_SIGNATURE(volatile &&, noexcept)
+RIN_FUNCTION_REF_MEMBER_SIGNATURE(const volatile &&, noexcept)
+
+#undef RIN_FUNCTION_REF_MEMBER_SIGNATURE
+
+template<typename F, typename T, typename = void>
+struct function_ref_constant_bound_signature {};
+
+template<typename R, typename G, typename... Args, typename T>
+struct function_ref_constant_bound_signature<R (*)(G, Args...), T, void> {
+    using type = R(Args...);
+};
+
+template<typename R, typename G, typename... Args, typename T>
+struct function_ref_constant_bound_signature<
+    R (*)(G, Args...) noexcept, T, void> {
+    using type = R(Args...) noexcept;
+};
+
+template<typename F, typename T>
+struct function_ref_constant_bound_signature<
+    F, T, enable_if_t<is_member_function_pointer<F>::value>> {
+    using type = typename function_ref_member_call_signature<F>::type;
+};
+
+template<typename F, typename T>
+struct function_ref_constant_bound_signature<
+    F, T, enable_if_t<is_member_object_pointer<F>::value,
+                      void_t<invoke_result_t<F, T&>>>> {
+    using type = invoke_result_t<F, T&>() noexcept;
+};
+
+template<typename R, int CvMode, bool NoexceptSignature,
+         typename Owner, typename... Args>
+class function_ref_storage {
+    using bound_entity = function_ref_bound_entity;
+    using thunk_type = R (*)(bound_entity, Args&&...) noexcept(NoexceptSignature);
+
+    template<typename, int, bool, typename, typename...>
+    friend class function_ref_storage;
+
+    bound_entity bound_;
+    thunk_type thunk_;
+
+    template<typename T>
+    static R object_thunk(bound_entity bound, Args&&... args)
+        noexcept(NoexceptSignature) {
+        using object_type = remove_reference_t<
+            typename move_only_function_target<CvMode, T>::type>;
+        object_type& object = *static_cast<object_type*>(bound.object);
+        if constexpr (is_void<R>::value) {
+            std::invoke(object, std::forward<Args>(args)...);
+        } else {
+            return std::invoke(object, std::forward<Args>(args)...);
+        }
+    }
+
+    template<typename F>
+    static R function_thunk(bound_entity bound, Args&&... args)
+        noexcept(NoexceptSignature) {
+        using function_pointer = F*;
+        auto function = reinterpret_cast<function_pointer>(bound.function);
+        if constexpr (is_void<R>::value) {
+            std::invoke(function, std::forward<Args>(args)...);
+        } else {
+            return std::invoke(function, std::forward<Args>(args)...);
+        }
+    }
+
+    template<typename F>
+    static R constant_thunk(bound_entity bound, Args&&... args)
+        noexcept(NoexceptSignature) {
+        const F& function = *static_cast<const F*>(bound.constant);
+        if constexpr (is_void<R>::value) {
+            std::invoke(function, std::forward<Args>(args)...);
+        } else {
+            return std::invoke(function, std::forward<Args>(args)...);
+        }
+    }
+
+    template<typename F, typename T>
+    static R constant_object_thunk(bound_entity bound, Args&&... args)
+        noexcept(NoexceptSignature) {
+        const F& function = *static_cast<const F*>(bound.constant);
+        using object_type = remove_reference_t<
+            typename move_only_function_target<CvMode, T>::type>;
+        object_type& object = *static_cast<object_type*>(bound.object);
+        if constexpr (is_void<R>::value) {
+            std::invoke(function, object, std::forward<Args>(args)...);
+        } else {
+            return std::invoke(function, object, std::forward<Args>(args)...);
+        }
+    }
+
+    template<typename F, typename T>
+    static R constant_pointer_thunk(bound_entity bound, Args&&... args)
+        noexcept(NoexceptSignature) {
+        const F& function = *static_cast<const F*>(bound.constant);
+        using object_type = remove_reference_t<
+            typename move_only_function_target<CvMode, T>::type>;
+        auto object = static_cast<object_type*>(bound.object);
+        if constexpr (is_void<R>::value) {
+            std::invoke(function, object, std::forward<Args>(args)...);
+        } else {
+            return std::invoke(function, object, std::forward<Args>(args)...);
+        }
+    }
+
+    template<typename F>
+    static constexpr bool callable() {
+        return move_only_function_is_callable_from<
+            R, CvMode, CvMode, NoexceptSignature, F, Args...>::value;
+    }
+
+public:
+    template<typename F, typename T = remove_reference_t<F>,
+             typename = enable_if_t<
+                 !is_same<remove_cvref_t<F>, Owner>::value &&
+                 !is_constant_wrapper<remove_cvref_t<F>>::value &&
+                 !is_function<T>::value &&
+                 !is_member_pointer<T>::value &&
+                 callable<T>()>>
+    constexpr function_ref_storage(F&& function) noexcept
+        : bound_(function_ref_bind_object(const_cast<void*>(
+              static_cast<const volatile void*>(std::addressof(function))))),
+          thunk_(nullptr) {
+        using source_type = remove_cv_t<T>;
+        if constexpr (function_ref_is_compatible<
+                          Owner, source_type>::value) {
+            const source_type& source = function;
+            bound_ = source.bound_;
+            thunk_ = source.thunk_;
+        } else {
+            thunk_ = &object_thunk<T>;
+        }
+    }
+
+    template<typename F,
+             typename = enable_if_t<is_function<F>::value && callable<F>()>>
+    function_ref_storage(F* function) noexcept
+        : bound_(function_ref_bind_function(
+              reinterpret_cast<void (*)()>(function))),
+          thunk_(&function_thunk<F>) {}
+
+    template<auto Value, typename F,
+             typename = enable_if_t<callable<const F&>()>>
+    constexpr function_ref_storage(constant_wrapper<Value, F>) noexcept
+        : bound_(function_ref_bind_constant(
+              function_ref_constant_address<Value, F>())),
+          thunk_(&constant_thunk<F>) {}
+
+    template<auto Value, typename F, typename U,
+             typename T = remove_reference_t<U>,
+             typename = enable_if_t<
+                 is_lvalue_reference<U&&>::value &&
+                 !is_pointer<remove_cvref_t<U>>::value &&
+                 function_ref_invocable_from<
+                     R, NoexceptSignature, const F&,
+                     typename move_only_function_target<
+                         CvMode, T>::type, Args...>::value>>
+    constexpr function_ref_storage(constant_wrapper<Value, F>,
+                                   U&& object) noexcept
+        : bound_(function_ref_bind_object_and_constant(
+              const_cast<void*>(static_cast<const volatile void*>(
+                  std::addressof(object))),
+              function_ref_constant_address<Value, F>())),
+          thunk_(&constant_object_thunk<F, T>) {}
+
+    template<auto Value, typename F, typename T,
+             typename = enable_if_t<
+                 function_ref_invocable_from<
+                     R, NoexceptSignature, const F&,
+                     typename move_only_function_target<
+                         CvMode, T>::type*, Args...>::value>>
+    constexpr function_ref_storage(constant_wrapper<Value, F>,
+                                   T* object) noexcept
+        : bound_(function_ref_bind_object_and_constant(
+              const_cast<void*>(static_cast<const volatile void*>(object)),
+              function_ref_constant_address<Value, F>())),
+          thunk_(&constant_pointer_thunk<F, T>) {}
+
+    constexpr function_ref_storage(const function_ref_storage&) noexcept = default;
+    constexpr function_ref_storage& operator=(
+        const function_ref_storage&) noexcept = default;
+
+    template<typename T,
+             typename = enable_if_t<
+                 !function_ref_is_compatible<Owner, remove_cvref_t<T>>::value &&
+                 !is_pointer<T>::value &&
+                 !is_constant_wrapper<remove_cvref_t<T>>::value>>
+    function_ref_storage& operator=(T) = delete;
+
+    R invoke(Args... args) const noexcept(NoexceptSignature) {
+        return thunk_(bound_, std::forward<Args>(args)...);
+    }
+};
+
+} /* namespace detail */
+
+#define RIN_FUNCTION_REF_CLASS(SIGNATURE, CVMODE, NOEXCEPT_VALUE, QUALIFIER) \
+template<typename R, typename... Args> \
+class function_ref<SIGNATURE> \
+    : public detail::function_ref_storage< \
+          R, CVMODE, NOEXCEPT_VALUE, function_ref<SIGNATURE>, Args...> { \
+    using owner = function_ref<SIGNATURE>; \
+    using base = detail::function_ref_storage< \
+        R, CVMODE, NOEXCEPT_VALUE, owner, Args...>; \
+    template<typename> friend class function_ref; \
+public: \
+    template<typename F, typename T = remove_reference_t<F>, \
+             typename = enable_if_t< \
+                 !is_same<remove_cvref_t<F>, owner>::value && \
+                 !detail::is_constant_wrapper<remove_cvref_t<F>>::value && \
+                 !is_function<T>::value && !is_member_pointer<T>::value && \
+                 detail::function_ref_is_callable< \
+                     R, CVMODE, NOEXCEPT_VALUE, T, Args...>::value>> \
+    constexpr function_ref(F&& function) noexcept \
+        : base(std::forward<F>(function)) {} \
+    template<typename F, typename = enable_if_t< \
+        is_function<F>::value && detail::function_ref_is_callable< \
+            R, CVMODE, NOEXCEPT_VALUE, F, Args...>::value>> \
+    function_ref(F* function) noexcept : base(function) {} \
+    template<auto Value, typename F, typename = enable_if_t< \
+        detail::function_ref_is_callable< \
+            R, CVMODE, NOEXCEPT_VALUE, const F&, Args...>::value>> \
+    constexpr function_ref(constant_wrapper<Value, F> function) noexcept \
+        : base(function) {} \
+    template<auto Value, typename F, typename U, \
+             typename T = remove_reference_t<U>, \
+             typename = enable_if_t< \
+                 is_lvalue_reference<U&&>::value && \
+                 !is_pointer<remove_cvref_t<U>>::value && \
+                 detail::function_ref_invocable_from< \
+                     R, NOEXCEPT_VALUE, const F&, \
+                     typename detail::move_only_function_target< \
+                         CVMODE, T>::type, Args...>::value>> \
+    constexpr function_ref(constant_wrapper<Value, F> function, \
+                           U&& object) noexcept \
+        : base(function, std::forward<U>(object)) {} \
+    template<auto Value, typename F, typename T, \
+             typename = enable_if_t< \
+                 detail::function_ref_invocable_from< \
+                     R, NOEXCEPT_VALUE, const F&, \
+                     typename detail::move_only_function_target< \
+                         CVMODE, T>::type*, Args...>::value>> \
+    constexpr function_ref(constant_wrapper<Value, F> function, \
+                           T* object) noexcept : base(function, object) {} \
+    constexpr function_ref(const function_ref&) noexcept = default; \
+    constexpr function_ref& operator=(const function_ref&) noexcept = default; \
+    R operator()(Args... args) const noexcept(NOEXCEPT_VALUE) { \
+        return this->invoke(std::forward<Args>(args)...); \
+    } \
+    template<typename T, typename = enable_if_t< \
+        !detail::function_ref_is_compatible< \
+            owner, remove_cvref_t<T>>::value && \
+        !is_pointer<T>::value && \
+        !detail::is_constant_wrapper<remove_cvref_t<T>>::value>> \
+    function_ref& operator=(T) = delete; \
+};
+
+RIN_FUNCTION_REF_CLASS(R(Args...), 0, false, )
+RIN_FUNCTION_REF_CLASS(R(Args...) const, 1, false, const)
+RIN_FUNCTION_REF_CLASS(R(Args...) noexcept, 0, true, noexcept)
+RIN_FUNCTION_REF_CLASS(R(Args...) const noexcept, 1, true, const noexcept)
+
+#undef RIN_FUNCTION_REF_CLASS
+
+template<typename F>
+function_ref(F*) -> function_ref<F>;
+
+template<auto Value, typename F,
+         enable_if_t<is_pointer<F>::value &&
+                     is_function<remove_pointer_t<F>>::value, int> = 0>
+function_ref(constant_wrapper<Value, F>) -> function_ref<remove_pointer_t<F>>;
+
+template<auto Value, typename F, typename T>
+function_ref(constant_wrapper<Value, F>, T&&)
+    -> function_ref<typename detail::function_ref_constant_bound_signature<
+        F, remove_reference_t<T>>::type>;
 #endif
 
 /* C++11/14/17 expose the nullable function comparisons as non-members.

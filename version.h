@@ -326,6 +326,12 @@
 #define __cpp_lib_atomic_min_max           202403L
 #endif
 
+/* These macros are exposed only with the matching C++26 wrapper previews. */
+#if defined(__cplusplus) && \
+    (__cplusplus > 202302L || defined(RIN_ENABLE_CXX26_FUNCTION_WRAPPERS))
+#define __cpp_lib_copyable_function        202306L
+#define __cpp_lib_function_ref             202604L
+#endif
 #define __RINOS_LIBCXX__                    1
 #define __RINOS_LIBCXX_VERSION__            20240101L
 #define __RINOS_LIBCXX_VERSION_MAJOR__      1
