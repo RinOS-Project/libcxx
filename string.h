@@ -2022,6 +2022,11 @@ public:
         return basic_string(m_data + pos, len, m_alloc);
     }
 
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_STRING_SUBVIEW)
+    constexpr basic_string_view<CharT, Traits> subview(
+        size_type pos = 0, size_type count = npos) const;
+#endif
+
 #if __cplusplus > 202002L
     /* C++23 permits an rvalue substring to reuse the source allocation when
      * the requested view is the complete string.  Keep the allocator and

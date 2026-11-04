@@ -228,6 +228,12 @@
 #endif
 #endif
 
+/* P3044R2 subview API; preview-gated until the C++26 dialect by default. */
+#if defined(__cplusplus) && \
+    (__cplusplus > 202302L || defined(RIN_ENABLE_CXX26_STRING_SUBVIEW))
+#define __cpp_lib_string_subview 202506L
+#endif
+
 /* Heterogeneous lookup for ordered associative containers was standardized
  * in C++14.  Publish this independently of the C++17 node-handle block so
  * C++14 consumers can gate find/count/bound operations portably. */

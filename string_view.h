@@ -337,6 +337,13 @@ public:
         return basic_string_view(m_data ? m_data + pos : nullptr, rlen);
     }
 
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_STRING_SUBVIEW)
+    constexpr basic_string_view subview(
+        size_type pos = 0, size_type count = npos) const {
+        return substr(pos, count);
+    }
+#endif
+
     constexpr int compare(basic_string_view v) const noexcept {
         size_type rlen = min(m_size, v.m_size);
         int result = 0;
@@ -1032,6 +1039,23 @@ template<typename CharT, typename Traits, typename Allocator>
 bool basic_string<CharT, Traits, Allocator>::contains(
     basic_string_view<CharT, Traits> sv) const noexcept {
     return find(sv.data(), 0, sv.size()) != npos;
+}
+#endif
+
+#if defined(RINCXX_STRING_H) && \
+    (__cplusplus > 202302L || defined(RIN_ENABLE_CXX26_STRING_SUBVIEW))
+template<typename CharT, typename Traits, typename Allocator>
+constexpr basic_string_view<CharT, Traits>
+basic_string<CharT, Traits, Allocator>::subview(
+    size_type pos, size_type count) const {
+    if (pos > m_size) {
+        __detail::string_position_out_of_range(
+            "basic_string::subview position is out of range");
+    }
+    const size_type available = m_size - pos;
+    const size_type length = (count == npos || count > available)
+        ? available : count;
+    return basic_string_view<CharT, Traits>(m_data + pos, length);
 }
 #endif
 
