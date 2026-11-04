@@ -1848,8 +1848,7 @@ public:
             if (ec) return static_cast<uintmax_t>(-1);
         }
         const file_type type = status_.type();
-        if (type == file_type::not_found || type == file_type::none ||
-            type == file_type::unknown) {
+        if (type == file_type::not_found || type == file_type::none) {
             ec = make_error_code(errc::io_error);
             return static_cast<uintmax_t>(-1);
         }
@@ -1869,8 +1868,7 @@ public:
             if (ec) return file_time_type::min();
         }
         const file_type type = status_.type();
-        if (type == file_type::not_found || type == file_type::none ||
-            type == file_type::unknown) {
+        if (type == file_type::not_found || type == file_type::none) {
             ec = make_error_code(errc::io_error);
             return file_time_type::min();
         }
