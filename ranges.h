@@ -13648,7 +13648,18 @@ constexpr void reserve_container_for_range(Container& container, R&& range) {
     if constexpr (ranges::detail::reservable_container<Container> &&
                   ranges::sized_range<R>) {
         using size_type = decltype(ranges::size(container));
-        container.reserve(static_cast<size_type>(ranges::size(range)));
+        using range_size_type = remove_cv_t<decltype(ranges::size(range))>;
+        using comparison_type = common_type_t<size_type, range_size_type>;
+        const comparison_type current_size =
+            static_cast<comparison_type>(ranges::size(container));
+        const comparison_type maximum_size =
+            static_cast<comparison_type>(container.max_size());
+        const comparison_type additional_size =
+            static_cast<comparison_type>(ranges::size(range));
+        if (additional_size <= maximum_size - current_size) {
+            container.reserve(static_cast<size_type>(
+                current_size + additional_size));
+        }
     }
 }
 
