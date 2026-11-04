@@ -132,6 +132,162 @@ using pair_key_t = remove_cv_t<remove_reference_t<decltype(declval<Pair>().first
 template <typename Pair>
 using pair_mapped_t = remove_cv_t<remove_reference_t<decltype(declval<Pair>().second)>>;
 
+template <typename Sequence, typename Compare, typename InputIt,
+          typename Sentinel>
+void bulk_insert_keys(Sequence& keys, const Compare& comp, InputIt first,
+                      Sentinel last, bool allow_equivalent,
+                      bool already_sorted) {
+    Sequence incoming(keys.get_allocator());
+    for (; first != last; ++first) {
+        auto&& value = *first;
+        incoming.insert(incoming.end(),
+                        std::forward<decltype(value)>(value));
+    }
+    if (incoming.empty()) return;
+    if (!already_sorted)
+        stable_sort(incoming.begin(), incoming.end(), comp);
+
+    if (!allow_equivalent) {
+        Sequence unique(keys.get_allocator());
+        for (auto it = incoming.begin(); it != incoming.end(); ++it) {
+            if (unique.empty() || comp(unique.back(), *it))
+                unique.insert(unique.end(), std::move(*it));
+        }
+        incoming.swap(unique);
+    }
+
+    vector<pair<bool, size_t>> order;
+    size_t existing_index = 0u;
+    size_t added_index = 0u;
+    while (existing_index != keys.size() && added_index != incoming.size()) {
+        if (comp(incoming[added_index], keys[existing_index])) {
+            order.emplace_back(true, added_index++);
+        } else if (comp(keys[existing_index], incoming[added_index])) {
+            order.emplace_back(false, existing_index++);
+        } else if (allow_equivalent) {
+            order.emplace_back(false, existing_index++);
+        } else {
+            order.emplace_back(false, existing_index++);
+            ++added_index;
+        }
+    }
+    for (; existing_index != keys.size(); ++existing_index)
+        order.emplace_back(false, existing_index);
+    for (; added_index != incoming.size(); ++added_index)
+        order.emplace_back(true, added_index);
+
+    Sequence merged(keys.get_allocator());
+    bool existing_moved = false;
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+    try {
+#endif
+        for (const auto& item : order) {
+            if (item.first) {
+                merged.insert(merged.end(), std::move(incoming[item.second]));
+            } else {
+                existing_moved = true;
+                merged.insert(merged.end(), std::move(keys[item.second]));
+            }
+        }
+        existing_moved = true;
+        keys.swap(merged);
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+    } catch (...) {
+        if (existing_moved) keys.clear();
+        throw;
+    }
+#endif
+}
+
+template <typename KeySequence, typename MappedSequence, typename Compare,
+          typename InputIt, typename Sentinel>
+void bulk_insert_pairs(KeySequence& keys, MappedSequence& mapped,
+                       const Compare& comp, InputIt first, Sentinel last,
+                       bool allow_equivalent, bool already_sorted) {
+    using value_type = pair<typename KeySequence::value_type,
+                            typename MappedSequence::value_type>;
+    vector<value_type> incoming;
+    for (; first != last; ++first) {
+        auto&& value = *first;
+        incoming.emplace_back(
+            std::forward<decltype(value)>(value).first,
+            std::forward<decltype(value)>(value).second);
+    }
+    if (incoming.empty()) return;
+    auto key_less = [&comp](const value_type& left,
+                            const value_type& right) {
+        return comp(left.first, right.first);
+    };
+    if (!already_sorted)
+        stable_sort(incoming.begin(), incoming.end(), key_less);
+
+    if (!allow_equivalent) {
+        vector<value_type> unique;
+        unique.reserve(incoming.size());
+        for (auto& value : incoming) {
+            if (unique.empty() || comp(unique.back().first, value.first))
+                unique.emplace_back(std::move(value.first),
+                                    std::move(value.second));
+        }
+        incoming.swap(unique);
+    }
+
+    vector<pair<bool, size_t>> order;
+    size_t existing_index = 0u;
+    size_t added_index = 0u;
+    while (existing_index != keys.size() && added_index != incoming.size()) {
+        const bool added_first =
+            comp(incoming[added_index].first, keys[existing_index]);
+        const bool existing_first = !added_first &&
+            comp(keys[existing_index], incoming[added_index].first);
+        if (added_first) {
+            order.emplace_back(true, added_index++);
+        } else if (existing_first || allow_equivalent) {
+            order.emplace_back(false, existing_index++);
+        } else {
+            order.emplace_back(false, existing_index++);
+            ++added_index;
+        }
+    }
+    for (; existing_index != keys.size(); ++existing_index)
+        order.emplace_back(false, existing_index);
+    for (; added_index != incoming.size(); ++added_index)
+        order.emplace_back(true, added_index);
+
+    KeySequence merged_keys(keys.get_allocator());
+    MappedSequence merged_mapped(mapped.get_allocator());
+    bool existing_moved = false;
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+    try {
+#endif
+        for (const auto& item : order) {
+            if (item.first) {
+                merged_keys.insert(merged_keys.end(),
+                                   std::move(incoming[item.second].first));
+                merged_mapped.insert(merged_mapped.end(),
+                                     std::move(incoming[item.second].second));
+            } else {
+                existing_moved = true;
+                merged_keys.insert(merged_keys.end(),
+                                   std::move(keys[item.second]));
+                merged_mapped.insert(merged_mapped.end(),
+                                     std::move(mapped[item.second]));
+            }
+        }
+        existing_moved = true;
+        keys.swap(merged_keys);
+        mapped.swap(merged_mapped);
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+    } catch (...) {
+        if (existing_moved) {
+            keys.clear();
+            mapped.clear();
+        }
+        throw;
+    }
+#endif
+}
+
 } // namespace flat_detail
 
 template <typename Key, typename Compare = less<Key>, typename KeyContainer = vector<Key>>
@@ -190,9 +346,17 @@ class flat_set {
         const size_type index = upper(key);
         return keys_.insert(flat_detail::iter_at(keys_, index), std::forward<K>(key));
     }
-    template <typename InputIt> void insert_equivalent_range(InputIt first, InputIt last) {
-        for (; first != last; ++first)
-            insert_equivalent(*first);
+    template <typename InputIt, typename Sentinel>
+    void insert_equivalent_range(InputIt first, Sentinel last,
+                                 bool already_sorted = false) {
+        flat_detail::bulk_insert_keys(keys_, comp_, first, last, true,
+                                      already_sorted);
+    }
+    template <typename InputIt, typename Sentinel>
+    void insert_unique_range(InputIt first, Sentinel last,
+                             bool already_sorted = false) {
+        flat_detail::bulk_insert_keys(keys_, comp_, first, last, false,
+                                      already_sorted);
     }
     KeyContainer &mutable_key_container() noexcept { return keys_; }
 
@@ -423,8 +587,7 @@ class flat_set {
               enable_if_t<uses_allocator<KeyContainer, Alloc>::value, int> = 0>
     flat_set(from_range_t, R &&range, const Compare &comp, const Alloc &alloc)
         : comp_(comp), keys_(flat_detail::sequence_allocator<KeyContainer>(alloc)) {
-        for (auto &&value : range)
-            insert(std::forward<decltype(value)>(value));
+        insert_range(std::forward<R>(range));
     }
 #endif
 
@@ -491,24 +654,21 @@ class flat_set {
     iterator insert(const_iterator, const value_type &value) { return insert(value).first; }
     iterator insert(const_iterator, value_type &&value) { return insert(std::move(value)).first; }
     template <typename InputIt> void insert(InputIt first, InputIt last) {
-        for (; first != last; ++first)
-            insert(*first);
+        insert_unique_range(first, last);
     }
     void insert(initializer_list<value_type> values) { insert(values.begin(), values.end()); }
     void insert(sorted_unique_t, initializer_list<value_type> values) {
-        insert(values.begin(), values.end());
+        insert(sorted_unique, values.begin(), values.end());
     }
     template <typename InputIt> void insert(sorted_unique_t, InputIt first, InputIt last) {
-        insert(first, last);
+        insert_unique_range(first, last, true);
     }
 #if __cplusplus > 202002L
     template <typename R> void insert_range(R &&range) {
-        for (auto &&value : range)
-            insert(std::forward<decltype(value)>(value));
+        insert_unique_range(ranges::begin(range), ranges::end(range));
     }
     template <typename R> void insert_range(sorted_unique_t, R &&range) {
-        for (auto &&value : range)
-            insert(std::forward<decltype(value)>(value));
+        insert_unique_range(ranges::begin(range), ranges::end(range), true);
     }
 #endif
     template <typename... Args> pair<iterator, bool> emplace(Args &&...args) {
@@ -779,19 +939,18 @@ class flat_multiset : public flat_set<Key, Compare, KeyContainer> {
     }
     void insert(initializer_list<value_type> values) { insert(values.begin(), values.end()); }
     void insert(sorted_equivalent_t, initializer_list<value_type> values) {
-        insert(values.begin(), values.end());
+        insert(sorted_equivalent, values.begin(), values.end());
     }
     template <typename InputIt> void insert(sorted_equivalent_t, InputIt first, InputIt last) {
-        insert(first, last);
+        this->insert_equivalent_range(first, last, true);
     }
 #if __cplusplus > 202002L
     template <typename R> void insert_range(R &&range) {
-        for (auto &&value : range)
-            insert(std::forward<decltype(value)>(value));
+        this->insert_equivalent_range(ranges::begin(range), ranges::end(range));
     }
     template <typename R> void insert_range(sorted_equivalent_t, R &&range) {
-        for (auto &&value : range)
-            insert(std::forward<decltype(value)>(value));
+        this->insert_equivalent_range(ranges::begin(range), ranges::end(range),
+                                     true);
     }
 #endif
     template <typename... Args> const_iterator emplace(Args &&...args) {
@@ -1002,12 +1161,15 @@ class flat_map {
 #endif
         return iterator(this, index);
     }
-    template <typename InputIt> void insert_range_impl(InputIt first, InputIt last) {
-        for (; first != last; ++first) {
-            auto &&value = *first;
-            insert_pair(std::forward<decltype(value)>(value).first,
-                        std::forward<decltype(value)>(value).second, false);
-        }
+    template <typename InputIt, typename Sentinel>
+    void insert_range_impl(InputIt first, Sentinel last) {
+        flat_detail::bulk_insert_pairs(keys_, mapped_, comp_, first, last,
+                                      false, false);
+    }
+    template <typename InputIt, typename Sentinel>
+    void insert_sorted_unique_range(InputIt first, Sentinel last) {
+        flat_detail::bulk_insert_pairs(keys_, mapped_, comp_, first, last,
+                                      false, true);
     }
     template <typename InputIt> void insert_sorted_range(InputIt first, InputIt last) {
         for (; first != last; ++first) {
@@ -1044,6 +1206,12 @@ class flat_map {
   protected:
     template <typename K, typename V> iterator insert_equivalent(K &&key, V &&mapped) {
         return insert_pair(std::forward<K>(key), std::forward<V>(mapped), true);
+    }
+    template <typename InputIt, typename Sentinel>
+    void insert_equivalent_range(InputIt first, Sentinel last,
+                                 bool already_sorted = false) {
+        flat_detail::bulk_insert_pairs(keys_, mapped_, comp_, first, last,
+                                       true, already_sorted);
     }
     KeyContainer &mutable_keys() noexcept { return keys_; }
     MappedContainer &mutable_mapped() noexcept { return mapped_; }
@@ -1473,19 +1641,17 @@ class flat_map {
     }
     void insert(initializer_list<value_type> values) { insert(values.begin(), values.end()); }
     void insert(sorted_unique_t, initializer_list<value_type> values) {
-        insert(values.begin(), values.end());
+        insert(sorted_unique, values.begin(), values.end());
     }
     template <typename InputIt> void insert(sorted_unique_t, InputIt first, InputIt last) {
-        insert_sorted_range(first, last);
+        insert_sorted_unique_range(first, last);
     }
 #if __cplusplus > 202002L
     template <typename R> void insert_range(R &&range) {
-        for (auto &&value : range)
-            insert(std::forward<decltype(value)>(value));
+        insert_range_impl(ranges::begin(range), ranges::end(range));
     }
     template <typename R> void insert_range(sorted_unique_t, R &&range) {
-        for (auto &&value : range)
-            insert(std::forward<decltype(value)>(value));
+        insert_sorted_unique_range(ranges::begin(range), ranges::end(range));
     }
 #endif
     template <typename... Args> pair<iterator, bool> emplace(Args &&...args) {
@@ -1856,12 +2022,11 @@ class flat_multimap : public flat_map<Key, T, Compare, KeyContainer, MappedConta
         insert_range(std::forward<R>(range));
     }
     template <typename R> void insert_range(R &&range) {
-        for (auto &&value : range)
-            this->insert_equivalent(std::forward<decltype(value)>(value).first,
-                                    std::forward<decltype(value)>(value).second);
+        this->insert_equivalent_range(ranges::begin(range), ranges::end(range));
     }
     template <typename R> void insert_range(sorted_equivalent_t, R &&range) {
-        insert_range(std::forward<R>(range));
+        this->insert_equivalent_range(ranges::begin(range), ranges::end(range),
+                                      true);
     }
 #endif
     iterator insert(const value_type &value) {
@@ -1879,15 +2044,14 @@ class flat_multimap : public flat_map<Key, T, Compare, KeyContainer, MappedConta
         return insert(std::forward<P>(value));
     }
     template <typename InputIt> void insert(InputIt first, InputIt last) {
-        for (; first != last; ++first)
-            insert(*first);
+        this->insert_equivalent_range(first, last);
     }
     void insert(initializer_list<value_type> values) { insert(values.begin(), values.end()); }
     void insert(sorted_equivalent_t, initializer_list<value_type> values) {
-        insert(values.begin(), values.end());
+        insert(sorted_equivalent, values.begin(), values.end());
     }
     template <typename InputIt> void insert(sorted_equivalent_t, InputIt first, InputIt last) {
-        insert(first, last);
+        this->insert_equivalent_range(first, last, true);
     }
     template <typename... Args> iterator emplace(Args &&...args) {
         pair<key_type, mapped_type> value(std::forward<Args>(args)...);
