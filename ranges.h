@@ -5441,7 +5441,9 @@ public:
     adjacent_view() = default;
     constexpr explicit adjacent_view(V base) : base_(std::move(base)) {}
 
-    constexpr V base() const& { return base_; }
+    constexpr V base() const& requires copy_constructible<V> {
+        return base_;
+    }
     constexpr V base() && { return std::move(base_); }
 
     constexpr auto begin() {
