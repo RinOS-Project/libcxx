@@ -70,10 +70,6 @@ struct is_pair_specialization<pair<T1, T2>> : true_type {};
 template<typename T> struct is_additional_tuple_like : false_type {};
 template<typename T, size_t N>
 struct is_additional_tuple_like<array<T, N>> : true_type {};
-#if __cplusplus > 202002L
-template<typename I, typename S>
-struct is_additional_tuple_like<ranges::subrange<I, S>> : true_type {};
-#endif
 
 template<typename Destination, typename Source, bool SameArity>
 struct tuple_pack_constructible_impl : false_type {};

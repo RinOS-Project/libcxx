@@ -1355,78 +1355,228 @@ public:
     }
 };
 
-/* ???????????????????????????????????????????????????????????????
- * subrange - ???????????
- * ???????????????????????????????????????????????????????????????*/
+enum class subrange_kind { unsized, sized };
 
-template<typename I, typename S = I>
-class subrange : public view_interface<subrange<I, S>> {
-    I begin_;
-    S end_;
+namespace detail {
+template<typename T>
+using pointer_to_unknown_bound_array_t = remove_pointer_t<T>(*)[];
+
+template<typename From, typename To>
+concept uses_nonqualification_pointer_conversion =
+    is_pointer_v<From> && is_pointer_v<To> &&
+    !convertible_to<pointer_to_unknown_bound_array_t<From>,
+                    pointer_to_unknown_bound_array_t<To>>;
+
+template<typename From, typename To>
+concept convertible_to_non_slicing = convertible_to<From, To> &&
+    !uses_nonqualification_pointer_conversion<From, To>;
+
+template<typename T, typename = void>
+struct is_pair_like : false_type {};
+
+template<typename T>
+struct is_pair_like<T, void_t<decltype(tuple_size<T>::value)>>
+    : bool_constant<tuple_size<T>::value == 2> {};
+
+template<bool StoreSize, typename Size>
+struct subrange_size_storage {};
+
+template<typename Size>
+struct subrange_size_storage<true, Size> {
+    Size size_ = 0;
+};
+
+template<typename I, typename S, subrange_kind K>
+inline constexpr bool subrange_stores_size =
+    K == subrange_kind::sized && !sized_sentinel_for<S, I>;
+
+template<typename I, typename S, subrange_kind K>
+using subrange_size_storage_t = subrange_size_storage<
+    subrange_stores_size<I, S, K>, make_unsigned_t<iter_difference_t<I>>>;
+} // namespace detail
+
+template<input_or_output_iterator I, sentinel_for<I> S = I,
+         subrange_kind K = sized_sentinel_for<S, I>
+             ? subrange_kind::sized : subrange_kind::unsized>
+    requires (K == subrange_kind::sized || !sized_sentinel_for<S, I>)
+class subrange : public view_interface<subrange<I, S, K>>,
+                 private detail::subrange_size_storage_t<I, S, K> {
+    using size_type = make_unsigned_t<iter_difference_t<I>>;
+    using size_storage = detail::subrange_size_storage_t<I, S, K>;
+    static constexpr bool StoreSize =
+        detail::subrange_stores_size<I, S, K>;
+
+    I begin_ = I();
+    S end_ = S();
 
 public:
-    subrange() = default;
+    subrange() requires default_initializable<I> = default;
 
-    constexpr subrange(I begin, S end) : begin_(begin), end_(end) {}
+    template<typename I2>
+        requires detail::convertible_to_non_slicing<I2, I>
+    constexpr subrange(I2 begin, S end) requires (!StoreSize)
+        : begin_(std::move(begin)), end_(std::move(end)) {}
+
+    template<typename I2>
+        requires detail::convertible_to_non_slicing<I2, I>
+    constexpr subrange(I2 begin, S end, size_type size)
+        requires (K == subrange_kind::sized)
+        : begin_(std::move(begin)), end_(std::move(end)) {
+        if constexpr (StoreSize)
+            static_cast<size_storage&>(*this).size_ = size;
+    }
 
     template<typename R>
-        requires borrowed_range<R>
-    constexpr subrange(R&& r)
-        : begin_(ranges::begin(r)), end_(ranges::end(r)) {}
+        requires (!same_as<remove_cv_t<remove_reference_t<R>>,
+                           subrange> && borrowed_range<R> &&
+                  detail::convertible_to_non_slicing<iterator_t<R>, I> &&
+                  convertible_to<sentinel_t<R>, S> &&
+                  (!StoreSize || sized_range<R>))
+    constexpr subrange(R&& range)
+        : begin_(ranges::begin(range)), end_(ranges::end(range)) {
+        if constexpr (StoreSize)
+            static_cast<size_storage&>(*this).size_ =
+                static_cast<size_type>(ranges::size(range));
+    }
 
-    /* The range customization point returns iterator/sentinel values.  Using
-     * references here makes iterator_t<subrange<...>> become I& and causes
-     * the iterator concepts to reject otherwise valid pointer iterators. */
+    template<typename R>
+        requires borrowed_range<R> &&
+                 detail::convertible_to_non_slicing<iterator_t<R>, I> &&
+                 convertible_to<sentinel_t<R>, S>
+    constexpr subrange(R&& range, size_type size)
+        requires (K == subrange_kind::sized)
+        : subrange(ranges::begin(range), ranges::end(range), size) {}
+
+    template<typename PairLike>
+        requires (!same_as<remove_cv_t<remove_reference_t<PairLike>>,
+                           subrange> &&
+                  !range<PairLike> && !is_reference_v<PairLike> &&
+                  detail::is_pair_like<PairLike>::value &&
+                  constructible_from<PairLike, const I&, const S&> &&
+                  detail::convertible_to_non_slicing<
+                      const I&, tuple_element_t<0, PairLike>> &&
+                  convertible_to<const S&, tuple_element_t<1, PairLike>>)
+    constexpr operator PairLike() const {
+        return PairLike(begin_, end_);
+    }
+
     constexpr I begin() const requires copyable<I> { return begin_; }
     constexpr I begin() requires (!copyable<I>) {
         return std::move(begin_);
     }
     constexpr S end() const { return end_; }
 
-    constexpr auto size() const requires sized_sentinel_for<S, I> {
-        return end_ - begin_;
+    constexpr bool empty() const { return begin_ == end_; }
+
+    constexpr size_type size() const
+        requires (K == subrange_kind::sized) {
+        if constexpr (StoreSize)
+            return static_cast<const size_storage&>(*this).size_;
+        else
+            return static_cast<size_type>(end_ - begin_);
+    }
+
+    constexpr subrange next(iter_difference_t<I> n = 1) const &
+        requires forward_iterator<I> {
+        auto result = *this;
+        result.advance(n);
+        return result;
+    }
+
+    constexpr subrange next(iter_difference_t<I> n = 1) && {
+        advance(n);
+        return std::move(*this);
+    }
+
+    constexpr subrange prev(iter_difference_t<I> n = 1) const
+        requires bidirectional_iterator<I> {
+        auto result = *this;
+        result.advance(-n);
+        return result;
+    }
+
+    constexpr subrange& advance(iter_difference_t<I> n) {
+        if constexpr (bidirectional_iterator<I>) {
+            if (n < 0) {
+                const auto magnitude = static_cast<size_type>(-(n + 1)) + 1;
+                if constexpr (random_access_iterator<I>) {
+                    begin_ += n;
+                } else {
+                    while (n < 0) {
+                        --begin_;
+                        ++n;
+                    }
+                }
+                if constexpr (StoreSize)
+                    static_cast<size_storage&>(*this).size_ += magnitude;
+                return *this;
+            }
+        }
+
+        if constexpr (random_access_iterator<I> &&
+                      (sized_sentinel_for<S, I> || StoreSize)) {
+            const auto available = [&] {
+                if constexpr (StoreSize)
+                    return static_cast<size_storage&>(*this).size_;
+                else
+                    return static_cast<size_type>(end_ - begin_);
+            }();
+            const auto bounded_distance =
+                static_cast<iter_difference_t<I>>(available);
+            const auto advanced = n < bounded_distance ? n : bounded_distance;
+            begin_ += advanced;
+            if constexpr (StoreSize)
+                static_cast<size_storage&>(*this).size_ -=
+                    static_cast<size_type>(advanced);
+            return *this;
+        }
+
+        auto remaining = n;
+        while (remaining > 0 && begin_ != end_) {
+            ++begin_;
+            --remaining;
+        }
+        if constexpr (StoreSize)
+            static_cast<size_storage&>(*this).size_ -=
+                static_cast<size_type>(n - remaining);
+        return *this;
     }
 };
 
-/* ????? */
-template<typename I, typename S>
+template<input_or_output_iterator I, sentinel_for<I> S>
 subrange(I, S) -> subrange<I, S>;
 
-template<typename R>
-subrange(R&&) -> subrange<iterator_t<R>, sentinel_t<R>>;
+template<input_or_output_iterator I, sentinel_for<I> S>
+subrange(I, S, make_unsigned_t<iter_difference_t<I>>)
+    -> subrange<I, S, subrange_kind::sized>;
+
+template<borrowed_range R>
+subrange(R&&) -> subrange<
+    iterator_t<R>, sentinel_t<R>,
+    (sized_range<R> || sized_sentinel_for<sentinel_t<R>, iterator_t<R>>)
+        ? subrange_kind::sized : subrange_kind::unsized>;
+
+template<borrowed_range R>
+subrange(R&&, make_unsigned_t<range_difference_t<R>>)
+    -> subrange<iterator_t<R>, sentinel_t<R>, subrange_kind::sized>;
 
 /* A subrange stores its iterator/sentinel pair rather than the source range,
  * so it remains valid when the subrange object itself is a temporary. */
-template<typename I, typename S>
-inline constexpr bool enable_borrowed_range<subrange<I, S>> = true;
+template<typename I, typename S, subrange_kind K>
+inline constexpr bool enable_borrowed_range<subrange<I, S, K>> = true;
 
-/* C++23 exposes subrange as a standard tuple-like source.  Keep get in the
- * associated ranges namespace so dependent tuple construction finds it by
- * ADL even when <tuple> was included before <ranges>. */
-template<size_t Index, typename I, typename S>
-constexpr decltype(auto) get(subrange<I, S>& value) noexcept {
-    static_assert(Index < 2, "subrange get index out of bounds");
-    if constexpr (Index == 0) return (value.begin());
-    else return (value.end());
+/* Keep get in the associated ranges namespace so dependent tuple construction
+ * finds it by ADL even when <tuple> was included before <ranges>. */
+template<size_t Index, typename I, typename S, subrange_kind K>
+    requires ((Index == 0 && copyable<I>) || Index == 1)
+constexpr auto get(const subrange<I, S, K>& value) noexcept {
+    if constexpr (Index == 0) return value.begin();
+    else return value.end();
 }
 
-template<size_t Index, typename I, typename S>
-constexpr decltype(auto) get(const subrange<I, S>& value) noexcept {
-    static_assert(Index < 2, "subrange get index out of bounds");
-    if constexpr (Index == 0) return (value.begin());
-    else return (value.end());
-}
-
-template<size_t Index, typename I, typename S>
-constexpr decltype(auto) get(subrange<I, S>&& value) noexcept {
-    static_assert(Index < 2, "subrange get index out of bounds");
-    if constexpr (Index == 0) return std::move(value).begin();
-    else return std::move(value).end();
-}
-
-template<size_t Index, typename I, typename S>
-constexpr decltype(auto) get(const subrange<I, S>&& value) noexcept {
-    static_assert(Index < 2, "subrange get index out of bounds");
+template<size_t Index, typename I, typename S, subrange_kind K>
+    requires (Index < 2)
+constexpr auto get(subrange<I, S, K>&& value) noexcept {
     if constexpr (Index == 0) return std::move(value).begin();
     else return std::move(value).end();
 }
@@ -13391,41 +13541,42 @@ inline constexpr transform_fn transform{};
 
 } /* namespace ranges */
 
-template<typename I, typename S>
-struct tuple_size<ranges::subrange<I, S>> : integral_constant<size_t, 2> {};
-
-template<typename I, typename S>
-struct tuple_size<const ranges::subrange<I, S>>
+template<typename I, typename S, ranges::subrange_kind K>
+struct tuple_size<ranges::subrange<I, S, K>>
     : integral_constant<size_t, 2> {};
 
-template<typename I, typename S>
-struct tuple_size<volatile ranges::subrange<I, S>>
+template<typename I, typename S, ranges::subrange_kind K>
+struct tuple_size<const ranges::subrange<I, S, K>>
     : integral_constant<size_t, 2> {};
 
-template<typename I, typename S>
-struct tuple_size<const volatile ranges::subrange<I, S>>
+template<typename I, typename S, ranges::subrange_kind K>
+struct tuple_size<volatile ranges::subrange<I, S, K>>
     : integral_constant<size_t, 2> {};
 
-template<size_t Index, typename I, typename S>
-struct tuple_element<Index, ranges::subrange<I, S>> {
+template<typename I, typename S, ranges::subrange_kind K>
+struct tuple_size<const volatile ranges::subrange<I, S, K>>
+    : integral_constant<size_t, 2> {};
+
+template<size_t Index, typename I, typename S, ranges::subrange_kind K>
+struct tuple_element<Index, ranges::subrange<I, S, K>> {
     static_assert(Index < 2, "subrange tuple element index out of bounds");
     using type = conditional_t<Index == 0, I, S>;
 };
 
-template<size_t Index, typename I, typename S>
-struct tuple_element<Index, const ranges::subrange<I, S>> {
+template<size_t Index, typename I, typename S, ranges::subrange_kind K>
+struct tuple_element<Index, const ranges::subrange<I, S, K>> {
     static_assert(Index < 2, "subrange tuple element index out of bounds");
     using type = const conditional_t<Index == 0, I, S>;
 };
 
-template<size_t Index, typename I, typename S>
-struct tuple_element<Index, volatile ranges::subrange<I, S>> {
+template<size_t Index, typename I, typename S, ranges::subrange_kind K>
+struct tuple_element<Index, volatile ranges::subrange<I, S, K>> {
     static_assert(Index < 2, "subrange tuple element index out of bounds");
     using type = volatile conditional_t<Index == 0, I, S>;
 };
 
-template<size_t Index, typename I, typename S>
-struct tuple_element<Index, const volatile ranges::subrange<I, S>> {
+template<size_t Index, typename I, typename S, ranges::subrange_kind K>
+struct tuple_element<Index, const volatile ranges::subrange<I, S, K>> {
     static_assert(Index < 2, "subrange tuple element index out of bounds");
     using type = const volatile conditional_t<Index == 0, I, S>;
 };

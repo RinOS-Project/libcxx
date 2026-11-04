@@ -19,11 +19,6 @@ namespace std {
 template<class T, size_t N>
 struct array;
 
-namespace ranges {
-template<class I, class S>
-class subrange;
-}
-
 // =============================================================================
 // tuple_size - PRIMARY TEMPLATE ONLY
 // =============================================================================
