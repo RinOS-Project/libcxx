@@ -1596,6 +1596,7 @@ public:
           symlink_status_valid_(false),
           file_size_(0), hard_link_count_(0), last_write_time_() {
         refresh(ec);
+        if (ec) path_.clear();
     }
 
     directory_entry& operator=(const directory_entry&) = default;
@@ -5270,6 +5271,13 @@ inline void current_path(const path& p) {
 inline file_status status(const path& p, error_code& ec) noexcept {
     ec.clear();
     directory_entry de(p, ec);
+    if (ec) {
+        const file_type type =
+            ec == make_error_code(errc::no_such_file_or_directory) ||
+            ec == make_error_code(errc::not_a_directory)
+                ? file_type::not_found : file_type::none;
+        return file_status(type);
+    }
     return de.status(ec);
 }
 
