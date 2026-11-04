@@ -8464,6 +8464,14 @@ public:
     constexpr adjacent_transform_view(V base, F function)
         : base_(std::move(base)), function_(std::move(function)) {}
 
+    constexpr auto base() const& requires copy_constructible<V> {
+        return base_.base();
+    }
+
+    constexpr auto base() && {
+        return std::move(base_).base();
+    }
+
     constexpr auto begin() {
         return iterator<V, F>{ranges::begin(base_), &function_};
     }
