@@ -20,6 +20,7 @@
 #include "compare.h"
 #include "tuple.h"
 #include "optional.h"
+#include "variant.h"
 
 namespace std {
 
@@ -2870,221 +2871,668 @@ inline constexpr bool enable_borrowed_range<join_with_view<V, D>> =
 
 #if __cplusplus > 202002L
 /* ═══════════════════════════════════════════════════════════════
- * concat_view - 二つの範囲を順に遅延連結
+ * concat_view - 複数範囲を順に遅延連結
  * ═══════════════════════════════════════════════════════════════*/
 
-template<typename V1, typename V2>
-    requires range<V1> && range<V2> &&
-             common_reference_with<range_reference_t<V1>,
-                                   range_reference_t<V2>>
-class concat_view : public view_interface<concat_view<V1, V2>> {
-    using reference = common_reference_t<
-        range_reference_t<V1>, range_reference_t<V2>>;
+namespace detail {
+
+template<typename... Rs>
+using concat_reference_t = common_reference_t<range_reference_t<Rs>...>;
+
+template<typename... Rs>
+using concat_value_t = common_type_t<range_value_t<Rs>...>;
+
+template<typename... Rs>
+using concat_rvalue_reference_t =
+    common_reference_t<range_rvalue_reference_t<Rs>...>;
+
+template<typename Ref, typename RRef, typename It>
+concept concat_indirectly_readable_impl = requires(const It it) {
+    { *it } -> convertible_to<Ref>;
+    { ranges::iter_move(it) } -> convertible_to<RRef>;
+};
+
+template<typename... Rs>
+concept concat_indirectly_readable = requires {
+    typename concat_reference_t<Rs...>;
+    typename concat_value_t<Rs...>;
+    typename concat_rvalue_reference_t<Rs...>;
+} && common_reference_with<concat_reference_t<Rs...>&&,
+                           concat_value_t<Rs...>&> &&
+     common_reference_with<concat_reference_t<Rs...>&&,
+                           concat_rvalue_reference_t<Rs...>&&> &&
+     common_reference_with<concat_rvalue_reference_t<Rs...>&&,
+                           const concat_value_t<Rs...>&> &&
+     (concat_indirectly_readable_impl<concat_reference_t<Rs...>,
+          concat_rvalue_reference_t<Rs...>, iterator_t<Rs>> && ...);
+
+template<typename... Rs>
+concept concatable = concat_indirectly_readable<Rs...>;
+
+template<bool Const, typename R>
+using concat_maybe_const_t = conditional_t<Const, const R, R>;
+
+template<bool Const, typename... Views>
+concept concat_all_forward =
+    (forward_range<concat_maybe_const_t<Const, Views>> && ...);
+
+template<bool Const, typename... Views>
+concept concat_all_bidirectional =
+    (bidirectional_range<concat_maybe_const_t<Const, Views>> && ...);
+
+template<bool Const, typename... Views>
+concept concat_all_random_access =
+    (random_access_range<concat_maybe_const_t<Const, Views>> && ...);
+
+template<bool Const, typename... Views>
+struct concat_prefix_common;
+
+template<bool Const, typename Only>
+struct concat_prefix_common<Const, Only> : true_type {};
+
+template<bool Const, typename First, typename Second, typename... Rest>
+struct concat_prefix_common<Const, First, Second, Rest...>
+    : bool_constant<
+          common_range<concat_maybe_const_t<Const, First>> &&
+          concat_prefix_common<Const, Second, Rest...>::value> {};
+
+template<bool Const, typename... Views>
+concept concat_is_bidirectional =
+    concat_all_bidirectional<Const, Views...> &&
+    concat_prefix_common<Const, Views...>::value;
+
+template<bool Const, typename... Views>
+concept concat_is_random_access =
+    concat_all_random_access<Const, Views...> &&
+    concat_prefix_common<Const, Views...>::value;
+
+template<typename R>
+concept concat_simple_view = view<R> && range<const R> &&
+    same_as<iterator_t<R>, iterator_t<const R>> &&
+    same_as<sentinel_t<R>, sentinel_t<const R>>;
+
+template<bool Const, typename First, typename... Rest>
+concept concat_sized_sentinel =
+    sized_sentinel_for<
+        sentinel_t<concat_maybe_const_t<Const, First>>,
+        iterator_t<concat_maybe_const_t<Const, First>>> &&
+    (sized_sentinel_for<
+        sentinel_t<concat_maybe_const_t<Const, Rest>>,
+        iterator_t<concat_maybe_const_t<Const, Rest>>> && ...) &&
+    (sized_range<concat_maybe_const_t<Const, Rest>> && ...);
+
+template<bool Const, typename... Views>
+struct concat_legacy_category {};
+
+template<bool Const, typename... Views>
+    requires concat_all_forward<Const, Views...>
+struct concat_legacy_category<Const, Views...> {
+private:
+    using reference = concat_reference_t<
+        concat_maybe_const_t<Const, Views>...>;
+    static constexpr bool all_random_categories =
+        (derived_from<typename iterator_traits<iterator_t<
+             concat_maybe_const_t<Const, Views>>>::iterator_category,
+             random_access_iterator_tag> && ...);
+    static constexpr bool all_bidirectional_categories =
+        (derived_from<typename iterator_traits<iterator_t<
+             concat_maybe_const_t<Const, Views>>>::iterator_category,
+             bidirectional_iterator_tag> && ...);
+    static constexpr bool all_forward_categories =
+        (derived_from<typename iterator_traits<iterator_t<
+             concat_maybe_const_t<Const, Views>>>::iterator_category,
+             forward_iterator_tag> && ...);
+
+public:
+    using type = conditional_t<!is_reference<reference>::value,
+        input_iterator_tag,
+        conditional_t<all_random_categories &&
+                          concat_is_random_access<Const, Views...>,
+            random_access_iterator_tag,
+            conditional_t<all_bidirectional_categories &&
+                              concat_is_bidirectional<Const, Views...>,
+                bidirectional_iterator_tag,
+                conditional_t<all_forward_categories,
+                    forward_iterator_tag, input_iterator_tag>>>>;
+};
+
+template<bool Forward, bool Const, typename... Views>
+struct concat_iterator_category_base {};
+
+template<bool Const, typename... Views>
+struct concat_iterator_category_base<true, Const, Views...> {
+    using iterator_category = typename concat_legacy_category<
+        Const, Views...>::type;
+};
+
+} // namespace detail
+
+template<input_range... Views>
+    requires (view<Views> && ...) && (sizeof...(Views) > 0) &&
+             detail::concatable<Views...>
+class concat_view : public view_interface<concat_view<Views...>> {
+    tuple<Views...> views_;
 
     template<bool Const>
-    struct sentinel {
-        using first_base = conditional_t<Const, const V1, V1>;
-        using second_base = conditional_t<Const, const V2, V2>;
-        using first_sentinel = sentinel_t<first_base>;
-        using second_sentinel = sentinel_t<second_base>;
+    class iterator
+        : public detail::concat_iterator_category_base<
+              detail::concat_all_forward<Const, Views...>, Const, Views...> {
+    public:
+        using difference_type = common_type_t<range_difference_t<
+            detail::concat_maybe_const_t<Const, Views>>...>;
 
-        first_sentinel first_end_;
-        second_sentinel second_end_;
+    private:
+        friend class concat_view;
+        template<bool>
+        friend class iterator;
 
-        constexpr sentinel(first_sentinel first_end,
-                           second_sentinel second_end)
-            : first_end_(std::move(first_end)),
-              second_end_(std::move(second_end)) {}
-    };
+        using parent_type = detail::concat_maybe_const_t<Const, concat_view>;
+        using base_iterator = variant<iterator_t<
+            detail::concat_maybe_const_t<Const, Views>>...>;
+        parent_type* parent_ = nullptr;
+        base_iterator current_{};
 
-    template<bool Const>
-    struct iterator {
-        using first_base = conditional_t<Const, const V1, V1>;
-        using second_base = conditional_t<Const, const V2, V2>;
-        using first_iterator = iterator_t<first_base>;
-        using first_sentinel = sentinel_t<first_base>;
-        using second_iterator = iterator_t<second_base>;
-        using second_sentinel = sentinel_t<second_base>;
-        using element_reference = common_reference_t<
-            range_reference_t<first_base>, range_reference_t<second_base>>;
+        template<size_t Index>
+        constexpr void satisfy() {
+            if constexpr (Index + 1 < sizeof...(Views)) {
+                if (get<Index>(current_) ==
+                    ranges::end(get<Index>(parent_->views_))) {
+                    current_.template emplace<Index + 1>(
+                        ranges::begin(get<Index + 1>(parent_->views_)));
+                    satisfy<Index + 1>();
+                }
+            }
+        }
 
-        using iterator_category = input_iterator_tag;
-        using iterator_concept = input_iterator_tag;
-        using value_type = common_type_t<range_value_t<first_base>,
-                                         range_value_t<second_base>>;
-        using difference_type = ptrdiff_t;
+        template<size_t Index>
+        constexpr void prev() {
+            if constexpr (Index == 0) {
+                --get<0>(current_);
+            } else {
+                if (get<Index>(current_) ==
+                    ranges::begin(get<Index>(parent_->views_))) {
+                    current_.template emplace<Index - 1>(
+                        ranges::end(get<Index - 1>(parent_->views_)));
+                    prev<Index - 1>();
+                } else {
+                    --get<Index>(current_);
+                }
+            }
+        }
+
+        template<size_t Index>
+        constexpr void advance_fwd(difference_type offset,
+                                   difference_type steps) {
+            using underlying_difference = iter_difference_t<
+                variant_alternative_t<Index, base_iterator>>;
+            if constexpr (Index + 1 == sizeof...(Views)) {
+                get<Index>(current_) +=
+                    static_cast<underlying_difference>(steps);
+            } else {
+                const difference_type extent = static_cast<difference_type>(
+                    ranges::distance(get<Index>(parent_->views_)));
+                if (offset + steps < extent) {
+                    get<Index>(current_) +=
+                        static_cast<underlying_difference>(steps);
+                } else {
+                    current_.template emplace<Index + 1>(
+                        ranges::begin(get<Index + 1>(parent_->views_)));
+                    advance_fwd<Index + 1>(0, offset + steps - extent);
+                }
+            }
+        }
+
+        template<size_t Index>
+        constexpr void advance_bwd(difference_type offset,
+                                   difference_type steps) {
+            using underlying_difference = iter_difference_t<
+                variant_alternative_t<Index, base_iterator>>;
+            if constexpr (Index == 0) {
+                get<Index>(current_) -=
+                    static_cast<underlying_difference>(steps);
+            } else {
+                if (offset >= steps) {
+                    get<Index>(current_) -=
+                        static_cast<underlying_difference>(steps);
+                } else {
+                    const difference_type previous_extent =
+                        static_cast<difference_type>(ranges::distance(
+                            get<Index - 1>(parent_->views_)));
+                    current_.template emplace<Index - 1>(
+                        ranges::end(get<Index - 1>(parent_->views_)));
+                    advance_bwd<Index - 1>(previous_extent,
+                                           steps - offset);
+                }
+            }
+        }
+
+        template<size_t Index = 0>
+        static constexpr base_iterator convert_current(iterator<false>& other) {
+            if (other.current_.index() == Index) {
+                return base_iterator(in_place_index<Index>,
+                    std::move(get<Index>(other.current_)));
+            }
+            if constexpr (Index + 1 < sizeof...(Views)) {
+                return convert_current<Index + 1>(other);
+            } else {
+                return base_iterator(in_place_index<0>,
+                    std::move(get<0>(other.current_)));
+            }
+        }
+
+        template<size_t Index = 0>
+        constexpr void increment_active() {
+            if (current_.index() == Index) {
+                ++get<Index>(current_);
+                satisfy<Index>();
+            } else if constexpr (Index + 1 < sizeof...(Views)) {
+                increment_active<Index + 1>();
+            }
+        }
+
+        template<size_t Index = 0>
+        constexpr void decrement_active() {
+            if (current_.index() == Index) {
+                prev<Index>();
+            } else if constexpr (Index + 1 < sizeof...(Views)) {
+                decrement_active<Index + 1>();
+            }
+        }
+
+        template<size_t Index = 0>
+        constexpr difference_type offset_from_begin() const {
+            if (current_.index() == Index) {
+                return static_cast<difference_type>(
+                    get<Index>(current_) -
+                    ranges::begin(get<Index>(parent_->views_)));
+            }
+            if constexpr (Index + 1 < sizeof...(Views)) {
+                return offset_from_begin<Index + 1>();
+            } else {
+                return difference_type(0);
+            }
+        }
+
+        template<size_t Index = 0>
+        constexpr difference_type range_size_at(size_t requested) const {
+            if (requested == Index) {
+                return static_cast<difference_type>(
+                    ranges::distance(get<Index>(parent_->views_)));
+            }
+            if constexpr (Index + 1 < sizeof...(Views)) {
+                return range_size_at<Index + 1>(requested);
+            } else {
+                return difference_type(0);
+            }
+        }
+
+        template<size_t Index = 0>
+        constexpr difference_type remaining_at_current() const {
+            if (current_.index() == Index) {
+                return static_cast<difference_type>(
+                    ranges::end(get<Index>(parent_->views_)) -
+                    get<Index>(current_));
+            }
+            if constexpr (Index + 1 < sizeof...(Views)) {
+                return remaining_at_current<Index + 1>();
+            } else {
+                return difference_type(0);
+            }
+        }
+
+        constexpr difference_type position() const {
+            difference_type result = offset_from_begin();
+            for (size_t index = 0; index < current_.index(); ++index)
+                result += range_size_at(index);
+            return result;
+        }
+
+        constexpr difference_type distance_to_end() const {
+            difference_type result = remaining_at_current();
+            for (size_t index = current_.index() + 1;
+                 index < sizeof...(Views); ++index)
+                result += range_size_at(index);
+            return result;
+        }
+
+    public:
+        using value_type = detail::concat_value_t<
+            detail::concat_maybe_const_t<Const, Views>...>;
+        using reference = detail::concat_reference_t<
+            detail::concat_maybe_const_t<Const, Views>...>;
         using pointer = void;
-        using reference = element_reference;
-
-        first_iterator first_{};
-        first_sentinel first_end_{};
-        second_iterator second_{};
-        second_sentinel second_end_{};
-        bool first_active_ = false;
+        using iterator_concept = conditional_t<
+            detail::concat_is_random_access<Const, Views...>,
+            random_access_iterator_tag,
+            conditional_t<detail::concat_is_bidirectional<Const, Views...>,
+                bidirectional_iterator_tag,
+                conditional_t<detail::concat_all_forward<Const, Views...>,
+                    forward_iterator_tag, input_iterator_tag>>>;
 
         constexpr iterator() = default;
 
-        constexpr iterator(first_iterator first, first_sentinel first_end,
-                           second_iterator second,
-                           second_sentinel second_end, bool first_active)
-            : first_(std::move(first)), first_end_(std::move(first_end)),
-              second_(std::move(second)), second_end_(std::move(second_end)),
-              first_active_(first_active) {}
+        template<size_t Index, typename It>
+        constexpr explicit iterator(parent_type* parent,
+                                    in_place_index_t<Index>, It&& current)
+            : parent_(parent),
+              current_(in_place_index<Index>, std::forward<It>(current)) {}
 
-        constexpr reference operator*() const {
-            if (first_active_) {
-                return static_cast<reference>(*first_);
-            }
-            return static_cast<reference>(*second_);
+        template<bool OtherConst>
+        constexpr iterator(iterator<OtherConst> other)
+            requires Const && (!OtherConst) &&
+                     (convertible_to<iterator_t<Views>,
+                                     iterator_t<const Views>> && ...)
+            : parent_(other.parent_), current_(convert_current(other)) {}
+
+        constexpr decltype(auto) operator*() const {
+            return visit([](auto&& current) -> reference {
+                return *current;
+            }, current_);
         }
 
         constexpr iterator& operator++() {
-            if (first_active_) {
-                ++first_;
-                if (first_ == first_end_) first_active_ = false;
-            } else {
-                ++second_;
+            increment_active();
+            return *this;
+        }
+
+        constexpr void operator++(int)
+            requires (!detail::concat_all_forward<Const, Views...>) {
+            ++*this;
+        }
+
+        constexpr iterator operator++(int)
+            requires detail::concat_all_forward<Const, Views...> {
+            auto previous = *this;
+            ++*this;
+            return previous;
+        }
+
+        constexpr iterator& operator--()
+            requires detail::concat_is_bidirectional<Const, Views...> {
+            decrement_active();
+            return *this;
+        }
+
+        constexpr iterator operator--(int)
+            requires detail::concat_is_bidirectional<Const, Views...> {
+            auto previous = *this;
+            --*this;
+            return previous;
+        }
+
+        constexpr iterator& operator+=(difference_type offset)
+            requires detail::concat_is_random_access<Const, Views...> {
+            if (offset > 0) {
+                visit_indexed([&](auto index, auto& current) {
+                    constexpr size_t value = decltype(index)::value;
+                    advance_fwd<value>(static_cast<difference_type>(
+                        current - ranges::begin(
+                            get<value>(parent_->views_))), offset);
+                });
+            } else if (offset < 0) {
+                visit_indexed([&](auto index, auto& current) {
+                    constexpr size_t value = decltype(index)::value;
+                    advance_bwd<value>(static_cast<difference_type>(
+                        current - ranges::begin(
+                            get<value>(parent_->views_))), -offset);
+                });
             }
             return *this;
         }
 
-        constexpr iterator operator++(int) {
-            auto copy = *this;
-            ++*this;
-            return copy;
+        constexpr iterator& operator-=(difference_type offset)
+            requires detail::concat_is_random_access<Const, Views...> {
+            return *this += -offset;
+        }
+
+        constexpr decltype(auto) operator[](difference_type offset) const
+            requires detail::concat_is_random_access<Const, Views...> {
+            return *(*this + offset);
         }
 
         friend constexpr bool operator==(const iterator& left,
-                                         const iterator& right) {
-            if (left.first_active_ != right.first_active_) return false;
-            return left.first_active_ ? left.first_ == right.first_
-                                      : left.second_ == right.second_;
+                                         const iterator& right)
+            requires (equality_comparable<iterator_t<
+                          detail::concat_maybe_const_t<Const, Views>>> && ...) {
+            return left.current_ == right.current_;
         }
 
-        friend constexpr bool operator!=(const iterator& left,
-                                         const iterator& right) {
-            return !(left == right);
+        friend constexpr bool operator==(const iterator& current,
+                                         default_sentinel_t) {
+            constexpr size_t last = sizeof...(Views) - 1;
+            return current.current_.index() == last &&
+                   get<last>(current.current_) ==
+                       ranges::end(get<last>(current.parent_->views_));
         }
 
-        friend constexpr bool operator==(const iterator& value,
-                                         const sentinel<Const>& bound) {
-            return value.first_active_ ? value.first_ == bound.first_end_
-                                       : value.second_ == bound.second_end_;
+        friend constexpr bool operator==(default_sentinel_t sentinel,
+                                         const iterator& current) {
+            return current == sentinel;
         }
 
-        friend constexpr bool operator==(const sentinel<Const>& bound,
-                                         const iterator& value) {
-            return value == bound;
+        friend constexpr bool operator<(const iterator& left,
+                                        const iterator& right)
+            requires detail::concat_all_random_access<Const, Views...> {
+            return left.current_ < right.current_;
         }
 
-        friend constexpr bool operator!=(const iterator& value,
-                                         const sentinel<Const>& bound) {
-            return !(value == bound);
+        friend constexpr bool operator>(const iterator& left,
+                                        const iterator& right)
+            requires detail::concat_all_random_access<Const, Views...> {
+            return right < left;
         }
 
-        friend constexpr bool operator!=(const sentinel<Const>& bound,
-                                         const iterator& value) {
-            return !(value == bound);
+        friend constexpr bool operator<=(const iterator& left,
+                                         const iterator& right)
+            requires detail::concat_all_random_access<Const, Views...> {
+            return !(right < left);
+        }
+
+        friend constexpr bool operator>=(const iterator& left,
+                                         const iterator& right)
+            requires detail::concat_all_random_access<Const, Views...> {
+            return !(left < right);
+        }
+
+        friend constexpr auto operator<=>(const iterator& left,
+                                          const iterator& right)
+            requires detail::concat_all_random_access<Const, Views...> &&
+                     (three_way_comparable<iterator_t<
+                          detail::concat_maybe_const_t<Const, Views>>> && ...) {
+            return left.current_ <=> right.current_;
+        }
+
+        friend constexpr iterator operator+(const iterator& current,
+                                            difference_type offset)
+            requires detail::concat_is_random_access<Const, Views...> {
+            auto result = current;
+            result += offset;
+            return result;
+        }
+
+        friend constexpr iterator operator+(difference_type offset,
+                                            const iterator& current)
+            requires detail::concat_is_random_access<Const, Views...> {
+            return current + offset;
+        }
+
+        friend constexpr iterator operator-(const iterator& current,
+                                            difference_type offset)
+            requires detail::concat_is_random_access<Const, Views...> {
+            auto result = current;
+            result -= offset;
+            return result;
+        }
+
+        friend constexpr difference_type operator-(const iterator& left,
+                                                   const iterator& right)
+            requires detail::concat_is_random_access<Const, Views...> {
+            return left.position() - right.position();
+        }
+
+        friend constexpr difference_type operator-(const iterator& current,
+                                                   default_sentinel_t)
+            requires detail::concat_sized_sentinel<Const, Views...> {
+            return -current.distance_to_end();
+        }
+
+        friend constexpr difference_type operator-(default_sentinel_t,
+                                                   const iterator& current)
+            requires detail::concat_sized_sentinel<Const, Views...> {
+            return -(current - default_sentinel);
+        }
+
+        friend constexpr decltype(auto) iter_move(const iterator& current)
+            noexcept((noexcept(static_cast<detail::concat_rvalue_reference_t<
+                detail::concat_maybe_const_t<Const, Views>...>>(
+                    ranges::iter_move(declval<const iterator_t<
+                        detail::concat_maybe_const_t<Const, Views>>&>()))) && ...)) {
+            using rvalue_reference = detail::concat_rvalue_reference_t<
+                detail::concat_maybe_const_t<Const, Views>...>;
+            return visit([](const auto& base_iterator) -> rvalue_reference {
+                return static_cast<rvalue_reference>(
+                    ranges::iter_move(base_iterator));
+            }, current.current_);
+        }
+
+        friend constexpr void iter_swap(const iterator& left,
+                                        const iterator& right)
+            noexcept(noexcept(ranges::swap(*left, *right)) &&
+                     (noexcept(ranges::iter_swap(declval<const iterator_t<
+                         detail::concat_maybe_const_t<Const, Views>>&>(),
+                         declval<const iterator_t<
+                         detail::concat_maybe_const_t<Const, Views>>&>())) && ...))
+            requires swappable_with<reference, reference> &&
+                     (indirectly_swappable<iterator_t<
+                          detail::concat_maybe_const_t<Const, Views>>> && ...) {
+            visit([&](const auto& left_base, const auto& right_base) {
+                if constexpr (is_same<decltype(left_base),
+                                      decltype(right_base)>::value) {
+                    ranges::iter_swap(left_base, right_base);
+                } else {
+                    ranges::swap(*left, *right);
+                }
+            }, left.current_, right.current_);
+        }
+
+    private:
+        template<typename Visitor, size_t... Indices>
+        constexpr void visit_indexed_impl(Visitor&& visitor,
+                                          index_sequence<Indices...>) {
+            ((current_.index() == Indices
+                  ? (static_cast<void>(visitor(integral_constant<size_t,
+                                      Indices>{}, get<Indices>(current_))), 0)
+                  : 0), ...);
+        }
+
+        template<typename Visitor>
+        constexpr void visit_indexed(Visitor&& visitor) {
+            visit_indexed_impl(std::forward<Visitor>(visitor),
+                make_index_sequence<sizeof...(Views)>{});
         }
     };
 
-    V1 first_;
-    V2 second_;
+    template<typename Tuple, size_t... Indices>
+    static constexpr auto sum_sizes(Tuple& views,
+                                    index_sequence<Indices...>) {
+        using result_type = make_unsigned_t<common_type_t<decltype(
+            ranges::size(get<Indices>(views)))...>>;
+        return (static_cast<result_type>(
+                    ranges::size(get<Indices>(views))) + ...);
+    }
+
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_RESERVE_HINT)
+    template<typename Tuple, size_t... Indices>
+    static constexpr auto sum_reserve_hints(Tuple& views,
+                                             index_sequence<Indices...>) {
+        using result_type = make_unsigned_t<common_type_t<decltype(
+            ranges::reserve_hint(get<Indices>(views)))...>>;
+        return (static_cast<result_type>(
+                    ranges::reserve_hint(get<Indices>(views))) + ...);
+    }
+#endif
 
 public:
-    concat_view() = default;
+    constexpr concat_view() = default;
 
-    constexpr concat_view(V1 first, V2 second)
-        : first_(std::move(first)), second_(std::move(second)) {}
+    constexpr explicit concat_view(Views... views)
+        : views_(std::move(views)...) {}
 
-    constexpr V1 base1() const& { return first_; }
-    constexpr V1 base1() && { return std::move(first_); }
-    constexpr V2 base2() const& { return second_; }
-    constexpr V2 base2() && { return std::move(second_); }
-
-    constexpr auto begin() {
-        auto first = ranges::begin(first_);
-        auto first_end = ranges::end(first_);
-        auto second = ranges::begin(second_);
-        auto second_end = ranges::end(second_);
-        const bool first_active = !(first == first_end);
-        return iterator<false>(std::move(first), std::move(first_end),
-                               std::move(second), std::move(second_end),
-                               first_active);
+    constexpr iterator<false> begin()
+        requires (!(detail::concat_simple_view<Views> && ...)) {
+        iterator<false> current(this, in_place_index<0>,
+                                ranges::begin(get<0>(views_)));
+        current.template satisfy<0>();
+        return current;
     }
 
-    constexpr auto end() {
-        return sentinel<false>(ranges::end(first_), ranges::end(second_));
+    constexpr iterator<true> begin() const
+        requires (range<const Views> && ...) &&
+                 detail::concatable<const Views...> {
+        iterator<true> current(this, in_place_index<0>,
+                               ranges::begin(get<0>(views_)));
+        current.template satisfy<0>();
+        return current;
     }
 
-    constexpr auto begin() const
-        requires range<const V1> && range<const V2> &&
-                 common_reference_with<range_reference_t<const V1>,
-                                        range_reference_t<const V2>> {
-        auto first = ranges::begin(std::as_const(first_));
-        auto first_end = ranges::end(std::as_const(first_));
-        auto second = ranges::begin(std::as_const(second_));
-        auto second_end = ranges::end(std::as_const(second_));
-        const bool first_active = !(first == first_end);
-        return iterator<true>(std::move(first), std::move(first_end),
-                              std::move(second), std::move(second_end),
-                              first_active);
+    constexpr auto end()
+        requires (!(detail::concat_simple_view<Views> && ...)) {
+        constexpr size_t last = sizeof...(Views) - 1;
+        if constexpr (detail::concat_all_forward<false, Views...> &&
+                      common_range<tuple_element_t<last, tuple<Views...>>>) {
+            return iterator<false>(this, in_place_index<last>,
+                                   ranges::end(get<last>(views_)));
+        } else {
+            return default_sentinel;
+        }
     }
 
     constexpr auto end() const
-        requires range<const V1> && range<const V2> &&
-                 common_reference_with<range_reference_t<const V1>,
-                                        range_reference_t<const V2>> {
-        return sentinel<true>(ranges::end(std::as_const(first_)),
-                              ranges::end(std::as_const(second_)));
+        requires (range<const Views> && ...) &&
+                 detail::concatable<const Views...> {
+        constexpr size_t last = sizeof...(Views) - 1;
+        if constexpr (detail::concat_all_forward<true, Views...> &&
+                      common_range<const tuple_element_t<last,
+                                                        tuple<Views...>>>) {
+            return iterator<true>(this, in_place_index<last>,
+                                  ranges::end(get<last>(views_)));
+        } else {
+            return default_sentinel;
+        }
     }
 
-    constexpr size_t size() const
-        requires sized_range<V1> && sized_range<V2> {
-        const size_t first_size = static_cast<size_t>(ranges::size(first_));
-        const size_t second_size = static_cast<size_t>(ranges::size(second_));
-        const size_t maximum = static_cast<size_t>(-1);
-        return second_size > maximum - first_size
-            ? maximum : first_size + second_size;
+    constexpr auto size()
+        requires (sized_range<Views> && ...) {
+        return sum_sizes(views_, make_index_sequence<sizeof...(Views)>{});
     }
+
+    constexpr auto size() const
+        requires (sized_range<const Views> && ...) {
+        return sum_sizes(views_, make_index_sequence<sizeof...(Views)>{});
+    }
+
 #if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_RESERVE_HINT)
     constexpr auto reserve_hint()
-        requires approximately_sized_range<V1> &&
-                 approximately_sized_range<V2> {
-        using common_type = common_type_t<
-            decltype(ranges::reserve_hint(first_)),
-            decltype(ranges::reserve_hint(second_))>;
-        using result_type = make_unsigned_t<common_type>;
-        return static_cast<result_type>(ranges::reserve_hint(first_)) +
-               static_cast<result_type>(ranges::reserve_hint(second_));
+        requires (approximately_sized_range<Views> && ...) {
+        return sum_reserve_hints(
+            views_, make_index_sequence<sizeof...(Views)>{});
     }
+
     constexpr auto reserve_hint() const
-        requires approximately_sized_range<const V1> &&
-                 approximately_sized_range<const V2> {
-        using common_type = common_type_t<
-            decltype(ranges::reserve_hint(std::as_const(first_))),
-            decltype(ranges::reserve_hint(std::as_const(second_)))>;
-        using result_type = make_unsigned_t<common_type>;
-        return static_cast<result_type>(
-                   ranges::reserve_hint(std::as_const(first_))) +
-               static_cast<result_type>(
-                   ranges::reserve_hint(std::as_const(second_)));
+        requires (approximately_sized_range<const Views> && ...) {
+        return sum_reserve_hints(
+            views_, make_index_sequence<sizeof...(Views)>{});
     }
 #endif
 };
 
-template<typename R1, typename R2>
-concat_view(R1&&, R2&&)
-    -> concat_view<owning_view<R1>, owning_view<R2>>;
-/* A concatenation is borrowed only when every stored view is borrowed. */
-template<typename V1, typename V2>
-inline constexpr bool enable_borrowed_range<concat_view<V1, V2>> =
-    borrowed_range<V1> && borrowed_range<V2>;
-#endif
+template<typename... R>
+concat_view(R&&...) -> concat_view<views::all_t<R>...>;
 
-/* ???????????????????????????????????????????????????????????????
- * split_view - delimiter value ????????
- * ???????????????????????????????????????????????????????????????*/
+template<typename... Views>
+inline constexpr bool enable_borrowed_range<concat_view<Views...>> =
+    (borrowed_range<Views> && ...);
+#endif
 
 template<typename V, typename T>
     requires forward_range<V>
@@ -8482,64 +8930,24 @@ constexpr auto operator|(R&& range, join_with_adaptor<D> adaptor) {
 
 #if __cplusplus > 202002L
 /* concat */
-template<typename R1, typename R2>
-concept concat_pair_viewable = viewable_range<R1> &&
-    viewable_range<R2> &&
-    common_reference_with<
-        range_reference_t<decltype(all(declval<R1>()))>,
-        range_reference_t<decltype(all(declval<R2>()))>>;
-
-template<typename... Rs>
-struct concat_pairwise_impl;
-
-template<>
-struct concat_pairwise_impl<> : true_type {};
-
-template<typename R>
-struct concat_pairwise_impl<R> : true_type {};
-
-template<typename R, typename... Rest>
-struct concat_pairwise_impl<R, Rest...>
-    : bool_constant<(concat_pair_viewable<R, Rest> && ...) &&
-                    concat_pairwise_impl<Rest...>::value> {};
-
 template<typename... Rs>
 concept concat_factory_viewable =
-    concat_pairwise_impl<Rs...>::value;
-
-template<typename V, typename R>
-constexpr auto concat_append(V base, R&& range) {
-    auto view = all(std::forward<R>(range));
-    return concat_view<V, decltype(view)>(
-        std::move(base), std::move(view));
-}
-
-template<typename V, typename R, typename... Rs>
-constexpr auto concat_append(V base, R&& range, Rs&&... rest) {
-    auto next = concat_append(std::move(base), std::forward<R>(range));
-    return concat_append(std::move(next), std::forward<Rs>(rest)...);
-}
+    (viewable_range<Rs> && ...) &&
+    (input_range<views::all_t<Rs>> && ...) &&
+    detail::concatable<views::all_t<Rs>...>;
 
 struct concat_fn {
-    template<typename R1, typename R2>
-        requires concat_factory_viewable<R1, R2>
-    constexpr auto operator()(R1&& first, R2&& second) const {
-        auto first_view = all(std::forward<R1>(first));
-        auto second_view = all(std::forward<R2>(second));
-        return concat_view<decltype(first_view), decltype(second_view)>(
-            std::move(first_view), std::move(second_view));
+    template<typename R>
+        requires viewable_range<R> && input_range<R>
+    constexpr auto operator()(R&& range) const {
+        return all(std::forward<R>(range));
     }
 
-    template<typename R1, typename R2, typename... Rs>
-        requires concat_factory_viewable<R1, R2, Rs...> &&
-                 (sizeof...(Rs) > 0)
-    constexpr auto operator()(R1&& first, R2&& second,
-                              Rs&&... rest) const {
-        auto first_view = all(std::forward<R1>(first));
-        auto second_view = all(std::forward<R2>(second));
-        auto base = concat_view<decltype(first_view), decltype(second_view)>(
-            std::move(first_view), std::move(second_view));
-        return concat_append(std::move(base), std::forward<Rs>(rest)...);
+    template<typename... Rs>
+        requires (sizeof...(Rs) > 1) && concat_factory_viewable<Rs...>
+    constexpr auto operator()(Rs&&... ranges) const {
+        return concat_view<views::all_t<Rs>...>(
+            all(std::forward<Rs>(ranges))...);
     }
 };
 inline constexpr concat_fn concat{};
