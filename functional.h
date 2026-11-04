@@ -2744,6 +2744,30 @@ template<typename T, typename Deleter>
 struct hash<unique_ptr<T, Deleter>>
     : detail::functional_unique_ptr_hash<unique_ptr<T, Deleter>> {};
 
+#if defined(__cpp_lib_indirect)
+namespace detail {
+
+template<typename Indirect, typename Value, typename = void>
+struct functional_indirect_hash : functional_hash_base<Indirect, false> {};
+
+template<typename Indirect, typename Value>
+struct functional_indirect_hash<Indirect, Value, void_t<decltype(
+    hash<Value>{}(declval<const Value&>()))>> {
+    size_t operator()(const Indirect& value) const
+        noexcept(noexcept(hash<Value>{}(*value))) {
+        return value.valueless_after_move()
+            ? size_t(0)
+            : hash<Value>{}(*value);
+    }
+};
+
+} // namespace detail
+
+template<typename T, typename Allocator>
+struct hash<indirect<T, Allocator>>
+    : detail::functional_indirect_hash<indirect<T, Allocator>, T> {};
+#endif
+
 /* shared_ptrのハッシュ（forward declaration） */
 template<typename T>
 class shared_ptr;

@@ -6,6 +6,7 @@
 #ifndef RINCXX_MEMORY_H
 #define RINCXX_MEMORY_H
 
+#include "composite_types_version.h"
 #include "rincxx.h"
 #include "cstddef.h"
 #include "cstdint.h"
@@ -2856,6 +2857,11 @@ pair<InputIt, ForwardIt> uninitialized_move_n(InputIt first, Size count, Forward
 } /* namespace std */
 
 #endif /* __cplusplus */
+#if defined(__cplusplus) && __cplusplus > 202002L && \
+    (__cplusplus > 202302L || \
+     defined(RIN_ENABLE_CXX26_COMPOSITE_VOCABULARY_TYPES))
+#include "composite_types.h"
+#endif
 #if !defined(RINCXX_STRING_H) && !defined(RINCXX_EXCEPTION_IN_PROGRESS)
 #include "exception.h"
 #endif
