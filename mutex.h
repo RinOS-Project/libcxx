@@ -9,7 +9,9 @@
 #include "rincxx.h"
 #include "__pthread.h"
 #include "system_error.h"
+#define RINCXX_MUTEX_CHRONO_BOOTSTRAP 1
 #include "chrono.h"
+#undef RINCXX_MUTEX_CHRONO_BOOTSTRAP
 #if defined(RIN_FREESTANDING)
 #include "../libc/sys/syscall.h"
 #include "../libc/linux/futex.h"

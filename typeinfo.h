@@ -8,7 +8,6 @@
 
 #include "rincxx.h"
 #include "cstddef.h"
-#include "exception.h"
 
 #ifdef __cplusplus
 
@@ -109,6 +108,11 @@ inline const type_info& rin_no_rtti_type_info() noexcept {
 /* bad_cast と bad_typeid は exception.h で定義済み */
 
 } /* namespace std */
+
+/* exception.h includes string/functional, whose declarations use type_info.
+ * Include it only after type_info and the no-RTTI descriptor helper are
+ * complete, so this header can also be the first C++ ABI include. */
+#include "exception.h"
 
 #endif /* __cplusplus */
 #endif /* RINCXX_TYPEINFO_H */
