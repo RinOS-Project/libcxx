@@ -3353,6 +3353,11 @@ inline wstring to_wstring(long double value) {
 #endif
 
 #if __cplusplus >= 201703L
+#if defined(RINCXX_EXCEPTION_IN_PROGRESS)
+/* <new> can enter this header through exception.h before string is complete.
+ * Defer the pmr dependency until exception.h has defined its base classes. */
+#define RINCXX_STRING_DEFER_PMR_ALIASES 1
+#else
 #include "memory_resource.h"
 namespace std { namespace pmr {
 template<class CharT, class Traits = std::char_traits<CharT>>
@@ -3366,6 +3371,7 @@ using u32string = basic_string<char32_t>;
 using u8string = basic_string<char8_t>;
 #endif
 } }
+#endif
 #endif
 
 #endif /* __cplusplus */
