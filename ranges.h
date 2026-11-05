@@ -6422,55 +6422,109 @@ struct adjacent_iterator_types<V, N, index_sequence<Indices...>> {
         true, range_reference_t<V>, integral_constant<size_t, Indices>>::type...>;
 };
 
+template<typename R>
+concept adjacent_simple_view = view<R> && range<const R> &&
+    same_as<iterator_t<R>, iterator_t<const R>> &&
+    same_as<sentinel_t<R>, sentinel_t<const R>>;
+
 template<typename V, size_t N>
-    requires forward_range<V>
+    requires view<V> && forward_range<V> && (N > 0)
 class adjacent_view : public view_interface<adjacent_view<V, N>> {
-    static_assert(N > 0, "views::adjacent requires a positive extent");
+    struct as_sentinel {};
 
-    using I = iterator_t<V>;
-    using S = sentinel_t<V>;
-
-    template<typename Base>
+    template<bool Const>
     struct sentinel;
 
-    template<typename Base>
-    struct iterator {
+    template<bool Const>
+    class iterator {
+        using Base = conditional_t<Const, const V, V>;
         using I = iterator_t<Base>;
         using S = sentinel_t<Base>;
         using iterator_types = adjacent_iterator_types<Base, N>;
+
+        I current_[N]{};
+
+        template<bool>
+        friend class iterator;
+        template<bool>
+        friend struct sentinel;
+        friend class adjacent_view;
+
+        template<size_t... Indices>
+        constexpr auto dereference(index_sequence<Indices...>) const {
+            return tuple<decltype(*current_[Indices])...>(
+                *current_[Indices]...);
+        }
+
+        template<size_t... Indices>
+        constexpr auto dereference_at(range_difference_t<Base> offset,
+                                      index_sequence<Indices...>) const {
+            return tuple<decltype(current_[Indices][offset])...>(
+                current_[Indices][offset]...);
+        }
+
+        template<size_t... Indices>
+        constexpr auto move_elements(index_sequence<Indices...>) const
+            noexcept(noexcept(ranges::iter_move(declval<const I&>())) &&
+                is_nothrow_move_constructible_v<
+                    range_rvalue_reference_t<Base>>) {
+            return tuple<decltype(ranges::iter_move(current_[Indices]))...>(
+                ranges::iter_move(current_[Indices])...);
+        }
+
+        template<size_t... Indices>
+        static constexpr void swap_elements(
+            const iterator& left, const iterator& right,
+            index_sequence<Indices...>)
+            noexcept(noexcept(ranges::iter_swap(
+                declval<const I&>(), declval<const I&>()))) {
+            (ranges::iter_swap(left.current_[Indices],
+                               right.current_[Indices]), ...);
+        }
+
+    public:
         using value_type = typename iterator_types::value_type;
         using difference_type = range_difference_t<Base>;
         using pointer = void;
         using reference = typename iterator_types::reference;
-        using iterator_category = forward_iterator_tag;
-        using iterator_concept = forward_iterator_tag;
-
-        I positions_[N]{};
-        bool empty_ = true;
-
-        template<size_t... Indices>
-        constexpr auto dereference(index_sequence<Indices...>) const {
-            return tuple<decltype(*positions_[Indices])...>(
-                *positions_[Indices]...);
-        }
+        using iterator_category = input_iterator_tag;
+        using iterator_concept = conditional_t<
+            random_access_range<Base>, random_access_iterator_tag,
+            conditional_t<bidirectional_range<Base>,
+                         bidirectional_iterator_tag, forward_iterator_tag>>;
 
         constexpr iterator() = default;
 
-        constexpr iterator(I first, S last) : positions_{}, empty_(false) {
-            for (size_t index = 0; index < N; ++index)
-                positions_[index] = first;
-            if (first == last) {
-                empty_ = true;
-                return;
-            }
+        constexpr iterator(I first, S last) : current_{} {
+            current_[0] = std::move(first);
             for (size_t index = 1; index < N; ++index) {
-                positions_[index] = positions_[index - 1];
-                ++positions_[index];
-                if (positions_[index] == last) {
-                    empty_ = true;
-                    return;
-                }
+                current_[index] = current_[index - 1];
+                if (current_[index - 1] != last)
+                    ++current_[index];
             }
+        }
+
+        constexpr iterator(as_sentinel, I first, I last) : current_{} {
+            if constexpr (bidirectional_range<Base>) {
+                current_[N - 1] = std::move(last);
+                for (size_t index = N - 1; index > 0; --index) {
+                    current_[index - 1] = current_[index];
+                    if (current_[index - 1] != first)
+                        --current_[index - 1];
+                }
+            } else {
+                for (auto& position : current_)
+                    position = last;
+            }
+        }
+
+        template<bool OtherConst>
+        constexpr iterator(iterator<OtherConst> other)
+            requires Const && (!OtherConst) &&
+                     convertible_to<iterator_t<V>, I>
+            : current_{} {
+            for (size_t index = 0; index < N; ++index)
+                current_[index] = std::move(other.current_[index]);
         }
 
         constexpr auto operator*() const {
@@ -6478,9 +6532,8 @@ class adjacent_view : public view_interface<adjacent_view<V, N>> {
         }
 
         constexpr iterator& operator++() {
-            for (size_t index = 0; index + 1 < N; ++index)
-                positions_[index] = positions_[index + 1];
-            ++positions_[N - 1];
+            for (auto& position : current_)
+                ++position;
             return *this;
         }
 
@@ -6490,45 +6543,165 @@ class adjacent_view : public view_interface<adjacent_view<V, N>> {
             return copy;
         }
 
+        constexpr iterator& operator--()
+            requires bidirectional_range<Base> {
+            for (auto& position : current_)
+                --position;
+            return *this;
+        }
+
+        constexpr iterator operator--(int)
+            requires bidirectional_range<Base> {
+            auto copy = *this;
+            --*this;
+            return copy;
+        }
+
+        constexpr iterator& operator+=(difference_type offset)
+            requires random_access_range<Base> {
+            for (auto& position : current_)
+                position += offset;
+            return *this;
+        }
+
+        constexpr iterator& operator-=(difference_type offset)
+            requires random_access_range<Base> {
+            for (auto& position : current_)
+                position -= offset;
+            return *this;
+        }
+
+        constexpr auto operator[](difference_type offset) const
+            requires random_access_range<Base> {
+            return dereference_at(offset, make_index_sequence<N>{});
+        }
+
         friend constexpr bool operator==(const iterator& left,
                                          const iterator& right) {
-            if (left.empty_ != right.empty_)
-                return false;
-            return left.empty_ || left.positions_[0] == right.positions_[0];
+            return left.current_[N - 1] == right.current_[N - 1];
         }
 
-        friend constexpr bool operator!=(const iterator& left,
-                                         const iterator& right) {
-            return !(left == right);
+        friend constexpr bool operator<(const iterator& left,
+                                        const iterator& right)
+            requires random_access_range<Base> {
+            return left.current_[N - 1] < right.current_[N - 1];
         }
 
-        friend constexpr bool operator==(const iterator& value,
-                                         const sentinel<Base>& bound) {
-            return value.empty_ || value.positions_[N - 1] == bound.end_;
+        friend constexpr bool operator>(const iterator& left,
+                                        const iterator& right)
+            requires random_access_range<Base> {
+            return right < left;
         }
 
-        friend constexpr bool operator==(const sentinel<Base>& bound,
-                                         const iterator& value) {
-            return value == bound;
+        friend constexpr bool operator<=(const iterator& left,
+                                         const iterator& right)
+            requires random_access_range<Base> {
+            return !(right < left);
         }
 
-        friend constexpr bool operator!=(const iterator& value,
-                                         const sentinel<Base>& bound) {
-            return !(value == bound);
+        friend constexpr bool operator>=(const iterator& left,
+                                         const iterator& right)
+            requires random_access_range<Base> {
+            return !(left < right);
         }
 
-        friend constexpr bool operator!=(const sentinel<Base>& bound,
-                                         const iterator& value) {
-            return !(value == bound);
+        friend constexpr auto operator<=>(const iterator& left,
+                                          const iterator& right)
+            requires random_access_range<Base> &&
+                     three_way_comparable<I> {
+            return left.current_[N - 1] <=> right.current_[N - 1];
+        }
+
+        friend constexpr iterator operator+(const iterator& value,
+                                            difference_type offset)
+            requires random_access_range<Base> {
+            auto result = value;
+            result += offset;
+            return result;
+        }
+
+        friend constexpr iterator operator+(difference_type offset,
+                                            const iterator& value)
+            requires random_access_range<Base> {
+            return value + offset;
+        }
+
+        friend constexpr iterator operator-(const iterator& value,
+                                            difference_type offset)
+            requires random_access_range<Base> {
+            auto result = value;
+            result -= offset;
+            return result;
+        }
+
+        friend constexpr difference_type operator-(const iterator& left,
+                                                   const iterator& right)
+            requires sized_sentinel_for<I, I> {
+            return left.current_[N - 1] - right.current_[N - 1];
+        }
+
+        friend constexpr auto iter_move(const iterator& value)
+            noexcept(noexcept(ranges::iter_move(declval<const I&>())) &&
+                     is_nothrow_move_constructible_v<
+                         range_rvalue_reference_t<Base>>) {
+            return value.move_elements(make_index_sequence<N>{});
+        }
+
+        friend constexpr void iter_swap(const iterator& left,
+                                        const iterator& right)
+            noexcept(noexcept(ranges::iter_swap(
+                declval<const I&>(), declval<const I&>())))
+            requires indirectly_swappable<I> {
+            swap_elements(left, right, make_index_sequence<N>{});
         }
     };
 
-    template<typename Base>
+    template<bool Const>
     struct sentinel {
+        using Base = conditional_t<Const, const V, V>;
         using S = sentinel_t<Base>;
-        S end_;
+        S end_{};
+
+        template<bool>
+        friend struct sentinel;
+
+    public:
         constexpr sentinel() = default;
-        constexpr explicit sentinel(S end) : end_(end) {}
+        constexpr explicit sentinel(S end) : end_(std::move(end)) {}
+
+        template<bool OtherConst>
+        constexpr sentinel(sentinel<OtherConst> other)
+            requires Const && (!OtherConst) &&
+                     convertible_to<sentinel_t<V>, S>
+            : end_(std::move(other.end_)) {}
+
+        template<bool OtherConst>
+            requires sentinel_for<
+                S, iterator_t<conditional_t<OtherConst, const V, V>>>
+        friend constexpr bool operator==(const iterator<OtherConst>& value,
+                                         const sentinel& bound) {
+            return value.current_[N - 1] == bound.end_;
+        }
+
+        template<bool OtherConst>
+            requires sized_sentinel_for<
+                S, iterator_t<conditional_t<OtherConst, const V, V>>>
+        friend constexpr range_difference_t<conditional_t<
+            OtherConst, const V, V>>
+        operator-(const iterator<OtherConst>& value,
+                  const sentinel& bound) {
+            return value.current_[N - 1] - bound.end_;
+        }
+
+        template<bool OtherConst>
+            requires sized_sentinel_for<
+                S, iterator_t<conditional_t<OtherConst, const V, V>>>
+        friend constexpr range_difference_t<conditional_t<
+            OtherConst, const V, V>>
+        operator-(const sentinel& bound,
+                  const iterator<OtherConst>& value) {
+            return bound.end_ - value.current_[N - 1];
+        }
     };
 
     V base_;
@@ -6542,23 +6715,32 @@ public:
     }
     constexpr V base() && { return std::move(base_); }
 
-    constexpr auto begin() {
-        return iterator<V>(ranges::begin(base_), ranges::end(base_));
+    constexpr auto begin() requires (!adjacent_simple_view<V>) {
+        return iterator<false>(ranges::begin(base_), ranges::end(base_));
     }
 
-    constexpr auto end() {
-        return sentinel<V>(ranges::end(base_));
+    constexpr auto end() requires (!adjacent_simple_view<V>) {
+        if constexpr (common_range<V>)
+            return iterator<false>(as_sentinel{}, ranges::begin(base_),
+                                   ranges::end(base_));
+        else
+            return sentinel<false>(ranges::end(base_));
     }
 
     constexpr auto begin() const
         requires forward_range<const V> {
-        return iterator<const V>(ranges::begin(std::as_const(base_)),
-                                 ranges::end(std::as_const(base_)));
+        return iterator<true>(ranges::begin(std::as_const(base_)),
+                              ranges::end(std::as_const(base_)));
     }
 
     constexpr auto end() const
         requires forward_range<const V> {
-        return sentinel<const V>(ranges::end(std::as_const(base_)));
+        if constexpr (common_range<const V>)
+            return iterator<true>(as_sentinel{},
+                                  ranges::begin(std::as_const(base_)),
+                                  ranges::end(std::as_const(base_)));
+        else
+            return sentinel<true>(ranges::end(std::as_const(base_)));
     }
 
     constexpr auto size() requires sized_range<V> {
@@ -9600,62 +9782,204 @@ template<typename V, typename F>
              adjacent_transform_invocable<F, range_reference_t<V>>
 class adjacent_transform_view
     : public view_interface<adjacent_transform_view<V, F>> {
-    template<typename Base>
-    struct sentinel;
-
-    template<typename Base, typename Function>
-    struct iterator {
+    template<bool Const>
+    class iterator {
+        using Base = conditional_t<Const, const V, V>;
+        using Function = conditional_t<Const, const F, F>;
         using I = iterator_t<Base>;
-        using S = sentinel_t<Base>;
-        I current_;
-        Function* function_;
-        using iterator_category = forward_iterator_tag;
-        using iterator_concept = forward_iterator_tag;
+
+        I current_{};
+        Function* function_ = nullptr;
+
+        template<bool>
+        friend class iterator;
+        template<bool>
+        friend struct sentinel;
+
+        template<typename Current>
+        static constexpr decltype(auto) invoke(Function& function,
+                                               Current&& current) {
+            return std::apply(function, std::forward<Current>(current));
+        }
+
+    public:
+        using iterator_concept = conditional_t<
+            random_access_range<Base>, random_access_iterator_tag,
+            conditional_t<bidirectional_range<Base>,
+                         bidirectional_iterator_tag, forward_iterator_tag>>;
         using difference_type = range_difference_t<Base>;
         using pointer = void;
-        using reference = decltype(std::apply(
+        using reference = decltype(invoke(
             std::declval<Function&>(), *std::declval<I&>()));
         using value_type = remove_cvref_t<reference>;
+        using base_iterator_category = typename iterator_traits<I>::iterator_category;
+        using iterator_category = conditional_t<
+            is_reference<reference>::value,
+            conditional_t<derived_from<base_iterator_category,
+                                       random_access_iterator_tag>,
+                         random_access_iterator_tag,
+                         conditional_t<derived_from<base_iterator_category,
+                                                    bidirectional_iterator_tag>,
+                                       bidirectional_iterator_tag,
+                                       conditional_t<derived_from<
+                                                        base_iterator_category,
+                                                        forward_iterator_tag>,
+                                                    forward_iterator_tag,
+                                                    input_iterator_tag>>>,
+            input_iterator_tag>;
 
         constexpr iterator() = default;
         constexpr iterator(I current, Function* function)
-            : current_(current), function_(function) {}
+            : current_(std::move(current)), function_(function) {}
+
+        constexpr iterator(iterator<false> other)
+            requires Const && convertible_to<iterator_t<V>, I>
+            : current_(std::move(other.current_)),
+              function_(other.function_) {}
+
         constexpr decltype(auto) operator*() const {
-            return std::apply(*function_, *current_);
+            return invoke(*function_, *current_);
         }
-        constexpr iterator& operator++() { ++current_; return *this; }
-        constexpr iterator operator++(int) { auto copy = *this; ++*this; return copy; }
-        friend constexpr bool operator==(const iterator& value,
-                                         const iterator& other) {
-            return value.current_ == other.current_;
+
+        constexpr iterator& operator++() {
+            ++current_;
+            return *this;
         }
-        friend constexpr bool operator!=(const iterator& value,
-                                         const iterator& other) {
-            return !(value == other);
+        constexpr iterator operator++(int) {
+            auto copy = *this;
+            ++*this;
+            return copy;
         }
-        friend constexpr bool operator==(const iterator& value,
-                                         const sentinel<Base>& bound) {
-            return value.current_ == bound.end_;
+
+        constexpr iterator& operator--()
+            requires bidirectional_range<Base> {
+            --current_;
+            return *this;
         }
-        friend constexpr bool operator==(const sentinel<Base>& bound,
-                                         const iterator& value) {
-            return value == bound;
+        constexpr iterator operator--(int)
+            requires bidirectional_range<Base> {
+            auto copy = *this;
+            --*this;
+            return copy;
         }
-        friend constexpr bool operator!=(const iterator& value,
-                                         const sentinel<Base>& bound) {
-            return !(value == bound);
+
+        constexpr iterator& operator+=(difference_type offset)
+            requires random_access_range<Base> {
+            current_ += offset;
+            return *this;
         }
-        friend constexpr bool operator!=(const sentinel<Base>& bound,
-                                         const iterator& value) {
-            return !(value == bound);
+        constexpr iterator& operator-=(difference_type offset)
+            requires random_access_range<Base> {
+            current_ -= offset;
+            return *this;
+        }
+        constexpr decltype(auto) operator[](difference_type offset) const
+            requires random_access_range<Base> {
+            return invoke(*function_, current_[offset]);
+        }
+
+        friend constexpr bool operator==(const iterator& left,
+                                         const iterator& right) {
+            return left.current_ == right.current_;
+        }
+        friend constexpr bool operator<(const iterator& left,
+                                        const iterator& right)
+            requires random_access_range<Base> {
+            return left.current_ < right.current_;
+        }
+        friend constexpr bool operator>(const iterator& left,
+                                        const iterator& right)
+            requires random_access_range<Base> {
+            return right < left;
+        }
+        friend constexpr bool operator<=(const iterator& left,
+                                         const iterator& right)
+            requires random_access_range<Base> {
+            return !(right < left);
+        }
+        friend constexpr bool operator>=(const iterator& left,
+                                         const iterator& right)
+            requires random_access_range<Base> {
+            return !(left < right);
+        }
+        friend constexpr auto operator<=>(const iterator& left,
+                                          const iterator& right)
+            requires random_access_range<Base> &&
+                     three_way_comparable<I> {
+            return left.current_ <=> right.current_;
+        }
+        friend constexpr iterator operator+(const iterator& value,
+                                            difference_type offset)
+            requires random_access_range<Base> {
+            auto result = value;
+            result += offset;
+            return result;
+        }
+        friend constexpr iterator operator+(difference_type offset,
+                                            const iterator& value)
+            requires random_access_range<Base> {
+            return value + offset;
+        }
+        friend constexpr iterator operator-(const iterator& value,
+                                            difference_type offset)
+            requires random_access_range<Base> {
+            auto result = value;
+            result -= offset;
+            return result;
+        }
+        friend constexpr difference_type operator-(const iterator& left,
+                                                   const iterator& right)
+            requires sized_sentinel_for<I, I> {
+            return left.current_ - right.current_;
         }
     };
 
-    template<typename Base>
+    template<bool Const>
     struct sentinel {
+        using Base = conditional_t<Const, const V, V>;
         using S = sentinel_t<Base>;
-        S end_;
-        constexpr explicit sentinel(S end) : end_(end) {}
+        S end_{};
+
+        template<bool>
+        friend struct sentinel;
+
+    public:
+        constexpr sentinel() = default;
+        constexpr explicit sentinel(S end) : end_(std::move(end)) {}
+
+        template<bool OtherConst>
+        constexpr sentinel(sentinel<OtherConst> other)
+            requires Const && (!OtherConst) &&
+                     convertible_to<sentinel_t<V>, S>
+            : end_(std::move(other.end_)) {}
+
+        template<bool OtherConst>
+            requires sentinel_for<
+                S, iterator_t<conditional_t<OtherConst, const V, V>>>
+        friend constexpr bool operator==(const iterator<OtherConst>& value,
+                                         const sentinel& bound) {
+            return value.current_ == bound.end_;
+        }
+
+        template<bool OtherConst>
+            requires sized_sentinel_for<
+                S, iterator_t<conditional_t<OtherConst, const V, V>>>
+        friend constexpr range_difference_t<conditional_t<
+            OtherConst, const V, V>>
+        operator-(const iterator<OtherConst>& value,
+                  const sentinel& bound) {
+            return value.current_ - bound.end_;
+        }
+
+        template<bool OtherConst>
+            requires sized_sentinel_for<
+                S, iterator_t<conditional_t<OtherConst, const V, V>>>
+        friend constexpr range_difference_t<conditional_t<
+            OtherConst, const V, V>>
+        operator-(const sentinel& bound,
+                  const iterator<OtherConst>& value) {
+            return bound.end_ - value.current_;
+        }
     };
 
     V base_;
@@ -9674,28 +9998,34 @@ public:
     }
 
     constexpr auto begin() {
-        return iterator<V, F>{ranges::begin(base_), &function_};
+        return iterator<false>{ranges::begin(base_), &function_};
     }
     constexpr auto end() {
-        return sentinel<V>{ranges::end(base_)};
+        if constexpr (common_range<V>)
+            return iterator<false>{ranges::end(base_), &function_};
+        else
+            return sentinel<false>{ranges::end(base_)};
     }
 
     constexpr auto begin() const
         requires range<const V> &&
                  adjacent_transform_invocable<
                      const F, range_reference_t<const V>> {
-        return iterator<const V, const F>{
+        return iterator<true>{
             ranges::begin(std::as_const(base_)), &function_};
     }
     constexpr auto end() const
         requires range<const V> &&
                  adjacent_transform_invocable<
                      const F, range_reference_t<const V>> {
-        return sentinel<const V>{ranges::end(std::as_const(base_))};
+        if constexpr (common_range<const V>)
+            return iterator<true>{ranges::end(std::as_const(base_)),
+                                  &function_};
+        else
+            return sentinel<true>{ranges::end(std::as_const(base_))};
     }
 
-    template<typename X = V>
-    constexpr auto size() -> decltype(std::declval<X&>().size()) {
+    constexpr auto size() requires sized_range<V> {
         return ranges::size(base_);
     }
 
