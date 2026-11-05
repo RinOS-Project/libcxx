@@ -348,6 +348,19 @@ public:
 private:
     string_type pathname_;
 
+    /* RinOS defines an initial `//` as a root-name when it is the whole path
+     * or is followed by a root-directory separator. */
+    static size_t root_name_length(const char* value,
+                                   size_t length) noexcept {
+        return length >= 2u && value[0] == '/' && value[1] == '/' &&
+                       (length == 2u || value[2] == '/')
+            ? 2u : 0u;
+    }
+
+    size_t root_name_length() const noexcept {
+        return root_name_length(pathname_.data(), pathname_.size());
+    }
+
     template<typename SourceCharT, typename Traits, typename Allocator>
     static string_type from_source(
         const basic_string<SourceCharT, Traits, Allocator>& source) {
@@ -376,10 +389,17 @@ private:
     static void split_raw_components(const string_type& value,
                                      vector<string_type>& components,
                                      bool& absolute,
+                                     bool& double_slash_root_name,
+                                     bool& has_root_directory,
                                      bool& trailing_separator) {
-        absolute = !value.empty() && value[0] == '/';
+        double_slash_root_name =
+            root_name_length(value.data(), value.size()) != 0u;
+        has_root_directory = double_slash_root_name
+            ? value.size() > 2u && value[2] == '/'
+            : !value.empty() && value[0] == '/';
+        absolute = double_slash_root_name || has_root_directory;
         trailing_separator = !value.empty() && value.back() == '/';
-        size_t cursor = absolute ? 1u : 0u;
+        size_t cursor = double_slash_root_name ? 2u : 0u;
         while (cursor < value.size()) {
             while (cursor < value.size() && value[cursor] == '/') ++cursor;
             if (cursor == value.size()) break;
@@ -391,15 +411,21 @@ private:
     }
 
     static path compose_components(bool absolute,
+                                   bool double_slash_root_name,
+                                   bool has_root_directory,
                                    const vector<string_type>& components,
                                    bool trailing_separator) {
         string_type result;
-        if (absolute) result.push_back('/');
+        if (double_slash_root_name) result = "//";
+        if (has_root_directory) result.push_back('/');
         for (size_t index = 0; index < components.size(); ++index) {
             if (!result.empty() && result.back() != '/') result.push_back('/');
             result += components[index];
         }
-        if (result.empty()) return path(absolute ? "/" : ".");
+        if (result.empty()) {
+            if (double_slash_root_name) return path("//");
+            return path(absolute ? "/" : ".");
+        }
         if (trailing_separator && result.back() != '/') result.push_back('/');
         return path(result);
     }
@@ -425,12 +451,27 @@ private:
 
     static int compare_pathnames(const char* left, size_t left_length,
                                  const char* right, size_t right_length) noexcept {
-        const bool left_absolute = left_length != 0u && left[0] == '/';
-        const bool right_absolute = right_length != 0u && right[0] == '/';
-        if (left_absolute != right_absolute) return left_absolute ? 1 : -1;
+        const size_t left_root_name = root_name_length(left, left_length);
+        const size_t right_root_name = root_name_length(right, right_length);
+        if (left_root_name != right_root_name)
+            return left_root_name < right_root_name ? -1 : 1;
 
-        size_t left_position = left_absolute ? 1u : 0u;
-        size_t right_position = right_absolute ? 1u : 0u;
+        const bool left_root_directory = left_root_name != 0u
+            ? left_length > left_root_name && left[left_root_name] == '/'
+            : left_length != 0u && left[0] == '/';
+        const bool right_root_directory = right_root_name != 0u
+            ? right_length > right_root_name && right[right_root_name] == '/'
+            : right_length != 0u && right[0] == '/';
+        if (left_root_directory != right_root_directory)
+            return left_root_directory ? 1 : -1;
+
+        size_t left_position = left_root_name;
+        size_t right_position = right_root_name;
+        while (left_position < left_length && left[left_position] == '/')
+            ++left_position;
+        while (right_position < right_length &&
+               right[right_position] == '/')
+            ++right_position;
         bool left_trailing_empty = left_length != 0u &&
             left[left_length - 1u] == '/' &&
             left_length > left_position;
@@ -581,15 +622,22 @@ public:
 
     /* append (/) */
     path& operator/=(const path& p) {
-        /* POSIX has no root-name component.  An RHS with a root directory
-         * therefore replaces the complete LHS; blindly concatenating it
-         * would turn `/base` / `/child` into the non-standard `/base/child`.
-         */
-        if (p.has_root_directory()) {
+        if (p.has_root_name()) {
             pathname_ = p.pathname_;
             return *this;
         }
-        if (!pathname_.empty() && pathname_.back() != '/')
+        if (p.has_root_directory()) {
+            if (has_root_name()) {
+                const string_type root_prefix = root_name().pathname_;
+                pathname_ = root_prefix + p.pathname_;
+            } else {
+                pathname_ = p.pathname_;
+            }
+            return *this;
+        }
+        if (!p.empty() && has_root_name() && !has_root_directory())
+            pathname_ += '/';
+        else if (!pathname_.empty() && pathname_.back() != '/')
             pathname_ += '/';
         pathname_ += p.pathname_;
         return *this;
@@ -810,11 +858,17 @@ public:
 
     /* decomposition */
     path root_name() const {
-        /* Unix: 空 */
-        return path();
+        const size_t length = root_name_length();
+        return length != 0u ? path(pathname_.substr(0u, length)) : path();
     }
 
     path root_directory() const {
+        const size_t root_name = root_name_length();
+        if (root_name != 0u) {
+            if (pathname_.size() > root_name &&
+                pathname_[root_name] == '/') return path("/");
+            return path();
+        }
         if (!pathname_.empty() && pathname_[0] == '/') {
             return path("/");
         }
@@ -822,20 +876,30 @@ public:
     }
 
     path root_path() const {
-        return root_name() / root_directory();
+        const path name = root_name();
+        return name.empty() ? root_directory() : name / root_directory();
     }
 
     path relative_path() const {
-        if (!pathname_.empty() && pathname_[0] == '/') {
-            return path(pathname_.substr(1));
-        }
-        return *this;
+        size_t cursor = root_name_length();
+        while (cursor < pathname_.size() && pathname_[cursor] == '/')
+            ++cursor;
+        return cursor == pathname_.size()
+            ? path() : path(pathname_.substr(cursor));
     }
 
     path parent_path() const {
+        const size_t root_name = root_name_length();
+        size_t root_end = root_name;
+        while (root_end < pathname_.size() && pathname_[root_end] == '/')
+            ++root_end;
+        if (root_end == pathname_.size()) return *this;
         size_t pos = pathname_.rfind('/');
         if (pos == string_type::npos) return path();
-        if (pos == 0) return path("/");
+        if (pos < root_end) {
+            return root_name != 0u
+                ? path(pathname_.substr(0u, root_end)) : path("/");
+        }
         return path(pathname_.substr(0, pos));
     }
 
@@ -864,8 +928,12 @@ public:
 
         vector<string_type> raw;
         bool absolute = false;
+        bool double_slash_root_name = false;
+        bool has_root_directory = false;
         bool trailing_separator = false;
-        split_raw_components(pathname_, raw, absolute, trailing_separator);
+        split_raw_components(pathname_, raw, absolute,
+                             double_slash_root_name, has_root_directory,
+                             trailing_separator);
 
         vector<string_type> normalized;
         for (size_t index = 0; index < raw.size(); ++index) {
@@ -889,7 +957,9 @@ public:
             normalized.push_back(component);
             trailing_separator = false;
         }
-        return compose_components(absolute, normalized, trailing_separator);
+        return compose_components(absolute, double_slash_root_name,
+                                 has_root_directory, normalized,
+                                 trailing_separator);
     }
 
     path lexically_relative(const path& base) const {
@@ -954,7 +1024,9 @@ public:
     bool has_stem() const { return !stem().empty(); }
     bool has_extension() const { return !extension().empty(); }
 
-    bool is_absolute() const { return has_root_directory(); }
+    bool is_absolute() const {
+        return has_root_name() || has_root_directory();
+    }
     bool is_relative() const { return !is_absolute(); }
 
     /* replace */
@@ -983,12 +1055,9 @@ public:
         return *this;
     }
 
-    /* Iterators follow the POSIX decomposition rules used by the standard
-     * path iterator: the first root separator is its own component, while
-     * subsequent separators are delimiters (including repeated/trailing
-     * separators).  Positions are canonical component starts, so copies of
-     * iterators from different path objects never compare equal merely because
-     * their offsets happen to match. */
+    /* The first component is the implementation-defined `//` root-name when
+     * present; otherwise the first root separator is its own component.
+     * Later separators are delimiters, including repeated and trailing ones. */
     class iterator {
         friend class path;
         const path* p_;
@@ -1005,6 +1074,8 @@ public:
 
         static size_t first_component(const path* value, size_t position,
                                       size_t limit) noexcept {
+            if (position == 0 && value->root_name_length() != 0u)
+                return 0u;
             if (position == 0 && limit != 0 &&
                 value->pathname_[0] == '/') {
                 return 0; /* root-directory component */
@@ -1030,6 +1101,11 @@ public:
 
         path operator*() const {
             if (!p_ || pos_ >= end_) return path();
+            const size_t root_name = p_->root_name_length();
+            if (pos_ == 0u && root_name != 0u)
+                return path(p_->pathname_.substr(0u, root_name));
+            if (root_name != 0u && pos_ == root_name &&
+                p_->pathname_[pos_] == '/') return path("/");
             if (pos_ == 0 && p_->pathname_[0] == '/') return path("/");
             size_t next = p_->pathname_.find('/', pos_);
             if (next == string_type::npos) next = end_;
@@ -1043,6 +1119,13 @@ public:
                 return *this;
             }
             if (pos_ >= end_) return *this;
+            const size_t root_name = p_->root_name_length();
+            if (pos_ == 0u && root_name != 0u) {
+                pos_ = root_name < end_ &&
+                       p_->pathname_[root_name] == '/'
+                    ? root_name : end_;
+                return *this;
+            }
             size_t next = p_->pathname_.find('/', pos_);
             if (next == string_type::npos) {
                 pos_ = end_;
@@ -1070,30 +1153,30 @@ public:
                 return *this;
             }
 
-            /* --end() starts at the last non-separator component. */
-            size_t cursor = pos_ >= end_ ? end_ : pos_;
-            while (cursor > 0 && p_->pathname_[cursor - 1] == '/') {
-                --cursor;
-            }
-            if (cursor == 0) {
-                /* A path made only of separators consists of root only. */
-                pos_ = p_->pathname_.empty() ? end_ : 0;
+            /* Find the component immediately before the current start, while
+             * keeping a root-name or root-directory indivisible. */
+            const size_t root_name = p_->root_name_length();
+            if (root_name != 0u && pos_ == root_name) {
+                pos_ = 0u;
                 return *this;
             }
-
-            const size_t previous_separator =
-                p_->pathname_.rfind('/', cursor - 1);
-            if (previous_separator == string_type::npos) {
-                pos_ = 0;
-            } else if (previous_separator == 0) {
-                /* A root separator is itself a component only when there is
-                 * no component between it and the current position. */
-                pos_ = cursor == 1
-                    ? 0
-                    : skip_separators(p_, 1, cursor);
-            } else {
-                pos_ = skip_separators(p_, previous_separator + 1, cursor);
+            size_t cursor = pos_ >= end_ ? end_ : pos_;
+            while (cursor > 0u && p_->pathname_[cursor - 1u] == '/')
+                --cursor;
+            while (cursor > 0u && p_->pathname_[cursor - 1u] != '/')
+                --cursor;
+            if (root_name != 0u && cursor < root_name) {
+                pos_ = root_name < end_ &&
+                       p_->pathname_[root_name] == '/'
+                    ? root_name : 0u;
+                return *this;
             }
+            if (root_name == 0u && !p_->pathname_.empty() &&
+                p_->pathname_[0] == '/' && cursor == 0u) {
+                pos_ = 0u;
+                return *this;
+            }
+            pos_ = cursor;
             return *this;
         }
 
@@ -5350,8 +5433,8 @@ inline bool canonical_resolve_existing(const path& input, path& output,
     if (ec) return false;
     ::std::string pending = absolute_input.native();
     bool require_directory = !pending.empty() && pending.back() == '/';
-    path resolved("/");
-    size_t cursor = 1u;
+    path resolved = absolute_input.root_path();
+    size_t cursor = absolute_input.root_path().native().size();
     unsigned int symlink_count = 0u;
 
     while (cursor < pending.size()) {
@@ -5441,7 +5524,7 @@ inline bool canonical_resolve_existing(const path& input, path& output,
             } else if (target.back() == '/') {
                 require_directory = true;
             }
-            if (target[0] == '/') resolved = path("/");
+            if (target[0] == '/') resolved = path(target).root_path();
             pending.swap(next_pending);
             cursor = 0u;
             continue;
