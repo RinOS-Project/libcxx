@@ -8748,7 +8748,9 @@ public:
     constexpr stride_view() requires default_initializable<V> = default;
 
     constexpr explicit stride_view(V base, difference_type step)
-        : base_(std::move(base)), step_(step), empty_(step <= 0) {}
+        : base_(std::move(base)), step_(step) {
+        if (step <= 0) rin_panic("stride must be positive");
+    }
 
     constexpr V base() const& requires copy_constructible<V> { return base_; }
     constexpr V base() && { return std::move(base_); }
