@@ -9118,6 +9118,22 @@ struct iota_fn {
 };
 inline constexpr iota_fn iota{};
 
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_INDICES)
+struct indices_fn {
+    template<typename E>
+        requires detail::iota_integer_like<remove_cvref_t<E>> &&
+                 requires(E&& bound) {
+                     iota(remove_cvref_t<E>(0),
+                          std::forward<E>(bound));
+                 }
+    constexpr auto operator()(E&& bound) const {
+        using value_type = remove_cvref_t<E>;
+        return iota(value_type(0), std::forward<E>(bound));
+    }
+};
+inline constexpr indices_fn indices{};
+#endif
+
 /* all - ????????? */
 template<typename R>
     requires all_viewable<R>
