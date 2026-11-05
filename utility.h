@@ -13,6 +13,9 @@
 #if __cplusplus >= 202002L
 #include "compare.h"
 #endif
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_FUNCTION_WRAPPERS)
+#include "invoke.h"
+#endif
 
 #ifdef __cplusplus
 
@@ -501,17 +504,227 @@ inline constexpr in_place_index_t<I> in_place_index{};
 #endif
 
 #if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_FUNCTION_WRAPPERS)
-/* Minimal C++26 constant_wrapper surface used by function_ref's constant
- * callable constructors.  It does not advertise the complete utility feature. */
 template<auto X, class T = decltype(X)>
-struct constant_wrapper {
+struct constant_wrapper;
+
+namespace detail {
+
+template<class T>
+concept __constant_wrapper_parameter = requires {
+    typename constant_wrapper<T::value>;
+};
+
+template<auto Value, class... Args>
+inline constexpr bool __constant_wrapper_call_is_constant = [] {
+    if constexpr ((__constant_wrapper_parameter<remove_cvref_t<Args>> && ...)) {
+        return requires {
+            typename constant_wrapper<std::invoke(
+                Value, remove_cvref_t<Args>::value...)>;
+        };
+    } else {
+        return false;
+    }
+}();
+
+template<auto Value, class... Args>
+concept __constant_wrapper_callable =
+    __constant_wrapper_call_is_constant<Value, Args...> || requires {
+        std::invoke(Value, declval<Args>()...);
+    };
+
+template<auto Value, class... Args>
+consteval bool __constant_wrapper_call_noexcept() {
+    if constexpr (__constant_wrapper_call_is_constant<Value, Args...>) {
+        return true;
+    } else if constexpr (requires { std::invoke(Value, declval<Args>()...); }) {
+        return noexcept(std::invoke(Value, declval<Args>()...));
+    } else {
+        return false;
+    }
+}
+
+template<auto Value, class... Args>
+inline constexpr bool __constant_wrapper_subscript_is_constant = [] {
+    if constexpr (sizeof...(Args) != 0 &&
+                  (__constant_wrapper_parameter<remove_cvref_t<Args>> && ...)) {
+        return requires {
+            typename constant_wrapper<
+                (Value[remove_cvref_t<Args>::value...])>;
+        };
+    } else {
+        return false;
+    }
+}();
+
+template<auto Value, class... Args>
+concept __constant_wrapper_subscriptable =
+    __constant_wrapper_subscript_is_constant<Value, Args...> ||
+    (sizeof...(Args) != 0 && requires {
+        Value[declval<Args>()...];
+    });
+
+template<auto Value, class... Args>
+consteval bool __constant_wrapper_subscript_noexcept() {
+    if constexpr (__constant_wrapper_subscript_is_constant<Value, Args...>) {
+        return true;
+    } else if constexpr (sizeof...(Args) != 0 && requires {
+                             Value[declval<Args>()...];
+                         }) {
+        return noexcept(Value[declval<Args>()...]);
+    } else {
+        return false;
+    }
+}
+
+} // namespace detail
+
+/* These hidden friends participate through constant_wrapper's base class and
+ * only accept arguments whose static value is itself a valid NTTP. */
+struct __constant_wrapper_operators {
+#define __RIN_CW_UNARY(OP)                                                   \
+    template<detail::__constant_wrapper_parameter T>                        \
+    friend constexpr auto operator OP(T) noexcept                           \
+        -> constant_wrapper<(OP T::value)> { return {}; }
+
+    __RIN_CW_UNARY(+)
+    __RIN_CW_UNARY(-)
+    __RIN_CW_UNARY(~)
+    __RIN_CW_UNARY(!)
+    __RIN_CW_UNARY(&)
+    __RIN_CW_UNARY(*)
+#undef __RIN_CW_UNARY
+
+#define __RIN_CW_BINARY(OP)                                                  \
+    template<detail::__constant_wrapper_parameter L,                        \
+             detail::__constant_wrapper_parameter R>                        \
+    friend constexpr auto operator OP(L, R) noexcept                        \
+        -> constant_wrapper<(L::value OP R::value)> { return {}; }
+
+    __RIN_CW_BINARY(+)
+    __RIN_CW_BINARY(-)
+    __RIN_CW_BINARY(*)
+    __RIN_CW_BINARY(/)
+    __RIN_CW_BINARY(%)
+    __RIN_CW_BINARY(<<)
+    __RIN_CW_BINARY(>>)
+    __RIN_CW_BINARY(&)
+    __RIN_CW_BINARY(|)
+    __RIN_CW_BINARY(^)
+#undef __RIN_CW_BINARY
+
+    template<detail::__constant_wrapper_parameter L,
+             detail::__constant_wrapper_parameter R>
+        requires (!is_constructible_v<bool, decltype(L::value)> ||
+                  !is_constructible_v<bool, decltype(R::value)>)
+    friend constexpr auto operator&&(L, R) noexcept
+        -> constant_wrapper<(L::value && R::value)> { return {}; }
+
+    template<detail::__constant_wrapper_parameter L,
+             detail::__constant_wrapper_parameter R>
+        requires (!is_constructible_v<bool, decltype(L::value)> ||
+                  !is_constructible_v<bool, decltype(R::value)>)
+    friend constexpr auto operator||(L, R) noexcept
+        -> constant_wrapper<(L::value || R::value)> { return {}; }
+
+#define __RIN_CW_COMPARE(OP)                                                 \
+    template<detail::__constant_wrapper_parameter L,                        \
+             detail::__constant_wrapper_parameter R>                        \
+    friend constexpr auto operator OP(L, R) noexcept                        \
+        -> constant_wrapper<(L::value OP R::value)> { return {}; }
+
+    __RIN_CW_COMPARE(<=>)
+    __RIN_CW_COMPARE(<)
+    __RIN_CW_COMPARE(<=)
+    __RIN_CW_COMPARE(==)
+    __RIN_CW_COMPARE(!=)
+    __RIN_CW_COMPARE(>)
+    __RIN_CW_COMPARE(>=)
+#undef __RIN_CW_COMPARE
+
+    template<detail::__constant_wrapper_parameter L,
+             detail::__constant_wrapper_parameter R>
+    friend constexpr auto operator,(L, R) noexcept = delete;
+
+    template<detail::__constant_wrapper_parameter L,
+             detail::__constant_wrapper_parameter R>
+    friend constexpr auto operator->*(L, R) noexcept
+        -> constant_wrapper<(L::value ->* R::value)> { return {}; }
+};
+
+template<auto X, class T>
+struct constant_wrapper : __constant_wrapper_operators {
     static_assert(is_same<T, decltype(X)>::value,
                   "constant_wrapper's value type is fixed by its argument");
     static constexpr decltype(auto) value = (X);
     using type = constant_wrapper;
     using value_type = decltype(X);
 
+    template<detail::__constant_wrapper_parameter R>
+    constexpr auto operator=(R) const noexcept
+        -> constant_wrapper<(value = R::value)> { return {}; }
+
     constexpr operator decltype(value)() const noexcept { return value; }
+
+    template<class Self = constant_wrapper>
+        requires is_same<Self, constant_wrapper>::value
+    constexpr auto operator++() const noexcept
+        -> constant_wrapper<(++Self::value)> { return {}; }
+    template<class Self = constant_wrapper>
+        requires is_same<Self, constant_wrapper>::value
+    constexpr auto operator++(int) const noexcept
+        -> constant_wrapper<(Self::value++)> { return {}; }
+    template<class Self = constant_wrapper>
+        requires is_same<Self, constant_wrapper>::value
+    constexpr auto operator--() const noexcept
+        -> constant_wrapper<(--Self::value)> { return {}; }
+    template<class Self = constant_wrapper>
+        requires is_same<Self, constant_wrapper>::value
+    constexpr auto operator--(int) const noexcept
+        -> constant_wrapper<(Self::value--)> { return {}; }
+
+#define __RIN_CW_COMPOUND(OP)                                                \
+    template<detail::__constant_wrapper_parameter R>                        \
+    constexpr auto operator OP(R) const noexcept                            \
+        -> constant_wrapper<(value OP R::value)> { return {}; }
+
+    __RIN_CW_COMPOUND(+=)
+    __RIN_CW_COMPOUND(-=)
+    __RIN_CW_COMPOUND(*=)
+    __RIN_CW_COMPOUND(/=)
+    __RIN_CW_COMPOUND(%=)
+    __RIN_CW_COMPOUND(&=)
+    __RIN_CW_COMPOUND(|=)
+    __RIN_CW_COMPOUND(^=)
+    __RIN_CW_COMPOUND(<<=)
+    __RIN_CW_COMPOUND(>>=)
+#undef __RIN_CW_COMPOUND
+
+    template<class... Args>
+        requires detail::__constant_wrapper_callable<value, Args...>
+    static constexpr decltype(auto) operator()(Args&&... args)
+        noexcept(detail::__constant_wrapper_call_noexcept<value, Args...>()) {
+        if constexpr (detail::__constant_wrapper_call_is_constant<value,
+                                                                  Args...>) {
+            return constant_wrapper<std::invoke(
+                value, remove_cvref_t<Args>::value...)>{};
+        } else {
+            return std::invoke(value, std::forward<Args>(args)...);
+        }
+    }
+
+    template<class... Args>
+        requires detail::__constant_wrapper_subscriptable<value, Args...>
+    static constexpr decltype(auto) operator[](Args&&... args)
+        noexcept(detail::__constant_wrapper_subscript_noexcept<value,
+                                                               Args...>()) {
+        if constexpr (detail::__constant_wrapper_subscript_is_constant<
+                          value, Args...>) {
+            return constant_wrapper<
+                (value[remove_cvref_t<Args>::value...])>{};
+        } else {
+            return value[std::forward<Args>(args)...];
+        }
+    }
 };
 
 template<auto X>
