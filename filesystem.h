@@ -2120,45 +2120,11 @@ class directory_iterator {
         return false;
     }
 
-    /* A directory provider may expose only a name and d_type.  When the
-     * provider can stat the joined path, publish the complete cached metadata
-     * in the directory_entry; otherwise retain a trustworthy d_type-only
-     * classification instead of turning a valid entry into not_found. */
+    /* Cache only type information supplied by readdir.  Size, link count and
+     * timestamps are fetched by directory_entry observers when requested, so
+     * cursor advancement does not issue one stat call per name. */
     static void publish_entry_metadata(directory_entry& entry,
                                         unsigned char directory_type) noexcept {
-        detail::stat_record stat = {};
-        /* The hosted providers commonly fill the ABI record through a
-         * compatibility struct behind the void* callback.  Read through a
-         * volatile view so strict-aliasing/whole-program optimization cannot
-         * retain the zero-initialized snapshot and silently discard metadata
-         * that the provider just published. */
-        volatile detail::stat_record* stat_view = &stat;
-        const int result = rin_stat(entry.path_.c_str(), &stat);
-        if (result == 0 && stat_view->st_size >= 0) {
-            const unsigned int mode = stat_view->st_mode & 0170000u;
-            file_type type = file_type::unknown;
-            if (mode == 0040000u) type = file_type::directory;
-            else if (mode == 0100000u) type = file_type::regular;
-            else if (mode == 0120000u) type = file_type::symlink;
-            else if (mode == 0060000u) type = file_type::block;
-            else if (mode == 0020000u) type = file_type::character;
-            else if (mode == 0010000u) type = file_type::fifo;
-            else if (mode == 0140000u) type = file_type::socket;
-            entry.status_ = file_status(type,
-                                        static_cast<perms>(stat_view->st_mode & 0777u));
-            entry.file_size_ = static_cast<uintmax_t>(stat_view->st_size);
-            entry.hard_link_count_ = static_cast<uintmax_t>(stat_view->st_nlink);
-            entry.last_write_time_ = file_time_type(
-                ::std::chrono::duration_cast<file_time_type::duration>(
-                    ::std::chrono::seconds(stat_view->st_mtime)));
-            entry.status_valid_ = true;
-            entry.metadata_valid_ = true;
-            return;
-        }
-
-        /* POSIX d_type values are stable in the Rin directory ABI.  They can
-         * cache a known non-symlink status, but a symlink's status() must
-         * follow its target, so retain that type only for symlink_status(). */
         file_type type = file_type::none;
         if (directory_type == 4u) type = file_type::directory;
         else if (directory_type == 8u) type = file_type::regular;
@@ -2171,8 +2137,11 @@ class directory_iterator {
             entry.symlink_status_ = file_status(type);
             entry.symlink_status_valid_ = true;
         } else if (type != file_type::none) {
-            entry.status_ = file_status(type);
+            const file_status cached(type);
+            entry.status_ = cached;
             entry.status_valid_ = true;
+            entry.symlink_status_ = cached;
+            entry.symlink_status_valid_ = true;
         }
     }
 
@@ -2226,10 +2195,8 @@ class directory_iterator {
                 finish_locked(current, ec);
                 return;
             }
-            /* directory iteration publishes the discovered path without
-             * requiring a second stat for providers that already report a
-             * d_type, while opportunistically caching full metadata when a
-             * stat callback is available. */
+            /* Publish the path and any type supplied by readdir.  Metadata
+             * remains lazy until an observer needs it. */
             current->entry.path_ = entry_path;
             current->entry.status_ = file_status();
             current->entry.status_valid_ = false;
