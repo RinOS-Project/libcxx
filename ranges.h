@@ -5119,6 +5119,139 @@ as_const_view(R&&) -> as_const_view<views::all_t<R>>;
 template<typename V>
 inline constexpr bool enable_borrowed_range<as_const_view<V>> =
     borrowed_range<V>;
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_AS_INPUT)
+template<typename R>
+concept as_input_simple_view =
+    view<R> && range<const R> &&
+    same_as<iterator_t<R>, iterator_t<const R>> &&
+    same_as<sentinel_t<R>, sentinel_t<const R>>;
+
+template<bool Const, typename R>
+using as_input_maybe_const_t = conditional_t<Const, const R, R>;
+
+template<typename V>
+    requires view<V> && input_range<V>
+class as_input_view : public view_interface<as_input_view<V>> {
+    V base_{};
+
+public:
+    template<bool Const>
+    class iterator {
+        using Base = as_input_maybe_const_t<Const, V>;
+        iterator_t<Base> current_;
+
+        friend class as_input_view;
+        template<bool>
+        friend class iterator;
+
+        constexpr explicit iterator(iterator_t<Base> current)
+            : current_(std::move(current)) {}
+
+    public:
+        using difference_type = range_difference_t<Base>;
+        using value_type = range_value_t<Base>;
+        using iterator_concept = input_iterator_tag;
+
+        constexpr iterator()
+            requires default_initializable<iterator_t<Base>> = default;
+        iterator(iterator&&) = default;
+        iterator& operator=(iterator&&) = default;
+
+        constexpr iterator(iterator<!Const> other)
+            requires Const &&
+                     convertible_to<iterator_t<V>, iterator_t<Base>>
+            : current_(std::move(other.current_)) {}
+
+        constexpr iterator_t<Base> base() && {
+            return std::move(current_);
+        }
+        constexpr const iterator_t<Base>& base() const& noexcept {
+            return current_;
+        }
+
+        constexpr decltype(auto) operator*() const { return *current_; }
+
+        constexpr iterator& operator++() {
+            ++current_;
+            return *this;
+        }
+        constexpr void operator++(int) { ++*this; }
+
+        friend constexpr bool operator==(const iterator& current,
+                                         const sentinel_t<Base>& end) {
+            return current.current_ == end;
+        }
+
+        friend constexpr difference_type operator-(
+            const sentinel_t<Base>& end, const iterator& current)
+            requires sized_sentinel_for<sentinel_t<Base>, iterator_t<Base>> {
+            return end - current.current_;
+        }
+
+        friend constexpr difference_type operator-(
+            const iterator& current, const sentinel_t<Base>& end)
+            requires sized_sentinel_for<sentinel_t<Base>, iterator_t<Base>> {
+            return current.current_ - end;
+        }
+
+        friend constexpr range_rvalue_reference_t<Base> iter_move(
+            const iterator& current)
+            noexcept(noexcept(ranges::iter_move(current.current_))) {
+            return ranges::iter_move(current.current_);
+        }
+
+        friend constexpr void iter_swap(const iterator& left,
+                                        const iterator& right)
+            noexcept(noexcept(ranges::iter_swap(left.current_,
+                                                right.current_)))
+            requires indirectly_swappable<iterator_t<Base>> {
+            ranges::iter_swap(left.current_, right.current_);
+        }
+    };
+
+    constexpr as_input_view()
+        requires default_initializable<V> = default;
+    constexpr explicit as_input_view(V base) : base_(std::move(base)) {}
+
+    constexpr V base() const& requires copy_constructible<V> {
+        return base_;
+    }
+    constexpr V base() && { return std::move(base_); }
+
+    constexpr auto begin()
+        requires (!as_input_simple_view<V>) {
+        return iterator<false>(ranges::begin(base_));
+    }
+    constexpr auto begin() const requires range<const V> {
+        return iterator<true>(ranges::begin(base_));
+    }
+
+    constexpr auto end()
+        requires (!as_input_simple_view<V>) {
+        return ranges::end(base_);
+    }
+    constexpr auto end() const requires range<const V> {
+        return ranges::end(base_);
+    }
+
+    constexpr auto size() requires sized_range<V> {
+        return ranges::size(base_);
+    }
+    constexpr auto size() const requires sized_range<const V> {
+        return ranges::size(std::as_const(base_));
+    }
+
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_RESERVE_HINT)
+    constexpr auto reserve_hint() requires approximately_sized_range<V> {
+        return ranges::reserve_hint(base_);
+    }
+    constexpr auto reserve_hint() const
+        requires approximately_sized_range<const V> {
+        return ranges::reserve_hint(std::as_const(base_));
+    }
+#endif
+};
+#endif
 
 /* ???????????????????????????????????????????????????????????????
  * zip_view - ???????????????
@@ -9515,11 +9648,11 @@ public:
         : base_(std::move(base)), function_(std::move(function)) {}
 
     constexpr auto base() const& requires copy_constructible<V> {
-        return base_.base();
+        return base_;
     }
 
     constexpr auto base() && {
-        return std::move(base_).base();
+        return std::move(base_);
     }
 
     constexpr auto begin() {
@@ -9608,6 +9741,29 @@ template<typename R, size_t N, typename F>
 constexpr auto operator|(
     R&& range, adjacent_transform_adaptor<N, F> adaptor) {
     return adaptor(std::forward<R>(range));
+}
+#endif
+
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_AS_INPUT)
+struct as_input_fn {
+    template<typename R>
+        requires viewable_range<R> && input_range<R>
+    constexpr auto operator()(R&& range) const {
+        auto base = all(std::forward<R>(range));
+        if constexpr (!forward_range<decltype(base)> &&
+                      !common_range<decltype(base)>) {
+            return std::move(base);
+        } else {
+            return as_input_view<decltype(base)>(std::move(base));
+        }
+    }
+};
+inline constexpr as_input_fn as_input{};
+
+template<typename R>
+    requires viewable_range<R> && input_range<R>
+constexpr auto operator|(R&& range, as_input_fn) {
+    return as_input(std::forward<R>(range));
 }
 #endif
 
@@ -10281,6 +10437,11 @@ cartesian_product_view(First&&, Vs&&...)
 
 template<typename R>
 enumerate_view(R&&) -> enumerate_view<views::all_t<R>>;
+
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_AS_INPUT)
+template<typename R>
+as_input_view(R&&) -> as_input_view<views::all_t<R>>;
+#endif
 
 #if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_CACHE_LATEST)
 template<typename R>
