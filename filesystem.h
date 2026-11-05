@@ -1630,6 +1630,44 @@ public:
     void permissions(perms prms) noexcept { permissions_ = prms; }
 };
 
+namespace detail {
+
+inline file_type file_type_from_mode(unsigned int mode) noexcept {
+    switch (mode & 0170000u) {
+        case 0040000u: return file_type::directory;
+        case 0100000u: return file_type::regular;
+        case 0120000u: return file_type::symlink;
+        case 0060000u: return file_type::block;
+        case 0020000u: return file_type::character;
+        case 0010000u: return file_type::fifo;
+        case 0140000u: return file_type::socket;
+        default: return file_type::unknown;
+    }
+}
+
+inline file_status query_path_status(const path& p, stat_record& metadata,
+                                     error_code& ec) noexcept {
+    ec.clear();
+    metadata = {};
+    if (rin_stat(p.c_str(), &metadata) != 0) {
+        const errc failure = filesystem_error_from_errno();
+        const file_type type =
+            failure == errc::no_such_file_or_directory ||
+                    failure == errc::not_a_directory
+                ? file_type::not_found : file_type::none;
+        ec = make_error_code(failure);
+        return file_status(type);
+    }
+    if (metadata.st_size < 0) {
+        ec = make_error_code(errc::io_error);
+        return file_status(file_type::none);
+    }
+    return file_status(file_type_from_mode(metadata.st_mode),
+                       static_cast<perms>(metadata.st_mode & 0777u));
+}
+
+} /* namespace detail */
+
 /* ═══════════════════════════════════════════════════════════════
  * directory_entry
  * ═══════════════════════════════════════════════════════════════*/
@@ -1668,12 +1706,7 @@ public:
         refresh();
     }
 
-    /* Internal consumers that already expose an error_code can avoid the
-     * throwing constructor's discarded refresh error and publish one stat
-     * result atomically.  This is intentionally an overload rather than a
-     * second public status cache so all metadata still flows through
-     * refresh(error_code&). */
-    directory_entry(const path_type& p, error_code& ec) noexcept
+    directory_entry(const path_type& p, error_code& ec)
         : path_(p), status_(), status_valid_(false), metadata_valid_(false),
           symlink_status_(),
           symlink_status_valid_(false),
@@ -1713,53 +1746,21 @@ public:
         /* stat を呼んで情報を更新する。失敗時は stale cache を
          * 公開せず、解決不能なら not_found、それ以外は none に閉じる。 */
         detail::stat_record st = {};
-
-        const int stat_result = rin_stat(path_.c_str(), &st);
-        volatile detail::stat_record* stat_view = &st;
-        const long measured_size = stat_view->st_size;
-        if (stat_result == 0 && measured_size >= 0) {
-            /* ファイルタイプを判定 */
-            const unsigned int mode = stat_view->st_mode;
-            if ((mode & 0170000) == 0040000) {
-                status_.type(file_type::directory);
-            } else if ((mode & 0170000) == 0100000) {
-                status_.type(file_type::regular);
-            } else if ((mode & 0170000) == 0120000) {
-                status_.type(file_type::symlink);
-            } else if ((mode & 0170000) == 0060000) {
-                status_.type(file_type::block);
-            } else if ((mode & 0170000) == 0020000) {
-                status_.type(file_type::character);
-            } else if ((mode & 0170000) == 0010000) {
-                status_.type(file_type::fifo);
-            } else if ((mode & 0170000) == 0140000) {
-                status_.type(file_type::socket);
-            } else {
-                status_.type(file_type::unknown);
-            }
-            status_.permissions(static_cast<perms>(mode & 0777));
-            file_size_ = static_cast<uintmax_t>(measured_size);
-            hard_link_count_ = static_cast<uintmax_t>(stat_view->st_nlink);
-            last_write_time_ = file_time_type(::std::chrono::duration_cast<file_time_type::duration>(::std::chrono::seconds(stat_view->st_mtime)));
-            status_valid_ = true;
-            metadata_valid_ = true;
-        } else {
-            errc failure = errc::io_error;
-            file_type failure_type = file_type::none;
-            if (stat_result != 0) {
-                failure = detail::filesystem_error_from_errno();
-                if (failure == errc::no_such_file_or_directory ||
-                    failure == errc::not_a_directory) {
-                    failure_type = file_type::not_found;
-                }
-            }
-            status_.type(failure_type);
-            status_.permissions(perms::unknown);
+        status_ = detail::query_path_status(path_, st, ec);
+        if (ec) {
             file_size_ = 0;
             hard_link_count_ = 0;
             last_write_time_ = file_time_type::min();
-            ec = make_error_code(failure);
+            return;
         }
+        volatile detail::stat_record* stat_view = &st;
+        file_size_ = static_cast<uintmax_t>(stat_view->st_size);
+        hard_link_count_ = static_cast<uintmax_t>(stat_view->st_nlink);
+        last_write_time_ = file_time_type(::std::chrono::duration_cast<
+            file_time_type::duration>(::std::chrono::seconds(
+                stat_view->st_mtime)));
+        status_valid_ = true;
+        metadata_valid_ = true;
     }
 
     void refresh() {
@@ -3018,8 +3019,9 @@ inline bool is_directory(const directory_entry& entry) {
 }
 
 inline bool is_directory(const path& p, error_code& ec) noexcept {
-    directory_entry de(p, ec);
-    return !ec && de.is_directory();
+    detail::stat_record metadata = {};
+    const file_status value = detail::query_path_status(p, metadata, ec);
+    return !ec && value.type() == file_type::directory;
 }
 
 inline bool is_directory(const path& p) {
@@ -3144,8 +3146,9 @@ inline bool is_symlink(const path& p) {
 }
 
 inline bool is_block_file(const path& p, error_code& ec) noexcept {
-    directory_entry de(p, ec);
-    return !ec && de.is_block_file();
+    detail::stat_record metadata = {};
+    const file_status value = detail::query_path_status(p, metadata, ec);
+    return !ec && value.type() == file_type::block;
 }
 
 inline bool is_block_file(const path& p) {
@@ -3153,8 +3156,9 @@ inline bool is_block_file(const path& p) {
 }
 
 inline bool is_character_file(const path& p, error_code& ec) noexcept {
-    directory_entry de(p, ec);
-    return !ec && de.is_character_file();
+    detail::stat_record metadata = {};
+    const file_status value = detail::query_path_status(p, metadata, ec);
+    return !ec && value.type() == file_type::character;
 }
 
 inline bool is_character_file(const path& p) {
@@ -3162,8 +3166,9 @@ inline bool is_character_file(const path& p) {
 }
 
 inline bool is_fifo(const path& p, error_code& ec) noexcept {
-    directory_entry de(p, ec);
-    return !ec && de.is_fifo();
+    detail::stat_record metadata = {};
+    const file_status value = detail::query_path_status(p, metadata, ec);
+    return !ec && value.type() == file_type::fifo;
 }
 
 inline bool is_fifo(const path& p) {
@@ -3171,8 +3176,9 @@ inline bool is_fifo(const path& p) {
 }
 
 inline bool is_socket(const path& p, error_code& ec) noexcept {
-    directory_entry de(p, ec);
-    return !ec && de.is_socket();
+    detail::stat_record metadata = {};
+    const file_status value = detail::query_path_status(p, metadata, ec);
+    return !ec && value.type() == file_type::socket;
 }
 
 inline bool is_socket(const path& p) {
@@ -3180,8 +3186,11 @@ inline bool is_socket(const path& p) {
 }
 
 inline bool is_other(const path& p, error_code& ec) noexcept {
-    directory_entry de(p, ec);
-    return !ec && de.is_other();
+    detail::stat_record metadata = {};
+    const file_type type = detail::query_path_status(p, metadata, ec).type();
+    return !ec && type != file_type::not_found && type != file_type::none &&
+           type != file_type::unknown && type != file_type::regular &&
+           type != file_type::directory && type != file_type::symlink;
 }
 
 inline bool is_other(const path& p) {
@@ -3189,8 +3198,9 @@ inline bool is_other(const path& p) {
 }
 
 inline bool is_regular_file(const path& p, error_code& ec) noexcept {
-    directory_entry de(p, ec);
-    return !ec && de.is_regular_file();
+    detail::stat_record metadata = {};
+    const file_status value = detail::query_path_status(p, metadata, ec);
+    return !ec && value.type() == file_type::regular;
 }
 
 inline bool is_regular_file(const path& p) {
@@ -3200,9 +3210,11 @@ inline bool is_regular_file(const path& p) {
 /* file_size */
 /* last_write_time */
 inline file_time_type last_write_time(const path& p, error_code& ec) noexcept {
-    directory_entry de(p, ec);
+    detail::stat_record metadata = {};
+    detail::query_path_status(p, metadata, ec);
     if (ec) return file_time_type::min();
-    return de.last_write_time(ec);
+    return file_time_type(::std::chrono::duration_cast<
+        file_time_type::duration>(::std::chrono::seconds(metadata.st_mtime)));
 }
 
 inline file_time_type last_write_time(const path& p) {
@@ -3240,9 +3252,10 @@ inline void last_write_time(const path& p, file_time_type value) {
 
 /* hard_link_count */
 inline uintmax_t hard_link_count(const path& p, error_code& ec) noexcept {
-    directory_entry de(p, ec);
+    detail::stat_record metadata = {};
+    detail::query_path_status(p, metadata, ec);
     if (ec) return static_cast<uintmax_t>(-1);
-    return de.hard_link_count(ec);
+    return static_cast<uintmax_t>(metadata.st_nlink);
 }
 
 inline uintmax_t hard_link_count(const path& p) {
@@ -3254,9 +3267,15 @@ inline uintmax_t hard_link_count(const path& p) {
 
 /* file_size */
 inline uintmax_t file_size(const path& p, error_code& ec) noexcept {
-    directory_entry de(p, ec);
+    detail::stat_record metadata = {};
+    const file_status value = detail::query_path_status(p, metadata, ec);
     if (ec) return static_cast<uintmax_t>(-1);
-    return de.file_size(ec);
+    if (value.type() != file_type::regular) {
+        ec = make_error_code(value.type() == file_type::directory
+                                 ? errc::is_a_directory : errc::io_error);
+        return static_cast<uintmax_t>(-1);
+    }
+    return static_cast<uintmax_t>(metadata.st_size);
 }
 
 inline uintmax_t file_size(const path& p) {
@@ -3267,13 +3286,13 @@ inline uintmax_t file_size(const path& p) {
 }
 
 inline bool is_empty(const path& p, error_code& ec) noexcept {
-    ec.clear();
-    directory_entry entry(p, ec);
+    detail::stat_record metadata = {};
+    const file_status value = detail::query_path_status(p, metadata, ec);
     if (ec) return false;
-    if (entry.is_regular_file()) {
-        return entry.file_size(ec) == 0u && !ec;
+    if (value.type() == file_type::regular) {
+        return metadata.st_size == 0;
     }
-    if (!entry.is_directory()) {
+    if (value.type() != file_type::directory) {
         ec = make_error_code(errc::io_error);
         return false;
     }
@@ -3428,9 +3447,11 @@ inline void permissions(const path& p, perms mode, perm_options options,
     unsigned int target = static_cast<unsigned>(mode) & 0777u;
     if ((option_bits & static_cast<unsigned>(perm_options::add |
                                              perm_options::remove)) != 0u) {
-        directory_entry de(p, ec);
+        detail::stat_record metadata = {};
+        const file_status value =
+            detail::query_path_status(p, metadata, ec);
         if (ec) return;
-        target = static_cast<unsigned>(de.status().permissions()) & 0777u;
+        target = static_cast<unsigned>(value.permissions()) & 0777u;
         if (option_bits & static_cast<unsigned>(perm_options::add)) {
             target |= static_cast<unsigned>(mode) & 0777u;
         } else {
@@ -5352,16 +5373,8 @@ inline void current_path(const path& p) {
 
 /* status */
 inline file_status status(const path& p, error_code& ec) noexcept {
-    ec.clear();
-    directory_entry de(p, ec);
-    if (ec) {
-        const file_type type =
-            ec == make_error_code(errc::no_such_file_or_directory) ||
-            ec == make_error_code(errc::not_a_directory)
-                ? file_type::not_found : file_type::none;
-        return file_status(type);
-    }
-    return de.status(ec);
+    detail::stat_record metadata = {};
+    return detail::query_path_status(p, metadata, ec);
 }
 
 inline file_status status(const path& p) {
