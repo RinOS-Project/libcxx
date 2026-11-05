@@ -2310,11 +2310,156 @@ public:
     constexpr T& value() noexcept { return *value_; }
     constexpr const T& value() const noexcept { return *value_; }
 
+    constexpr void reset() noexcept { value_.reset(); }
+
     template<typename... Args>
     constexpr T& emplace(Args&&... args) {
         return value_.emplace(std::forward<Args>(args)...);
     }
 };
+
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_CACHE_LATEST)
+template<input_range V>
+    requires view<V>
+class cache_latest_view : public view_interface<cache_latest_view<V>> {
+    using cache_type = conditional_t<
+        is_reference_v<range_reference_t<V>>,
+        add_pointer_t<range_reference_t<V>>,
+        range_reference_t<V>>;
+
+    V base_{};
+    non_propagating_cache<cache_type> cache_;
+
+public:
+    class sentinel;
+
+    class iterator {
+        cache_latest_view* parent_ = nullptr;
+        iterator_t<V> current_;
+
+        friend class cache_latest_view;
+        friend class sentinel;
+
+        constexpr explicit iterator(cache_latest_view& parent)
+            : parent_(std::addressof(parent)),
+              current_(ranges::begin(parent.base_)) {}
+
+    public:
+        using difference_type = range_difference_t<V>;
+        using value_type = range_value_t<V>;
+        using iterator_concept = input_iterator_tag;
+
+        iterator(iterator&&) = default;
+        iterator& operator=(iterator&&) = default;
+
+        constexpr iterator_t<V> base() && {
+            return std::move(current_);
+        }
+        constexpr const iterator_t<V>& base() const& noexcept {
+            return current_;
+        }
+
+        constexpr range_reference_t<V>& operator*() const {
+            if constexpr (is_reference_v<range_reference_t<V>>) {
+                if (!parent_->cache_.has_value()) {
+                    auto& element = static_cast<
+                        remove_reference_t<range_reference_t<V>>&>(*current_);
+                    parent_->cache_.emplace(std::addressof(element));
+                }
+                return *parent_->cache_.value();
+            } else {
+                if (!parent_->cache_.has_value()) {
+                    parent_->cache_.emplace(*current_);
+                }
+                return parent_->cache_.value();
+            }
+        }
+
+        constexpr iterator& operator++() {
+            parent_->cache_.reset();
+            ++current_;
+            return *this;
+        }
+
+        constexpr void operator++(int) { ++*this; }
+
+        friend constexpr range_rvalue_reference_t<V> iter_move(
+            const iterator& value)
+            noexcept(noexcept(ranges::iter_move(value.current_))) {
+            return ranges::iter_move(value.current_);
+        }
+
+        friend constexpr void iter_swap(const iterator& left,
+                                        const iterator& right)
+            noexcept(noexcept(ranges::iter_swap(left.current_,
+                                                right.current_)))
+            requires indirectly_swappable<iterator_t<V>> {
+            ranges::iter_swap(left.current_, right.current_);
+        }
+    };
+
+    class sentinel {
+        sentinel_t<V> end_{};
+
+        friend class cache_latest_view;
+        constexpr explicit sentinel(cache_latest_view& parent)
+            : end_(ranges::end(parent.base_)) {}
+
+    public:
+        sentinel() = default;
+
+        constexpr sentinel_t<V> base() const { return end_; }
+
+        friend constexpr bool operator==(const iterator& current,
+                                         const sentinel& end) {
+            return current.base() == end.end_;
+        }
+
+        friend constexpr range_difference_t<V> operator-(
+            const iterator& current, const sentinel& end)
+            requires sized_sentinel_for<sentinel_t<V>, iterator_t<V>> {
+            return current.base() - end.end_;
+        }
+
+        friend constexpr range_difference_t<V> operator-(
+            const sentinel& end, const iterator& current)
+            requires sized_sentinel_for<sentinel_t<V>, iterator_t<V>> {
+            return end.end_ - current.base();
+        }
+    };
+
+    constexpr cache_latest_view()
+        requires default_initializable<V> = default;
+
+    constexpr explicit cache_latest_view(V base)
+        : base_(std::move(base)) {}
+
+    constexpr V base() const& requires copy_constructible<V> {
+        return base_;
+    }
+    constexpr V base() && { return std::move(base_); }
+
+    constexpr auto begin() { return iterator(*this); }
+    constexpr auto end() { return sentinel(*this); }
+
+    constexpr auto size() requires sized_range<V> {
+        return ranges::size(base_);
+    }
+    constexpr auto size() const requires sized_range<const V> {
+        return ranges::size(std::as_const(base_));
+    }
+
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_RESERVE_HINT)
+    constexpr auto reserve_hint() requires approximately_sized_range<V> {
+        return ranges::reserve_hint(base_);
+    }
+    constexpr auto reserve_hint() const
+        requires approximately_sized_range<const V> {
+        return ranges::reserve_hint(std::as_const(base_));
+    }
+#endif
+};
+#endif
 
 namespace detail {
 template<typename Base, bool Enabled>
@@ -9466,6 +9611,24 @@ constexpr auto operator|(
 }
 #endif
 
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_CACHE_LATEST)
+struct cache_latest_fn {
+    template<typename R>
+        requires viewable_range<R> && input_range<R>
+    constexpr auto operator()(R&& range) const {
+        auto base = all(std::forward<R>(range));
+        return cache_latest_view<decltype(base)>(std::move(base));
+    }
+};
+inline constexpr cache_latest_fn cache_latest{};
+
+template<typename R>
+    requires viewable_range<R> && input_range<R>
+constexpr auto operator|(R&& range, cache_latest_fn) {
+    return cache_latest(std::forward<R>(range));
+}
+#endif
+
 #if __cplusplus > 202002L
 struct as_rvalue_fn {
     template<typename R>
@@ -10118,6 +10281,11 @@ cartesian_product_view(First&&, Vs&&...)
 
 template<typename R>
 enumerate_view(R&&) -> enumerate_view<views::all_t<R>>;
+
+#if __cplusplus > 202302L || defined(RIN_ENABLE_CXX26_RANGES_CACHE_LATEST)
+template<typename R>
+cache_latest_view(R&&) -> cache_latest_view<views::all_t<R>>;
+#endif
 
 #if __cplusplus > 202002L
 template<typename R>
